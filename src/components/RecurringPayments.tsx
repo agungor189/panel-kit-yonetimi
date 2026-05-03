@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
-import { 
-  Plus, 
-  Trash2, 
+import {
+  Plus,
+  Trash2,
   Calendar as CalendarIcon,
   ChevronLeft,
   ChevronRight,
@@ -17,19 +17,21 @@ import { useCurrency } from '../CurrencyContext';
 import { RecurringPaymentPlan, RecurringPaymentOccurrence, Settings } from '../types';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { useAuth } from '../App';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
 export default function RecurringPayments({ settings }: { settings: Settings | null }) {
+  const { isReadOnly } = useAuth();
   const { FormatAmount } = useCurrency();
   const [plans, setPlans] = useState<RecurringPaymentPlan[]>([]);
   const [occurrences, setOccurrences] = useState<RecurringPaymentOccurrence[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [loading, setLoading] = useState(false);
   const [viewDate, setViewDate] = useState(new Date());
-  
+
   // State for Add Plan
   const [formData, setFormData] = useState<Partial<RecurringPaymentPlan>>({
     title: '',
@@ -69,11 +71,12 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
 
   const handleCreatePlan = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isReadOnly) return;
     setLoading(true);
     try {
       await api.post('/recurring-payments', formData);
       setShowAdd(false);
-      
+
       // Reset form
       setFormData({
         title: '',
@@ -102,6 +105,7 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
   };
 
   const processDuePayments = async () => {
+    if (isReadOnly) return;
     setLoading(true);
     try {
       const res = await api.post('/recurring-payments/process-due', {});
@@ -115,6 +119,7 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
   };
 
   const handleOccurrenceAction = async (id: string, action: 'process' | 'skip' | 'cancel') => {
+    if (isReadOnly) return;
     try {
       await api.post(`/recurring-payments/occurrences/${id}/${action}`, {});
       setSelectedOccurrence(null);
@@ -130,6 +135,7 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
   };
 
   const handleDeletePlan = async (id: string) => {
+    if (isReadOnly) return;
     if(!window.confirm("Bu planı ve gelecekteki tüm ödemeleri silmek istediğinize emin misiniz?")) return;
     try {
       await api.delete(`/recurring-payments/${id}`);
@@ -142,24 +148,24 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
   const monthInfo = useMemo(() => {
     const year = viewDate.getFullYear();
     const month = viewDate.getMonth();
-    const firstDayOfMonth = new Date(year, month, 1).getDay(); 
+    const firstDayOfMonth = new Date(year, month, 1).getDay();
     const startingBlankDays = firstDayOfMonth === 0 ? 6 : firstDayOfMonth - 1;
     const daysInMonth = new Date(year, month + 1, 0).getDate();
     const monthName = new Intl.DateTimeFormat('tr-TR', { month: 'long', year: 'numeric' }).format(viewDate);
-    
+
     const calendarDays = [];
-    
+
     for (let i = 0; i < startingBlankDays; i++) {
        calendarDays.push({ blank: true });
     }
-    
+
     const today = new Date();
     const todayStr = `${today.getFullYear()}-${(today.getMonth()+1).toString().padStart(2, '0')}-${today.getDate().toString().padStart(2, '0')}`;
 
     for (let i = 1; i <= daysInMonth; i++) {
        const dayStr = `${year}-${(month+1).toString().padStart(2, '0')}-${i.toString().padStart(2, '0')}`;
        const dayOccurrences = occurrences.filter(o => o.due_date === dayStr);
-       
+
        calendarDays.push({
           day: i,
           dateStr: dayStr,
@@ -183,11 +189,11 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
   const getStatusColorClass = (status: string, dateStr: string) => {
     if (status === 'processed') return 'bg-green-50 border-green-200 text-green-700';
     if (status === 'skipped' || status === 'cancelled') return 'bg-gray-50 border-gray-200 text-gray-500 line-through opacity-70';
-    
+
     const todayStr = new Date().toISOString().split('T')[0];
     if (dateStr < todayStr) return 'bg-red-50 border-red-200 text-red-700'; // overdue visually
     if (dateStr === todayStr) return 'bg-amber-50 border-amber-200 text-amber-700'; // due today
-    
+
     return 'bg-blue-50 border-blue-200 text-blue-700'; // upcoming
   };
 
@@ -198,23 +204,25 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
           <h2 className="text-xl lg:text-2xl font-bold text-text-main tracking-tight">Ödeme Takvimi</h2>
           <p className="text-xs lg:text-sm text-text-muted">Aylık finansal yükümlülüklerinizi (kira, elektrik, aidat, muhasebe vb.) takip edin ve yönetin.</p>
         </div>
-        <div className="flex items-center space-x-2 sm:space-x-3 w-full sm:w-auto">
-          <button 
-            disabled={loading}
-            onClick={processDuePayments}
-            className="flex-1 sm:flex-none flex items-center justify-center px-4 sm:px-5 py-2.5 bg-success text-white rounded-xl font-bold text-sm shadow-lg shadow-green-100 hover:scale-[1.02] transition-all disabled:opacity-50"
-          >
-            <PlayCircle className="w-4 h-4 mr-2" />
-            <span className="truncate">Otomatik İşle (Vadesi Gelenler)</span>
-          </button>
-          <button 
-            onClick={() => setShowAdd(true)}
-            className="flex-1 sm:flex-none flex items-center justify-center px-4 sm:px-5 py-2.5 bg-primary text-white rounded-xl font-bold text-sm shadow-lg shadow-blue-100 hover:scale-[1.02] transition-all"
-          >
-            <Plus className="w-4 h-4 mr-2" />
-            <span className="truncate">Plan Ekle</span>
-          </button>
-        </div>
+        {!isReadOnly && (
+          <div className="flex items-center space-x-2 sm:space-x-3 w-full sm:w-auto">
+            <button
+              disabled={loading}
+              onClick={processDuePayments}
+              className="flex-1 sm:flex-none flex items-center justify-center px-4 sm:px-5 py-2.5 bg-success text-white rounded-xl font-bold text-sm shadow-lg shadow-green-100 hover:scale-[1.02] transition-all disabled:opacity-50"
+            >
+              <PlayCircle className="w-4 h-4 mr-2" />
+              <span className="truncate">Otomatik İşle (Vadesi Gelenler)</span>
+            </button>
+            <button
+              onClick={() => setShowAdd(true)}
+              className="flex-1 sm:flex-none flex items-center justify-center px-4 sm:px-5 py-2.5 bg-primary text-white rounded-xl font-bold text-sm shadow-lg shadow-blue-100 hover:scale-[1.02] transition-all"
+            >
+              <Plus className="w-4 h-4 mr-2" />
+              <span className="truncate">Plan Ekle</span>
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
@@ -255,7 +263,7 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
               </button>
             </div>
           </div>
-          
+
           <div className="hidden md:flex items-center space-x-6 text-[10px] font-bold text-text-muted uppercase tracking-widest">
             <div className="flex items-center"><div className="w-2.5 h-2.5 rounded-full bg-green-500 mr-2" /> İşlendi</div>
             <div className="flex items-center"><div className="w-2.5 h-2.5 rounded-full bg-blue-500 mr-2" /> Yaklaşan</div>
@@ -273,8 +281,8 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
 
         <div className="flex-1 grid grid-cols-1 sm:grid-cols-7 auto-rows-fr bg-[#F1F5F9] gap-[1px]">
            {monthInfo.calendarDays.map((d, idx) => (
-             <div 
-               key={idx} 
+             <div
+               key={idx}
                className={cn(
                  "p-2 bg-white flex flex-col group min-h-[120px] transition-all relative overflow-hidden",
                  d.blank ? "bg-bg-main/30 hidden sm:flex" : "",
@@ -291,11 +299,11 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
                         {d.day}
                       </span>
                     </div>
-                    
+
                     <div className="flex-1 space-y-1.5 overflow-y-auto custom-scrollbar">
                        {d.occurrences?.map((occ: any, occIdx: number) => (
-                         <div 
-                           key={occ.id} 
+                         <div
+                           key={occ.id}
                            onClick={() => setSelectedOccurrence(occ)}
                            className={cn(
                              "px-2 py-1.5 rounded-md border text-[10px] font-bold flex flex-col transition-all shadow-sm cursor-pointer hover:shadow-md",
@@ -339,7 +347,7 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
               <div className="p-6">
                  <h3 className="text-lg font-black">{selectedOccurrence.plan_title}</h3>
                  <p className="text-xs text-text-muted">Vade: {new Date(selectedOccurrence.due_date).toLocaleDateString()}</p>
-                 
+
                  <div className="mt-4 p-4 rounded-xl bg-bg-main border border-border-color space-y-2">
                     <div className="flex justify-between text-sm">
                        <span className="text-text-muted">Tutar</span>
@@ -351,7 +359,7 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
                     </div>
                  </div>
 
-                 {selectedOccurrence.status !== 'processed' && selectedOccurrence.status !== 'cancelled' && (
+                 {!isReadOnly && selectedOccurrence.status !== 'processed' && selectedOccurrence.status !== 'cancelled' && (
                    <div className="mt-6 space-y-2">
                      <button onClick={() => handleOccurrenceAction(selectedOccurrence.id, 'process')} className="w-full btn-success py-3 text-sm">
                         Kasaya İşle (Gider Ekle)
@@ -408,7 +416,7 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
                       </div>
                    </td>
                    <td className="px-6 py-4 text-right">
-                     <button onClick={() => handleDeletePlan(p.id)} className="p-1 text-text-muted hover:text-red-500"><Trash2 className="w-4 h-4"/></button>
+                     {!isReadOnly && <button onClick={() => handleDeletePlan(p.id)} className="p-1 text-text-muted hover:text-red-500"><Trash2 className="w-4 h-4"/></button>}
                    </td>
                 </tr>
              ))}
@@ -419,7 +427,7 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
         </table>
       </div>
 
-      {showAdd && (
+      {!isReadOnly && showAdd && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
            <div className="absolute inset-0 bg-[#0F172A]/40 backdrop-blur-sm" onClick={() => setShowAdd(false)}></div>
            <div className="bg-white w-full max-w-xl rounded-[32px] shadow-2xl flex flex-col overflow-hidden relative animate-in zoom-in-95 duration-300 max-h-[90vh]">
@@ -460,7 +468,7 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
                           </select>
                        </div>
                     </div>
-                    
+
                     <div className="grid grid-cols-2 gap-4">
                        <div className="space-y-2">
                           <label className="text-xs font-bold text-text-main">Tutar</label>
@@ -473,7 +481,7 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
                             </select>
                           </div>
                        </div>
-                       
+
                        {['monthly', 'quarterly', 'semi_annually'].includes(formData.frequency || 'monthly') && (
                          <div className="space-y-2">
                             <label className="text-xs font-bold text-text-main">Ayın kaçında?</label>
@@ -528,7 +536,7 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
                          </div>
                        )}
                     </div>
-                    
+
                     <div className="grid grid-cols-2 gap-4">
                        <div className="space-y-2">
                           <label className="text-xs font-bold text-text-main">Başlangıç Tarihi</label>
@@ -555,7 +563,7 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
                     </div>
 
                  </div>
-                 
+
                  <button disabled={loading} className="w-full btn-primary py-4 mt-6 font-black text-lg">
                    {loading ? 'Kaydediliyor...' : 'Planı Oluştur'}
                  </button>

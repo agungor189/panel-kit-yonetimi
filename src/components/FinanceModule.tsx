@@ -5,8 +5,10 @@ import {
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { useCurrency } from '../CurrencyContext';
+import { useAuth } from '../App';
 
 export default function FinanceModule({ settings }: any) {
+  const { isReadOnly } = useAuth();
   const { FormatAmount, viewCurrency } = useCurrency();
   const [activeTab, setActiveTab] = useState('dashboard');
   
@@ -60,6 +62,7 @@ export default function FinanceModule({ settings }: any) {
 
   const handleCreateAccount = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isReadOnly) return;
     try {
       await api.post('/cash-accounts', accountForm);
       setShowAddAccount(false);
@@ -69,6 +72,7 @@ export default function FinanceModule({ settings }: any) {
 
   const handleTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isReadOnly) return;
     try {
       if (transferForm.is_capital) {
         // Since we don't have cash-deposit, we can use a clever trick:
@@ -93,6 +97,7 @@ export default function FinanceModule({ settings }: any) {
 
   const handleSaveExpense = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isReadOnly) return;
     try {
       await api.post('/expenses', expenseForm);
       setShowAddExpense(false);
@@ -120,14 +125,16 @@ export default function FinanceModule({ settings }: any) {
           <h2 className="text-2xl font-black text-gray-900 tracking-tight">Finans Merkezi</h2>
           <p className="text-sm text-gray-500 mt-1">Gelişmiş kasa, banka, kredi kartı ve gider yönetimi.</p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button onClick={() => setShowAddExpense(true)} className="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white text-sm font-bold rounded-xl flex items-center gap-2 shadow-lg shadow-rose-200">
-            <Receipt className="w-5 h-5" /> Gelişmiş Gider Ekle
-          </button>
-          <button onClick={() => setShowTransfer(true)} className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-xl flex items-center gap-2 shadow-lg shadow-blue-200">
-            <ArrowRightLeft className="w-5 h-5" /> Transfer / Ödeme
-          </button>
-        </div>
+        {!isReadOnly && (
+          <div className="flex flex-wrap items-center gap-2">
+            <button onClick={() => setShowAddExpense(true)} className="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white text-sm font-bold rounded-xl flex items-center gap-2 shadow-lg shadow-rose-200">
+              <Receipt className="w-5 h-5" /> Gelişmiş Gider Ekle
+            </button>
+            <button onClick={() => setShowTransfer(true)} className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-xl flex items-center gap-2 shadow-lg shadow-blue-200">
+              <ArrowRightLeft className="w-5 h-5" /> Transfer / Ödeme
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="flex overflow-x-auto gap-4 border-b border-gray-200 pb-2">
@@ -183,9 +190,11 @@ export default function FinanceModule({ settings }: any) {
         <div className="space-y-6">
           <div className="flex items-center justify-between">
             <h3 className="font-black text-lg text-gray-900">Hesaplar ve Kartlar</h3>
-            <button onClick={() => setShowAddAccount(true)} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-800 text-sm font-bold rounded-xl flex items-center gap-2">
-              <Plus className="w-4 h-4" /> Yeni Hesap Ekle
-            </button>
+            {!isReadOnly && (
+              <button onClick={() => setShowAddAccount(true)} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-800 text-sm font-bold rounded-xl flex items-center gap-2">
+                <Plus className="w-4 h-4" /> Yeni Hesap Ekle
+              </button>
+            )}
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {accounts.map(acc => {
@@ -273,7 +282,7 @@ export default function FinanceModule({ settings }: any) {
       )}
 
       {/* MODALS */}
-      {showAddAccount && (
+      {!isReadOnly && showAddAccount && (
         <div className="fixed inset-0 z-50 bg-gray-900/40 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
             <div className="p-6 border-b border-gray-100">
@@ -325,7 +334,7 @@ export default function FinanceModule({ settings }: any) {
         </div>
       )}
 
-      {showAddExpense && (
+      {!isReadOnly && showAddExpense && (
         <div className="fixed inset-0 z-50 bg-gray-900/40 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl w-full max-w-2xl shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
             <div className="p-6 border-b border-gray-100 flex-shrink-0">
@@ -380,7 +389,7 @@ export default function FinanceModule({ settings }: any) {
         </div>
       )}
 
-      {showTransfer && (
+      {!isReadOnly && showTransfer && (
         <div className="fixed inset-0 z-50 bg-gray-900/40 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
             <div className="p-6 border-b border-gray-100">

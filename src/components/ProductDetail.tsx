@@ -1,12 +1,12 @@
 import { useState, useEffect } from 'react';
-import { 
-  ArrowLeft, 
-  Edit3, 
-  Trash2, 
-  Package, 
-  TrendingUp, 
-  TrendingDown, 
-  Plus, 
+import {
+  ArrowLeft,
+  Edit3,
+  Trash2,
+  Package,
+  TrendingUp,
+  TrendingDown,
+  Plus,
   Minus,
   MessageSquare,
   Copy,
@@ -19,6 +19,7 @@ import { useCurrency } from '../CurrencyContext';
 import { Product, ProductPlatform } from '../types';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { useAuth } from '../App';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -31,6 +32,7 @@ interface ProductDetailProps {
 }
 
 export default function ProductDetail({ productId, onBack, onEdit }: ProductDetailProps) {
+  const { isReadOnly } = useAuth();
   const { FormatAmount } = useCurrency();
   const [product, setProduct] = useState<Product | null>(null);
   const [activeImage, setActiveImage] = useState<string | null>(null);
@@ -59,6 +61,7 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
   };
 
   const adjustStock = async (platform: string, delta: number) => {
+    if (isReadOnly) return;
     try {
        await api.post('/stock/adjust', {
          product_id: productId,
@@ -73,6 +76,7 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
   };
 
   const deleteProduct = async () => {
+    if (isReadOnly) return;
     try {
       setLoading(true);
       await api.delete(`/products/${productId}`);
@@ -99,7 +103,7 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
     <div className="space-y-8 animate-in slide-in-from-bottom-4 duration-500">
       {/* Top Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-         <button 
+         <button
            onClick={onBack}
            className="flex items-center text-[#64748B] hover:text-[#0F172A] transition-colors p-2 -ml-2 rounded-lg hover:bg-[#F1F5F9] w-fit"
          >
@@ -107,16 +111,18 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
            <span className="font-bold text-sm">Listeye Dön</span>
          </button>
          <div className="flex items-center space-x-3 w-full sm:w-auto">
-             <button 
-               onClick={onEdit}
-               className="flex-1 sm:flex-none flex items-center justify-center px-4 py-2.5 bg-[#0F172A] text-white rounded-xl font-bold text-sm hover:scale-105 transition-all shadow-md"
-             >
-               <Edit3 className="w-4 h-4 mr-2" />
-               Düzenle
-             </button>
-             
-             {!showDeleteConfirm ? (
-               <button 
+             {!isReadOnly && (
+               <button
+                 onClick={onEdit}
+                 className="flex-1 sm:flex-none flex items-center justify-center px-4 py-2.5 bg-[#0F172A] text-white rounded-xl font-bold text-sm hover:scale-105 transition-all shadow-md"
+               >
+                 <Edit3 className="w-4 h-4 mr-2" />
+                 Düzenle
+               </button>
+             )}
+
+             {!isReadOnly && (!showDeleteConfirm ? (
+               <button
                  onClick={() => setShowDeleteConfirm(true)}
                  className="p-2.5 border border-[#E2E8F0] text-rose-500 rounded-xl hover:bg-rose-50 transition-colors"
                  title="Ürünü Sil"
@@ -126,20 +132,20 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
              ) : (
                <div className="flex items-center space-x-2 animate-in fade-in zoom-in duration-200">
                  <span className="text-[10px] font-bold text-rose-500 uppercase tracking-tight hidden sm:block">Silinsin mi?</span>
-                 <button 
+                 <button
                    onClick={deleteProduct}
                    className="px-3 py-2 bg-rose-500 text-white rounded-lg font-bold text-xs hover:bg-rose-600 transition-colors shadow-sm"
                  >
                    Evet, Sil
                  </button>
-                 <button 
+                 <button
                    onClick={() => setShowDeleteConfirm(false)}
                    className="px-3 py-2 bg-bg-main border border-border-color text-text-muted rounded-lg font-bold text-xs hover:bg-white transition-colors"
                  >
                    Vazgeç
                  </button>
                </div>
-             )}
+             ))}
          </div>
       </div>
 
@@ -165,7 +171,7 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
            </div>
            <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-hide">
               {product.images?.map((img) => (
-                <button 
+                <button
                   key={img.id}
                   onClick={() => setActiveImage(img.path)}
                   className={cn(
@@ -209,20 +215,20 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
                 <DetailStat label="Boru Ölçüsü" value={product.pipe_size || 'Bilinmiyor'} color="text-text-muted font-mono text-sm" />
                 <DetailStat label="Alış ($)" value={`$${product.purchase_price_usd.toFixed(2)}`} color="text-text-muted" subLabel={`₺${product.exchange_rate_used} kur ile`} />
                 <DetailStat label="Maliyet (₺)" value={<FormatAmount amount={product.purchase_cost} />} color="text-text-muted" />
-                <DetailStat 
-                  label="Buffer Maliyet" 
-                  value={<FormatAmount amount={product.purchase_cost * (1 + (product.buffer_percentage || 0) / 100)} />} 
-                  subLabel={`%${product.buffer_percentage} Buffer`} 
-                  color="text-orange-600" 
+                <DetailStat
+                  label="Buffer Maliyet"
+                  value={<FormatAmount amount={product.purchase_cost * (1 + (product.buffer_percentage || 0) / 100)} />}
+                  subLabel={`%${product.buffer_percentage} Buffer`}
+                  color="text-orange-600"
                 />
-                <DetailStat 
-                  label="Kar Payı" 
-                  value={<FormatAmount amount={profit} />} 
-                  subLabel={`%${product.sale_price ? ((profit / product.sale_price) * 100).toFixed(1) : 0} Marj`} 
-                  color="text-success" 
+                <DetailStat
+                  label="Kar Payı"
+                  value={<FormatAmount amount={profit} />}
+                  subLabel={`%${product.sale_price ? ((profit / product.sale_price) * 100).toFixed(1) : 0} Marj`}
+                  color="text-success"
                 />
               </div>
-              
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 pb-6">
                 <div className="space-y-3">
                   <h3 className="text-xs font-bold text-text-muted uppercase tracking-widest flex items-center"><Info className="w-4 h-4 mr-2" /> Ürün Açıklaması</h3>

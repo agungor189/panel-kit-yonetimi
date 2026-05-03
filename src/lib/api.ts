@@ -1,16 +1,17 @@
+import type { UserRole } from '../types';
+
 const API_URL = "";
 
 export const getToken = () => localStorage.getItem('token');
 
 const checkAccess = () => {
-  const role = localStorage.getItem('userRole');
-  if (role === 'user') {
+  const role = localStorage.getItem('userRole') as UserRole | null;
+  if (role === 'readonly') {
     throw new Error('Yetkisiz işlem. Yalnızca okuma izniniz var.');
   }
 };
 
 const handleResponse = async (res: Response, skip401Reload = false) => {
-  const isAuthError = res.status === 401 || res.status === 403;
   let data;
   let jsonError = false;
   try {
@@ -19,7 +20,11 @@ const handleResponse = async (res: Response, skip401Reload = false) => {
     jsonError = true;
   }
 
-  if (isAuthError && !skip401Reload) {
+  const shouldClearSession =
+    res.status === 401 ||
+    (res.status === 403 && data?.error?.code === 'USER_DISABLED');
+
+  if (shouldClearSession && !skip401Reload) {
     const hadToken = !!localStorage.getItem('token');
     localStorage.removeItem('token');
     localStorage.removeItem('userRole');

@@ -6,8 +6,10 @@ import { PaymentSummaryWidget } from './widgets/PaymentSummaryWidget';
 import { ProductAnalysisChartWidget } from './widgets/ProductAnalysisChartWidget';
 import { SalesTrendWidget } from './widgets/SalesTrendWidget';
 import { UpcomingPaymentsWidget } from './widgets/UpcomingPaymentsWidget';
+import { useAuth } from '../../App';
 
 export function DashboardWidgetGrid() {
+  const { isReadOnly } = useAuth();
   const [widgets, setWidgets] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
@@ -30,6 +32,7 @@ export function DashboardWidgetGrid() {
   };
 
   const handleSaveSettings = async (newWidgets: any[]) => {
+    if (isReadOnly) return;
     // Determine which are totally new
     const toCreate = newWidgets.filter(w => w.id && w.id.startsWith('new_'));
     const toUpdate = newWidgets.filter(w => w.id && !w.id.startsWith('new_'));
@@ -109,9 +112,11 @@ export function DashboardWidgetGrid() {
           <button onClick={() => setRefreshKey(k=>k+1)} className="p-2.5 text-gray-500 hover:text-gray-800 bg-white border border-gray-200 shadow-sm rounded-xl transition-colors">
             <RefreshCw className="w-4 h-4" />
           </button>
+          {!isReadOnly && (
           <button onClick={() => setShowSettings(true)} className="flex items-center gap-2 px-4 py-2.5 text-sm font-bold text-gray-700 bg-white border border-gray-200 shadow-sm rounded-xl hover:bg-gray-50 transition-colors">
             <Settings className="w-4 h-4" /> Widget Ayarları
           </button>
+          )}
         </div>
       </div>
 
@@ -123,11 +128,13 @@ export function DashboardWidgetGrid() {
          <div className="text-center py-20 bg-gray-50 rounded-2xl border-2 border-dashed border-gray-200">
            <h3 className="text-lg font-bold text-gray-500 mb-2">Gösterilecek Veri Yok</h3>
            <p className="text-sm text-gray-400">Widget Ayarları'ndan görüntülemek istediğiniz verileri seçebilirsiniz.</p>
-           <button onClick={() => setShowSettings(true)} className="mt-4 px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm font-semibold shadow-sm text-gray-700">Seçim Yap</button>
+           {!isReadOnly && (
+             <button onClick={() => setShowSettings(true)} className="mt-4 px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm font-semibold shadow-sm text-gray-700">Seçim Yap</button>
+           )}
          </div>
       )}
 
-      {showSettings && (
+      {!isReadOnly && showSettings && (
         <WidgetSettingsModal 
            onClose={() => setShowSettings(false)} 
            activeWidgets={widgets} 

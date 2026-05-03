@@ -1,8 +1,13 @@
 import React, { useState } from 'react';
 import { Lock, User, LogIn, Zap, KeyRound, ShieldCheck } from 'lucide-react';
 import { api } from '../lib/api';
+import type { UserRole } from '../types';
 
-type Props = { onLogin: (role: 'admin' | 'user') => void };
+type Props = { onLogin: (role: UserRole) => void };
+
+function normalizeRole(role: unknown): UserRole {
+  return role === 'admin' || role === 'user' || role === 'readonly' ? role : 'user';
+}
 
 export default function LoginPage({ onLogin }: Props) {
   const [view, setView] = useState<'login' | 'change-password'>('login');
@@ -15,7 +20,7 @@ export default function LoginPage({ onLogin }: Props) {
 
   // change-password form state
   const [pendingToken, setPendingToken] = useState('');
-  const [pendingRole, setPendingRole]   = useState<'admin' | 'user'>('user');
+  const [pendingRole, setPendingRole]   = useState<UserRole>('user');
   const [currentPw,  setCurrentPw]      = useState('');
   const [newPw,      setNewPw]          = useState('');
   const [confirmPw,  setConfirmPw]      = useState('');
@@ -32,13 +37,14 @@ export default function LoginPage({ onLogin }: Props) {
         if (res.user.must_change_password) {
           // Store token temporarily so change-password can call the endpoint.
           setPendingToken(res.token);
-          setPendingRole(res.user.role);
+          setPendingRole(normalizeRole(res.user.role));
           setCurrentPw(password); // pre-fill current password
           setView('change-password');
         } else {
+          const role = normalizeRole(res.user.role);
           localStorage.setItem('token', res.token);
-          localStorage.setItem('userRole', res.user.role);
-          onLogin(res.user.role);
+          localStorage.setItem('userRole', role);
+          onLogin(role);
         }
       } else {
         setLoginError(res.error?.message || 'Giriş başarısız.');

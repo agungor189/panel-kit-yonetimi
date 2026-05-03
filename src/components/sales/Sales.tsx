@@ -3,8 +3,10 @@ import { Plus, ShoppingCart } from 'lucide-react';
 import SalesList from './SalesList';
 import SalesForm from './SalesForm';
 import SaleDetailModal from './SaleDetailModal';
+import { useAuth } from '../../App';
 
 export default function Sales() {
+  const { isReadOnly } = useAuth();
   const [showForm, setShowForm] = useState(false);
   const [selectedSale, setSelectedSale] = useState<any>(null);
 
@@ -28,26 +30,28 @@ export default function Sales() {
                 <p className="text-text-muted mt-1 font-medium">Satış işlemleri ve kargo ağırlık hesaplamaları</p>
               </div>
             </div>
-            <button 
-              onClick={() => setShowForm(true)}
-              className="flex items-center space-x-2 bg-primary text-white px-6 py-3 rounded-2xl font-bold shadow-soft hover:shadow-lg hover:-translate-y-0.5 transition-all"
-            >
-              <Plus className="w-5 h-5" />
-              <span>Yeni Satış Ekle</span>
-            </button>
+            {!isReadOnly && (
+              <button
+                onClick={() => setShowForm(true)}
+                className="flex items-center space-x-2 bg-primary text-white px-6 py-3 rounded-2xl font-bold shadow-soft hover:shadow-lg hover:-translate-y-0.5 transition-all"
+              >
+                <Plus className="w-5 h-5" />
+                <span>Yeni Satış Ekle</span>
+              </button>
+            )}
           </div>
 
           <SalesList onSaleClick={setSelectedSale} />
           {selectedSale && (
-            <SaleDetailModal 
-              sale={selectedSale} 
-              onClose={() => setSelectedSale(null)} 
+            <SaleDetailModal
+              sale={selectedSale}
+              onClose={() => setSelectedSale(null)}
               onUpdated={handleSaleUpdated}
             />
           )}
         </>
       ) : (
-        <SalesForm onBack={() => setShowForm(false)} />
+        isReadOnly ? null : <SalesForm onBack={() => setShowForm(false)} />
       )}
     </div>
   );

@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Plus, 
-  Search, 
-  Filter, 
-  LayoutGrid, 
-  List, 
-  Package, 
+import {
+  Plus,
+  Search,
+  Filter,
+  LayoutGrid,
+  List,
+  Package,
   MoreVertical,
   ChevronDown,
   Download,
@@ -24,6 +24,7 @@ import BarcodeScannerModal from './BarcodeScannerModal';
 import PricingSettingsModal from './PricingSettingsModal';
 import { Calculator, Loader2, CheckCircle, AlertTriangle } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { useAuth } from '../App';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -35,6 +36,7 @@ interface ProductListProps {
 }
 
 export default function ProductList({ onAddProduct, onProductClick }: ProductListProps) {
+  const { isReadOnly } = useAuth();
   const { FormatAmount, activeRate, viewCurrency } = useCurrency();
   const [products, setProducts] = useState<Product[]>([]);
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('table');
@@ -58,9 +60,9 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
 
   const filteredProducts = products.filter(p => {
     const searchLower = search.toLowerCase();
-    const matchesSearch = 
-      (p.name?.toLowerCase().includes(searchLower)) || 
-      (p.title?.toLowerCase().includes(searchLower)) || 
+    const matchesSearch =
+      (p.name?.toLowerCase().includes(searchLower)) ||
+      (p.title?.toLowerCase().includes(searchLower)) ||
       (p.sku?.toLowerCase().includes(searchLower)) ||
       (p.barcode?.toLowerCase().includes(searchLower));
     const matchesCategory = filterCategory === 'Hepsi' || p.category === filterCategory;
@@ -120,6 +122,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (isReadOnly) return;
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -129,16 +132,16 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
       complete: (results) => {
         const { data, meta } = results;
         if (data.length === 0) return;
-        
+
         setCsvData(data);
         setCsvHeaders(meta.fields || []);
-        
+
         // Try to auto-map based on headers
         const newMapping = { ...mapping };
         const headers = meta.fields || [];
-        
+
         const findMatch = (keys: string[]) => headers.find(h => keys.some(k => h.toLowerCase().includes(k.toLowerCase())));
-        
+
         newMapping.sku = findMatch(['sku', 'kod', 'ürün kodu']) || headers[0] || '';
         newMapping.name = findMatch(['ad', 'isim', 'başlık', 'ürün adı']) || headers[1] || '';
         newMapping.category = findMatch(['malzeme', 'kategori', 'category']) || headers[2] || '';
@@ -172,11 +175,11 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
         const name = row[mapping.name] || 'İsimsiz Ürün';
         const category = row[mapping.category] || 'Genel';
         const totalStock = parseInt(row[mapping.stock]) || 0;
-        
+
         const parseCSVPrice = (val: any) => {
           if (!val) return 0;
-          let s = String(val).replace(/[^0-9.,-]/g, ''); 
-          s = s.replace(',', '.'); 
+          let s = String(val).replace(/[^0-9.,-]/g, '');
+          s = s.replace(',', '.');
           const lastDot = s.lastIndexOf('.');
           if (lastDot !== -1) {
              const before = s.slice(0, lastDot).replace(/\./g, '');
@@ -231,18 +234,18 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
 
     setDeletingAll(false);
     setImportProgress(null);
-    
+
     if (successCount > 0) {
       setTimeout(() => {
         setShowPricingModal(true);
       }, 500);
       toast.success(`${successCount} ürün başarıyla eklendi`);
     }
-    
+
     if (errorCount > 0) {
       toast.error(`${errorCount} ürün eklenirken hata oluştu`);
     }
-    
+
     loadProducts();
     if (csvInputRef.current) csvInputRef.current.value = '';
   };
@@ -253,6 +256,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
   const [showPricingModal, setShowPricingModal] = useState(false);
 
   const deleteAllProducts = async () => {
+    if (isReadOnly) return;
     if (deleteAllInput !== "SİL") return;
     try {
       setDeletingAll(true);
@@ -279,7 +283,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                  Lütfen bekleyin, ürünler sisteme aktarılıyor...
                </p>
                <div className="w-full bg-gray-100 rounded-full h-3 overflow-hidden mb-3 text-center relative">
-                  <div 
+                  <div
                     className="h-full bg-blue-600 rounded-full transition-all duration-300 relative overflow-hidden"
                     style={{ width: `${Math.round((importProgress.current / importProgress.total) * 100)}%` }}
                   >
@@ -294,8 +298,8 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
          </div>
       )}
 
-      {showPricingModal && (
-        <PricingSettingsModal 
+      {!isReadOnly && showPricingModal && (
+        <PricingSettingsModal
           onClose={() => setShowPricingModal(false)}
           onRefresh={loadProducts}
           products={products}
@@ -307,35 +311,39 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
           <p className="text-xs lg:text-sm text-text-muted">{products.length} toplam ürün listeleniyor.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <input 
-            type="file" 
-            ref={csvInputRef} 
-            onChange={handleFileSelect} 
-            accept=".csv" 
-            className="hidden" 
+          <input
+            type="file"
+            ref={csvInputRef}
+            onChange={handleFileSelect}
+            accept=".csv"
+            className="hidden"
           />
-          <button 
-            onClick={() => setShowPricingModal(true)}
-            className="px-4 h-11 border border-blue-200 bg-blue-50/50 rounded-xl text-xs font-bold text-blue-700 hover:bg-blue-100 transition-all flex items-center shadow-sm"
-          >
-            <Calculator className="w-4 h-4 mr-2" />
-            Toplu Fiyat Yönetimi
-          </button>
-          <button 
-            onClick={() => csvInputRef.current?.click()}
-            className="px-4 h-11 border border-border-color bg-white rounded-xl text-xs font-bold text-text-muted hover:text-primary hover:border-primary transition-all flex items-center shadow-sm"
-          >
-            <Upload className="w-4 h-4 mr-2" />
-            Gelişmiş İçe Aktar
-          </button>
-          <button 
+          {!isReadOnly && (
+            <>
+              <button
+                onClick={() => setShowPricingModal(true)}
+                className="px-4 h-11 border border-blue-200 bg-blue-50/50 rounded-xl text-xs font-bold text-blue-700 hover:bg-blue-100 transition-all flex items-center shadow-sm"
+              >
+                <Calculator className="w-4 h-4 mr-2" />
+                Toplu Fiyat Yönetimi
+              </button>
+              <button
+                onClick={() => csvInputRef.current?.click()}
+                className="px-4 h-11 border border-border-color bg-white rounded-xl text-xs font-bold text-text-muted hover:text-primary hover:border-primary transition-all flex items-center shadow-sm"
+              >
+                <Upload className="w-4 h-4 mr-2" />
+                Gelişmiş İçe Aktar
+              </button>
+            </>
+          )}
+          <button
             onClick={exportToCsv}
             className="px-4 h-11 border border-border-color bg-white rounded-xl text-xs font-bold text-text-muted hover:text-primary hover:border-primary transition-all flex items-center"
           >
             <Download className="w-4 h-4 mr-2" />
             CSV Dışa Aktar
           </button>
-          <button 
+          <button
             onClick={() => {
               const data = [{
                 'Ürün Kodu': 'URUN-001',
@@ -366,8 +374,8 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
             <FileText className="w-4 h-4 mr-2" />
             Şablon İndir
           </button>
-          {products.length > 0 && (
-            <button 
+          {!isReadOnly && products.length > 0 && (
+            <button
               onClick={() => {
                 setDeleteAllInput("");
                 setShowDeleteAllConfirm(true);
@@ -378,13 +386,15 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
               Tümünü Sil
             </button>
           )}
-          <button 
-            onClick={onAddProduct}
-            className="btn-primary px-6 py-2 leading-none flex items-center justify-center h-11 w-full sm:w-auto"
-          >
-            <Plus className="w-4 h-4 mr-2" />
-            <span>Yeni Ürün Ekle</span>
-          </button>
+          {!isReadOnly && (
+            <button
+              onClick={onAddProduct}
+              className="btn-primary px-6 py-2 leading-none flex items-center justify-center h-11 w-full sm:w-auto"
+            >
+              <Plus className="w-4 h-4 mr-2" />
+              <span>Yeni Ürün Ekle</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -433,9 +443,9 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
       <div className="card p-3 lg:p-4 flex flex-col lg:flex-row items-stretch lg:items-center gap-3 lg:gap-4 bg-white shadow-sm">
         <div className="relative flex-1 flex items-center">
           <Search className="w-4 h-4 text-text-muted absolute left-3.5" />
-          <input 
-            type="text" 
-            placeholder="Ürün Ara Veya Barkod Okut..." 
+          <input
+            type="text"
+            placeholder="Ürün Ara Veya Barkod Okut..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="w-full pl-10 pr-12 py-3 lg:py-2.5 bg-bg-main rounded-xl lg:rounded-lg text-sm border border-border-color focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all outline-none"
@@ -452,7 +462,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
         <div className="flex items-center space-x-2 lg:space-x-3">
                   <div className="flex-1 lg:flex-none flex items-center px-3 py-3 lg:py-2 bg-bg-main rounded-xl lg:rounded-lg border border-border-color">
             <Filter className="w-3.5 h-3.5 text-text-muted mr-2" />
-            <select 
+            <select
               value={filterCategory}
               onChange={(e) => setFilterCategory(e.target.value)}
               className="bg-transparent text-xs lg:text-sm font-semibold outline-none cursor-pointer text-text-main w-full"
@@ -462,13 +472,13 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
           </div>
 
           <div className="flex bg-bg-main rounded-xl lg:rounded-lg p-1 border border-border-color">
-            <button 
+            <button
               onClick={() => setViewMode('grid')}
               className={cn("p-2 lg:p-1.5 rounded-lg lg:rounded-md transition-all", viewMode === 'grid' ? "bg-white shadow-sm text-primary" : "text-text-muted")}
             >
               <LayoutGrid className="w-4 h-4" />
             </button>
-            <button 
+            <button
               onClick={() => setViewMode('table')}
               className={cn("p-2 lg:p-1.5 rounded-lg lg:rounded-md transition-all", viewMode === 'table' ? "bg-white shadow-sm text-primary" : "text-text-muted")}
             >
@@ -481,7 +491,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
       {viewMode === 'grid' ? (
         <div className="grid grid-cols-1 xs:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-4 lg:gap-6">
           {filteredProducts.map((p) => (
-            <div 
+            <div
               key={p.id}
               onClick={() => onProductClick(p.id)}
               className="group card overflow-hidden hover:shadow-md transition-all cursor-pointer relative bg-white"
@@ -502,12 +512,12 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                 <p className="text-[9px] lg:text-[10px] font-bold text-text-muted uppercase tracking-widest mb-1">{p.category}</p>
                 <h3 className="font-bold text-text-main text-sm group-hover:text-primary transition-colors line-clamp-1 h-5">{p.name || p.title}</h3>
                 <p className="text-[10px] text-text-muted font-mono mt-1">{p.sku}</p>
-                
+
                 <div className="mt-3 lg:mt-4 pt-3 lg:pt-4 border-t border-border-color flex items-center justify-between">
                    <p className="font-bold text-base text-text-main"><FormatAmount amount={p.sale_price || 0} /></p>
                    <div className="text-right">
                      <p className={cn(
-                       "text-xs font-bold", 
+                       "text-xs font-bold",
                        (p.total_stock || 0) < 10 ? "text-danger" : "text-success"
                      )}>
                        {p.total_stock || 0} Adet
@@ -538,12 +548,12 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
               </thead>
               <tbody className="divide-y divide-border-color">
                 {filteredProducts.map((p, index) => {
-                  const margin = p.sale_price && p.purchase_price_usd && p.exchange_rate_used 
-                    ? ((p.sale_price - (p.purchase_price_usd * p.exchange_rate_used)) / p.sale_price) * 100 
+                  const margin = p.sale_price && p.purchase_price_usd && p.exchange_rate_used
+                    ? ((p.sale_price - (p.purchase_price_usd * p.exchange_rate_used)) / p.sale_price) * 100
                     : 0;
                   const stockValue = (p.total_stock || 0) * (p.sale_price || 0);
                   const bufferedCostTRY = (p.purchase_price_usd || 0) * (p.exchange_rate_used || 0) * (1 + (p.buffer_percentage || 0) / 100);
-                  
+
                   return (
                   <tr key={p.id} onClick={() => onProductClick(p.id)} className="hover:bg-bg-main cursor-pointer group transition-colors">
                     <td className="px-4 py-4 text-center text-xs font-bold text-text-muted/60">
@@ -653,7 +663,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                    <Upload className="w-6 h-6 text-primary" />
                 </div>
              </div>
-             
+
              <div className="p-8 space-y-6 max-h-[60vh] overflow-y-auto">
                 <div className="grid grid-cols-2 gap-4">
                    {Object.entries(mapping).map(([field, selectedHeader]) => (
@@ -672,7 +682,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                           {field === 'pipe_size' && 'Boru Ölçüsü (Önerilen)'}
                         </label>
                         <div className="relative">
-                           <select 
+                           <select
                              value={selectedHeader}
                              onChange={(e) => setMapping(prev => ({ ...prev, [field]: e.target.value }))}
                              className="w-full pl-3 pr-10 py-2.5 bg-bg-main border border-border-color rounded-xl text-sm font-bold appearance-none hover:border-primary transition-colors focus:ring-2 focus:ring-primary/20 outline-none"
@@ -696,13 +706,13 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
              </div>
 
              <div className="p-8 bg-gray-50 border-t border-border-color flex items-center justify-between">
-                <button 
+                <button
                   onClick={() => setShowMappingModal(false)}
                   className="px-6 h-12 text-sm font-bold text-text-muted hover:text-[#0F172A] transition-colors"
                 >
                   Vazgeç
                 </button>
-                <button 
+                <button
                   onClick={executeImport}
                   disabled={deletingAll}
                   className="px-8 h-12 bg-[#0F172A] text-white rounded-xl font-bold text-sm shadow-xl hover:scale-105 transition-all disabled:opacity-50"
@@ -718,7 +728,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
           </div>
         </div>
       )}
-      
+
       {showScanner && (
         <BarcodeScannerModal
           onClose={() => setShowScanner(false)}

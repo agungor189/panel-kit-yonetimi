@@ -1,9 +1,9 @@
 import { useState, useEffect, createContext, useContext } from 'react';
-import { 
-  LayoutDashboard, 
-  Package, 
-  ArrowLeftRight, 
-  TrendingUp, 
+import {
+  LayoutDashboard,
+  Package,
+  ArrowLeftRight,
+  TrendingUp,
   TrendingDown,
   Settings as SettingsIcon,
   BarChart3,
@@ -22,7 +22,8 @@ import {
   TerminalSquare,
   Landmark,
   AlertTriangle,
-  RefreshCw
+  RefreshCw,
+  Eye
 } from 'lucide-react';
 import Dashboard from './components/Dashboard';
 import ProductList from './components/ProductList';
@@ -38,7 +39,7 @@ import ActivityLogs from './components/ActivityLogs';
 import LoginPage from './components/LoginPage';
 import FinanceModule from './components/FinanceModule';
 import { api } from './lib/api';
-import { Settings } from './types';
+import { Settings, type UserRole } from './types';
 import { clsx, type ClassValue } from 'clsx';
 import { useCurrency } from './CurrencyContext';
 import { twMerge } from 'tailwind-merge';
@@ -50,11 +51,15 @@ import Sales from './components/sales/Sales';
 import ApiKeys from './components/integrations/ApiKeys';
 import PanelApiKeys from './components/integrations/PanelApiKeys';
 
-export const AuthContext = createContext<{ role: 'admin' | 'user', isReadOnly: boolean }>({ role: 'admin', isReadOnly: false });
+export const AuthContext = createContext<{ role: UserRole, isReadOnly: boolean }>({ role: 'admin', isReadOnly: false });
 export const useAuth = () => useContext(AuthContext);
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
+}
+
+function normalizeRole(role: unknown): UserRole {
+  return role === 'admin' || role === 'user' || role === 'readonly' ? role : 'admin';
 }
 
 type View = 'dashboard' | 'products' | 'product-detail' | 'product-wizard' | 'stock' | 'income' | 'expense' | 'recurring' | 'analytics' | 'product-analytics' | 'settings' | 'activity-logs' | 'b2b' | 'sales' | 'api-keys' | 'panel-api' | 'cash';
@@ -63,7 +68,7 @@ export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
 
-  const [userRole, setUserRole] = useState<'admin' | 'user'>('admin');
+  const [userRole, setUserRole] = useState<UserRole>('admin');
 
   const [currentView, setCurrentView] = useState<View>('dashboard');
   const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
@@ -113,7 +118,7 @@ export default function App() {
         const res = await api.get('/auth/me');
         if (res.success) {
           setIsAuthenticated(true);
-          setUserRole(res.user?.role || 'admin');
+          setUserRole(normalizeRole(res.user?.role));
           loadSettings();
           fetchRate();
         } else {
@@ -141,7 +146,7 @@ export default function App() {
     }
   };
 
-  const handleLogin = (role: 'admin' | 'user') => {
+  const handleLogin = (role: UserRole) => {
     setIsAuthenticated(true);
     setUserRole(role);
     loadSettings();
@@ -191,6 +196,18 @@ export default function App() {
     { id: 'analytics', label: 'Genel Analizler', icon: BarChart3 },
     { id: 'product-analytics', label: 'Ürün Analizi', icon: BarChart2 },
   ];
+  const isReadOnly = userRole === 'readonly';
+  const restrictedReadonlyViews: View[] = ['settings', 'api-keys', 'panel-api', 'product-wizard', 'b2b'];
+  const visibleNavItems = navItems.filter(item => !isReadOnly || item.id !== 'b2b');
+
+  useEffect(() => {
+    if (!isReadOnly) return;
+    if (restrictedReadonlyViews.includes(currentView)) {
+      setCurrentView('dashboard');
+      setSelectedProductId(null);
+    }
+    if (showFirmAdd) setShowFirmAdd(false);
+  }, [currentView, isReadOnly, showFirmAdd]);
 
   const { viewCurrency, setViewCurrency, activeRate, rateSource, rateFetchedAt, isRateLoading, isRateError, refreshRate } = useCurrency();
 
@@ -207,8 +224,8 @@ export default function App() {
   }
 
   return (
-    <AuthContext.Provider value={{ role: userRole, isReadOnly: userRole !== 'admin' }}>
-      <div className="min-h-screen bg-bg-main text-text-main font-sans selection:bg-primary/10" data-role={userRole}>
+    <AuthContext.Provider value={{ role: userRole, isReadOnly }}>
+      <div className="min-h-screen bg-bg-main text-text-main font-sans selection:bg-primary/10" data-role={userRole} data-readonly={isReadOnly ? 'true' : 'false'}>
       {/* Sidebar */}
       <aside className={cn(
         "fixed left-0 top-0 h-full border-r border-border-color bg-sidebar-bg text-white transition-all duration-300 z-50 flex flex-col",
@@ -225,7 +242,7 @@ export default function App() {
                   {settings?.company_name || 'DSDST Panel'}
                 </h1>
               </div>
-              <button 
+              <button
                 onClick={() => setIsMobileMenuOpen(false)}
                 className="md:hidden p-1 text-white/50 hover:text-white"
               >
@@ -240,7 +257,7 @@ export default function App() {
         </div>
 
         <nav className="mt-4 px-0 space-y-0.5 overflow-y-auto flex-1">
-          {navItems.map((item) => (
+          {visibleNavItems.map((item) => (
             <button
               key={item.id}
               onClick={() => {
@@ -253,7 +270,7 @@ export default function App() {
               className={cn(
                 "w-full flex items-center px-6 py-3.5 transition-all text-sm font-medium group relative",
                 currentView === item.id || (item.id === 'products' && (currentView === 'product-detail' || currentView === 'product-wizard'))
-                  ? "bg-primary/10 text-white border-l-4 border-primary" 
+                  ? "bg-primary/10 text-white border-l-4 border-primary"
                   : "text-[#94a3b8] hover:bg-white/5 hover:text-white"
               )}
             >
@@ -261,13 +278,13 @@ export default function App() {
               {(isSidebarOpen || isMobileMenuOpen) && <span>{item.label}</span>}
             </button>
           ))}
-          
-          {(isSidebarOpen || isMobileMenuOpen) && (
+
+          {!isReadOnly && (isSidebarOpen || isMobileMenuOpen) && (
             <div className="pt-4 pb-2 px-6">
               <p className="text-white/40 text-xs font-bold uppercase tracking-wider">Entegrasyonlar</p>
             </div>
           )}
-          <button
+          {!isReadOnly && <button
               onClick={() => {
                 setCurrentView('api-keys');
                 setIsMobileMenuOpen(false);
@@ -275,16 +292,16 @@ export default function App() {
               className={cn(
                 "w-full flex items-center px-6 py-3.5 transition-all text-sm font-medium group relative",
                 currentView === 'api-keys'
-                  ? "bg-primary/10 text-white border-l-4 border-primary" 
+                  ? "bg-primary/10 text-white border-l-4 border-primary"
                   : "text-[#94a3b8] hover:bg-white/5 hover:text-white"
               )}
               title="API Anahtarları"
             >
               <Key className={cn("w-5 h-5", (isSidebarOpen || isMobileMenuOpen) ? "mr-3" : "mx-auto")} />
               {(isSidebarOpen || isMobileMenuOpen) && <span>API Anahtarları</span>}
-          </button>
-          
-          <button
+          </button>}
+
+          {!isReadOnly && <button
               onClick={() => {
                 setCurrentView('panel-api');
                 setIsMobileMenuOpen(false);
@@ -292,14 +309,14 @@ export default function App() {
               className={cn(
                 "w-full flex items-center px-6 py-3.5 transition-all text-sm font-medium group relative",
                 currentView === 'panel-api'
-                  ? "bg-purple-500/10 text-white border-l-4 border-purple-500" 
+                  ? "bg-purple-500/10 text-white border-l-4 border-purple-500"
                   : "text-[#94a3b8] hover:bg-white/5 hover:text-white"
               )}
               title="Panel API"
             >
               <TerminalSquare className={cn("w-5 h-5", (isSidebarOpen || isMobileMenuOpen) ? "mr-3" : "mx-auto")} />
               {(isSidebarOpen || isMobileMenuOpen) && <span>Panel API</span>}
-          </button>
+          </button>}
         </nav>
 
         <div className="mt-auto border-t border-white/10 pb-4 pt-2 shrink-0">
@@ -311,14 +328,14 @@ export default function App() {
               className={cn(
                 "w-full flex items-center px-6 py-3.5 transition-all text-sm font-medium group relative",
                 currentView === 'activity-logs'
-                  ? "bg-primary/10 text-white border-l-4 border-primary" 
+                  ? "bg-primary/10 text-white border-l-4 border-primary"
                   : "text-[#94a3b8] hover:bg-white/5 hover:text-white"
               )}
             >
               <Activity className={cn("w-5 h-5", (isSidebarOpen || isMobileMenuOpen) ? "mr-3" : "mx-auto")} />
               {(isSidebarOpen || isMobileMenuOpen) && <span>Aktivite Logları</span>}
             </button>
-            <button
+            {!isReadOnly && <button
               onClick={() => {
                 setCurrentView('settings');
                 setIsMobileMenuOpen(false);
@@ -326,17 +343,17 @@ export default function App() {
               className={cn(
                 "w-full flex items-center px-6 py-3.5 transition-all text-sm font-medium group relative",
                 currentView === 'settings'
-                  ? "bg-primary/10 text-white border-l-4 border-primary" 
+                  ? "bg-primary/10 text-white border-l-4 border-primary"
                   : "text-[#94a3b8] hover:bg-white/5 hover:text-white"
               )}
             >
               <SettingsIcon className={cn("w-5 h-5", (isSidebarOpen || isMobileMenuOpen) ? "mr-3" : "mx-auto")} />
               {(isSidebarOpen || isMobileMenuOpen) && <span>Ayarlar</span>}
-            </button>
+            </button>}
 
             {(isSidebarOpen || isMobileMenuOpen) ? (
               <div className="px-4 mt-2 pt-2 border-t border-white/10 text-center">
-                <button 
+                <button
                   onClick={handleLogoutClick}
                   className="w-full flex items-center space-x-3 px-4 py-2.5 rounded-xl bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white transition-all text-sm font-bold logout-override-ignore"
                 >
@@ -346,7 +363,7 @@ export default function App() {
               </div>
             ) : (
               <div className="mt-2 pt-2 border-t border-white/10 flex justify-center">
-                 <button 
+                 <button
                   onClick={handleLogoutClick}
                   className="p-2.5 rounded-xl bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white transition-all logout-override-ignore"
                   title="Çıkış Yap"
@@ -357,7 +374,7 @@ export default function App() {
             )}
         </div>
 
-        <button 
+        <button
           onClick={() => setIsSidebarOpen(!isSidebarOpen)}
           className="hidden md:flex absolute bottom-4 right-[-12px] w-6 h-6 bg-white border border-border-color text-sidebar-bg rounded-full items-center justify-center hover:bg-bg-main shadow-md cursor-pointer transition-transform"
         >
@@ -367,7 +384,7 @@ export default function App() {
 
       {/* Overlay for mobile */}
       {isMobileMenuOpen && (
-        <div 
+        <div
           className="fixed inset-0 bg-black/50 z-40 md:hidden"
           onClick={() => setIsMobileMenuOpen(false)}
         />
@@ -382,7 +399,7 @@ export default function App() {
         <div className="sticky top-0 z-40 bg-white border-b border-border-color shadow-sm">
           <header className="h-16 flex items-center justify-between px-4 md:px-8">
             <div className="flex items-center space-x-4 md:space-x-6">
-               <button 
+               <button
                  onClick={() => setIsMobileMenuOpen(true)}
                  className="md:hidden p-2 text-text-muted hover:text-primary transition-colors"
                >
@@ -395,7 +412,7 @@ export default function App() {
 
             <div className="flex items-center space-x-2 md:space-x-6">
                {/* Exchange Rate Indicator */}
-               <div 
+               <div
                  className="hidden md:flex items-center gap-2 group relative bg-gray-50 border border-gray-200 px-3 py-1.5 rounded-xl transition-all hover:bg-gray-100"
                  title={`Kaynak: ${rateSource || 'Bilinmiyor'}`}
                >
@@ -428,9 +445,9 @@ export default function App() {
                </div>
 
                <div className="relative hidden md:block search-bar-container">
-                 <input 
-                   type="text" 
-                   placeholder="Ürün Ara..." 
+                 <input
+                   type="text"
+                   placeholder="Ürün Ara..."
                    className="pl-9 pr-4 py-1.5 bg-bg-main border border-border-color rounded-lg text-sm w-40 md:w-60 focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all outline-none"
                  />
                  <Search className="w-4 h-4 text-text-muted absolute left-3 top-2" />
@@ -440,13 +457,13 @@ export default function App() {
                </button>
                <div className="flex items-center space-x-2 md:space-x-3 border-l border-border-color pl-2 md:pl-6">
                 <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center text-white text-[10px] font-bold shrink-0">
-                  {userRole === 'admin' ? 'AD' : 'US'}
+                  {userRole === 'admin' ? 'AD' : userRole === 'readonly' ? 'RO' : 'US'}
                 </div>
                 <span className="text-sm font-semibold text-text-main hidden sm:inline capitalize">{userRole}</span>
               </div>
             </div>
           </header>
-          
+
           {/* Mobile Subheader */}
           <div className="sm:hidden flex items-center justify-between px-4 py-2.5 bg-gray-50 border-t border-gray-100">
              <div className="flex items-center gap-2">
@@ -455,7 +472,7 @@ export default function App() {
                    <RefreshCw className={cn("w-3 h-3 text-gray-500", isRateLoading && "animate-spin")} />
                 </button>
              </div>
-             
+
              <div className="flex bg-gray-200/50 p-1 rounded-lg items-center gap-1">
                <button
                  onClick={() => setViewCurrency('TRY')}
@@ -473,20 +490,43 @@ export default function App() {
           </div>
         </div>
 
-        {/* User Role Styles constraints */}
-        {userRole === 'user' && (
+        {isReadOnly && (
+          <div className="border-b border-amber-200 bg-amber-50 px-4 md:px-8 py-3">
+            <div className="max-w-[1600px] mx-auto flex items-center gap-3 text-amber-900">
+              <div className="w-8 h-8 rounded-xl bg-amber-100 border border-amber-200 flex items-center justify-center shrink-0">
+                <Eye className="w-4 h-4" />
+              </div>
+              <div>
+                <p className="text-sm font-black">Salt okunur moddasınız</p>
+                <p className="text-xs font-medium text-amber-800">Verileri görüntüleyebilirsiniz; ekleme, düzenleme, silme, yedekleme ve API anahtarı yönetimi kapalıdır.</p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Readonly role constraints for legacy write buttons that do not yet consume AuthContext. */}
+        {isReadOnly && (
           <style>{`
-             button.btn-primary { display: none !important; }
-             button.bg-primary:not(.rounded-full) { display: none !important; }
-             button.text-red-500:not(.logout-override-ignore), button.text-red-600, button.text-danger { display: none !important; }
-             button.border-red-200 { display: none !important; }
-             button:has(.lucide-plus) { display: none !important; }
-             input:not(.search-bar-container input), select, textarea { 
-                pointer-events: none !important; 
-                opacity: 0.6 !important; 
-                background: #f1f5f9 !important; 
+             [data-readonly="true"] button[data-write-action="true"],
+             [data-readonly="true"] a[data-write-action="true"],
+             [data-readonly="true"] label[data-write-action="true"],
+             [data-readonly="true"] button.btn-primary,
+             [data-readonly="true"] button:has(svg.lucide-plus),
+             [data-readonly="true"] button:has(svg.lucide-save),
+             [data-readonly="true"] button:has(svg.lucide-edit-3),
+             [data-readonly="true"] button:has(svg.lucide-trash),
+             [data-readonly="true"] button:has(svg.lucide-trash-2),
+             [data-readonly="true"] button:has(svg.lucide-minus),
+             [data-readonly="true"] button:has(svg.lucide-upload),
+             [data-readonly="true"] button:has(svg.lucide-calculator),
+             [data-readonly="true"] button.text-red-500:not(.logout-override-ignore),
+             [data-readonly="true"] button.text-red-600,
+             [data-readonly="true"] button.text-danger,
+             [data-readonly="true"] button.border-red-200,
+             [data-readonly="true"] label.text-danger,
+             [data-readonly="true"] label.border-red-200 {
+                display: none !important;
              }
-             button:has(.fa-trash), button:has(svg.lucide-trash), button:has(svg.lucide-trash-2) { display: none !important; }
           `}</style>
         )}
 
@@ -494,38 +534,48 @@ export default function App() {
         <div className="p-4 md:p-6 flex-1 max-w-[1600px] w-full mx-auto">
           {currentView === 'dashboard' && <Dashboard onNavigate={setCurrentView} onNavigateAnalytics={navigateToAnalytics} onProductClick={navigateToProduct} />}
           {currentView === 'products' && (
-            <ProductList 
-              onAddProduct={() => setCurrentView('product-wizard')} 
+            <ProductList
+              onAddProduct={() => {
+                if (isReadOnly) return;
+                setSelectedProductId(null);
+                setCurrentView('product-wizard');
+              }}
               onProductClick={navigateToProduct}
             />
           )}
           {currentView === 'product-detail' && selectedProductId && (
-             <ProductDetail 
-                productId={selectedProductId} 
-                onBack={() => setCurrentView('products')} 
-                onEdit={() => setCurrentView('product-wizard')}
+             <ProductDetail
+                productId={selectedProductId}
+                onBack={() => setCurrentView('products')}
+                onEdit={() => {
+                  if (isReadOnly) return;
+                  setCurrentView('product-wizard');
+                }}
              />
           )}
-          {currentView === 'product-wizard' && (
-            <ProductWizard 
+          {!isReadOnly && currentView === 'product-wizard' && (
+            <ProductWizard
               productId={selectedProductId}
               settings={settings}
               onClose={() => {
                 setCurrentView('products');
                 setSelectedProductId(null);
-              }} 
+              }}
             />
           )}
-          {currentView === 'b2b' && !selectedFirmId && (
-            <B2BFirms 
-              onFirmClick={(id: string) => setSelectedFirmId(id)} 
-              onAddFirm={() => setShowFirmAdd(true)} 
+          {!isReadOnly && currentView === 'b2b' && !selectedFirmId && (
+            <B2BFirms
+              onFirmClick={(id: string) => setSelectedFirmId(id)}
+              onAddFirm={() => {
+                if (isReadOnly) return;
+                setShowFirmAdd(true);
+              }}
             />
           )}
-          {currentView === 'b2b' && selectedFirmId && (
+          {!isReadOnly && currentView === 'b2b' && selectedFirmId && (
             <B2BFirmDetail firmId={selectedFirmId} onBack={() => setSelectedFirmId(null)} />
           )}
-          {showFirmAdd && (
+          {!isReadOnly && showFirmAdd && (
             <B2BFirmForm onClose={() => setShowFirmAdd(false)} onSave={() => {
               setCurrentView('b2b');
               setSelectedFirmId(null);
@@ -539,9 +589,9 @@ export default function App() {
           {currentView === 'analytics' && <Analytics settings={settings} initialTab={analyticsTab} />}
           {currentView === 'product-analytics' && <ProductAnalyticsPage />}
           {currentView === 'activity-logs' && <ActivityLogs />}
-          {currentView === 'settings' && <SettingsView onUpdate={loadSettings} />}
-          {currentView === 'api-keys' && <ApiKeys />}
-          {currentView === 'panel-api' && <PanelApiKeys />}
+          {!isReadOnly && currentView === 'settings' && <SettingsView onUpdate={loadSettings} />}
+          {!isReadOnly && currentView === 'api-keys' && <ApiKeys />}
+          {!isReadOnly && currentView === 'panel-api' && <PanelApiKeys />}
         </div>
         {showLogoutConfirm && (
           <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200" onClick={handleCancelLogout}>

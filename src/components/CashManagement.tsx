@@ -2,9 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { DollarSign, Search, Plus, ArrowRightLeft, Landmark, CreditCard, Banknote } from 'lucide-react';
 import { api } from '../lib/api';
 import { useCurrency } from '../CurrencyContext';
+import { useAuth } from '../App';
 
 export default function CashManagement() {
   const { FormatAmount, viewCurrency } = useCurrency();
+  const { isReadOnly } = useAuth();
   const [accounts, setAccounts] = useState<any[]>([]);
   const [transactions, setTransactions] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -51,6 +53,7 @@ export default function CashManagement() {
 
   const handleTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isReadOnly) return;
     try {
       await api.post('/cash-transfer', transferForm);
       setShowTransfer(false);
@@ -88,6 +91,7 @@ export default function CashManagement() {
           <h2 className="text-xl lg:text-2xl font-bold text-[#0F172A] tracking-tight">Kasa ve Nakit Akışı</h2>
           <p className="text-xs lg:text-sm text-[#64748B]">Banka, nakit ve platformlardaki bekleyen ödemelerinizi takip edin.</p>
         </div>
+        {!isReadOnly && (
         <div className="flex items-center gap-3">
           <button 
             onClick={() => setShowTransfer(true)}
@@ -96,6 +100,7 @@ export default function CashManagement() {
             <ArrowRightLeft className="w-4 h-4" /> Transfer Yap
           </button>
         </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
@@ -186,7 +191,7 @@ export default function CashManagement() {
         </div>
       </div>
 
-      {showTransfer && (
+      {!isReadOnly && showTransfer && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-900/50 backdrop-blur-sm">
           <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden animate-in zoom-in-95 duration-200">
             <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50">

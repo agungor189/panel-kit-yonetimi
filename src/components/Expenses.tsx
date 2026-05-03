@@ -3,13 +3,15 @@ import { Plus, Search, FileText, Download, Trash2, X, ChevronRight, Calculator, 
 import { api } from '../lib/api';
 import { useCurrency } from '../CurrencyContext';
 import { Transaction, ExpenseAttachment, Settings } from '../types';
+import { useAuth } from '../App';
 
 export default function Expenses({ settings }: { settings?: Settings | null }) {
+  const { isReadOnly } = useAuth();
   const { FormatAmount } = useCurrency();
   const [expenses, setExpenses] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
-  
+
   const [selectedExpense, setSelectedExpense] = useState<Transaction | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
 
@@ -29,7 +31,7 @@ export default function Expenses({ settings }: { settings?: Settings | null }) {
     }
   };
 
-  const filteredExpenses = expenses.filter(e => 
+  const filteredExpenses = expenses.filter(e =>
     (e.title?.toLowerCase().includes(search.toLowerCase())) ||
     (e.note?.toLowerCase().includes(search.toLowerCase())) ||
     (e.category?.toLowerCase().includes(search.toLowerCase())) ||
@@ -43,22 +45,24 @@ export default function Expenses({ settings }: { settings?: Settings | null }) {
           <h2 className="text-2xl font-black text-gray-900 tracking-tight">Gider Yönetimi</h2>
           <p className="text-gray-500 mt-1">Fatura, fiş ve harcamalarınızı detaylı takip edin.</p>
         </div>
-        <button 
-          onClick={() => setShowAddModal(true)}
-          className="px-6 py-2.5 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition shadow-lg shadow-blue-200 flex items-center"
-        >
-          <Plus className="w-5 h-5 mr-2" />
-          Yeni Gider Ekle
-        </button>
+        {!isReadOnly && (
+          <button
+            onClick={() => setShowAddModal(true)}
+            className="px-6 py-2.5 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition shadow-lg shadow-blue-200 flex items-center"
+          >
+            <Plus className="w-5 h-5 mr-2" />
+            Yeni Gider Ekle
+          </button>
+        )}
       </div>
 
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
         <div className="p-4 border-b border-gray-100 bg-gray-50 flex items-center gap-4">
           <div className="relative flex-1 max-w-sm">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
-            <input 
-              type="text" 
-              placeholder="Giderlerde ara..." 
+            <input
+              type="text"
+              placeholder="Giderlerde ara..."
               value={search}
               onChange={e => setSearch(e.target.value)}
               className="w-full pl-10 pr-4 py-2 bg-white border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all outline-none"
@@ -81,8 +85,8 @@ export default function Expenses({ settings }: { settings?: Settings | null }) {
             </thead>
             <tbody className="divide-y divide-gray-50">
               {filteredExpenses.map(expense => (
-                <tr 
-                  key={expense.id} 
+                <tr
+                  key={expense.id}
                   onClick={() => setSelectedExpense(expense)}
                   className="hover:bg-blue-50/50 cursor-pointer transition-colors group"
                 >
@@ -134,16 +138,16 @@ export default function Expenses({ settings }: { settings?: Settings | null }) {
       </div>
 
       {selectedExpense && (
-        <ExpenseDetailModal 
-          expense={selectedExpense} 
-          onClose={() => setSelectedExpense(null)} 
+        <ExpenseDetailModal
+          expense={selectedExpense}
+          onClose={() => setSelectedExpense(null)}
           onRefresh={loadExpenses}
           settings={settings}
         />
       )}
 
-      {showAddModal && (
-        <ExpenseAddModal 
+      {!isReadOnly && showAddModal && (
+        <ExpenseAddModal
           onClose={() => setShowAddModal(false)}
           onRefresh={loadExpenses}
           settings={settings}
@@ -154,6 +158,7 @@ export default function Expenses({ settings }: { settings?: Settings | null }) {
 }
 
 function ExpenseAddModal({ onClose, onRefresh, settings }: { onClose: () => void, onRefresh: () => void, settings?: Settings | null }) {
+  const { isReadOnly } = useAuth();
   const [saving, setSaving] = useState(false);
   const [cashAccounts, setCashAccounts] = useState<any[]>([]);
   const [formData, setFormData] = useState({
@@ -176,11 +181,12 @@ function ExpenseAddModal({ onClose, onRefresh, settings }: { onClose: () => void
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isReadOnly) return;
     if (!formData.title || !formData.amount || !formData.category || !formData.cash_account_id) {
       alert("Lütfen başlık, tutar, kategori ve kasa hesabı giriniz.");
       return;
     }
-     
+
     setSaving(true);
     try {
       await api.post('/expenses', {
@@ -208,12 +214,12 @@ function ExpenseAddModal({ onClose, onRefresh, settings }: { onClose: () => void
             <X className="w-5 h-5" />
           </button>
         </div>
-        
+
         <form onSubmit={handleSave} className="p-6 space-y-4 overflow-y-auto max-h-[70vh]">
           <div className="grid grid-cols-2 gap-4">
              <div>
                 <label className="block text-sm font-bold text-gray-700 mb-1">Tarih</label>
-                <input 
+                <input
                   type="date"
                   value={formData.date}
                   onChange={e => setFormData({...formData, date: e.target.value})}
@@ -234,10 +240,10 @@ function ExpenseAddModal({ onClose, onRefresh, settings }: { onClose: () => void
                 </select>
              </div>
           </div>
-          
+
           <div>
             <label className="block text-sm font-bold text-gray-700 mb-1">Başlık</label>
-            <input 
+            <input
               type="text"
               value={formData.title}
               onChange={e => setFormData({...formData, title: e.target.value})}
@@ -249,7 +255,7 @@ function ExpenseAddModal({ onClose, onRefresh, settings }: { onClose: () => void
 
           <div>
             <label className="block text-sm font-bold text-gray-700 mb-1">Açıklama</label>
-            <textarea 
+            <textarea
               value={formData.description}
               onChange={e => setFormData({...formData, description: e.target.value})}
               className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white transition-colors min-h-[80px]"
@@ -260,7 +266,7 @@ function ExpenseAddModal({ onClose, onRefresh, settings }: { onClose: () => void
           <div className="grid grid-cols-2 gap-4">
              <div>
                 <label className="block text-sm font-bold text-gray-700 mb-1">Tutar (₺)</label>
-                <input 
+                <input
                   type="number"
                   step="0.01"
                   value={formData.amount}
@@ -283,11 +289,11 @@ function ExpenseAddModal({ onClose, onRefresh, settings }: { onClose: () => void
                 </select>
              </div>
           </div>
-          
+
           <div className="grid grid-cols-2 gap-4">
              <div>
                 <label className="block text-sm font-bold text-gray-700 mb-1">Firma / Tedarikçi</label>
-                <input 
+                <input
                   type="text"
                   value={formData.supplier}
                   onChange={e => setFormData({...formData, supplier: e.target.value})}
@@ -297,7 +303,7 @@ function ExpenseAddModal({ onClose, onRefresh, settings }: { onClose: () => void
              </div>
              <div>
                 <label className="block text-sm font-bold text-gray-700 mb-1">Fatura Numarası</label>
-                <input 
+                <input
                   type="text"
                   value={formData.invoice_number}
                   onChange={e => setFormData({...formData, invoice_number: e.target.value})}
@@ -305,7 +311,7 @@ function ExpenseAddModal({ onClose, onRefresh, settings }: { onClose: () => void
                 />
              </div>
           </div>
-          
+
           <div className="pt-2">
              <p className="text-sm text-gray-500 mb-4 px-1">Fatura, fiş veya diğer ekleri gideri oluşturduktan sonra detay ekranından yükleyebilirsiniz.</p>
              <button
@@ -323,6 +329,7 @@ function ExpenseAddModal({ onClose, onRefresh, settings }: { onClose: () => void
 }
 
 function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, settings }: { expense: Transaction, onClose: () => void, onRefresh: () => void, settings?: Settings | null }) {
+  const { isReadOnly } = useAuth();
   const { FormatAmount } = useCurrency();
   const [expense, setExpense] = useState<Transaction>(currentExpense);
   const [attachments, setAttachments] = useState<ExpenseAttachment[]>([]);
@@ -330,7 +337,7 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
-  
+
   // Edit form state
   const [isEditing, setIsEditing] = useState(false);
   const [formData, setFormData] = useState({
@@ -373,6 +380,7 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
   };
 
   const handleDelete = async () => {
+    if (isReadOnly) return;
     if (!confirm("Bu gider kaydını ve bağlı ekleri silmek istediğinize emin misiniz?")) return;
     try {
       await api.delete(`/expenses/${expense.id}`);
@@ -385,6 +393,7 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
 
   const handleUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isReadOnly) return;
     setSaving(true);
     try {
       await api.put(`/expenses/${expense.id}`, {
@@ -404,9 +413,10 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (isReadOnly) return;
     if (!e.target.files || e.target.files.length === 0) return;
     const file = e.target.files[0];
-    
+
     // Check sizes/types basically (already checked in backend)
     if (file.size > 10 * 1024 * 1024) {
       alert('Dosya boyutu 10MB tan büyük olamaz.');
@@ -429,6 +439,7 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
   };
 
   const handleDeleteAttachment = async (attId: string) => {
+    if (isReadOnly) return;
     if (!confirm("Bunu silmek istediğinizden emin misiniz?")) return;
     try {
       await api.delete(`/expenses/${expense.id}/attachments/${attId}`);
@@ -449,23 +460,25 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
             <p className="text-gray-500 text-sm mt-1">{new Date(expense.date).toLocaleDateString('tr-TR')} · {expense.category}</p>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={handleDelete} className="p-2 text-danger hover:bg-red-50 rounded-lg transition-colors" title="Gideri Sil">
-              <Trash2 className="w-5 h-5" />
-            </button>
+            {!isReadOnly && (
+              <button onClick={handleDelete} className="p-2 text-danger hover:bg-red-50 rounded-lg transition-colors" title="Gideri Sil">
+                <Trash2 className="w-5 h-5" />
+              </button>
+            )}
             <button onClick={onClose} className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
               <X className="w-5 h-5" />
             </button>
           </div>
         </div>
-        
+
         <div className="flex border-b border-gray-100 px-6 pt-2 bg-gray-50/50">
-          <button 
+          <button
             onClick={() => setActiveTab('details')}
             className={`px-4 py-3 font-bold border-b-2 transition-colors ${activeTab === 'details' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
           >
             Gider Bilgileri
           </button>
-          <button 
+          <button
             onClick={() => setActiveTab('attachments')}
             className={`px-4 py-3 font-bold border-b-2 transition-colors flex items-center gap-2 ${activeTab === 'attachments' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
           >
@@ -488,7 +501,7 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                         <div className="grid grid-cols-2 gap-4">
                            <div>
                               <label className="block text-sm font-bold text-gray-700 mb-1">Tarih</label>
-                              <input 
+                              <input
                                 type="date"
                                 value={formData.date}
                                 onChange={e => setFormData({...formData, date: e.target.value})}
@@ -509,10 +522,10 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                               </select>
                            </div>
                         </div>
-                        
+
                         <div>
                           <label className="block text-sm font-bold text-gray-700 mb-1">Başlık</label>
-                          <input 
+                          <input
                             type="text"
                             value={formData.title}
                             onChange={e => setFormData({...formData, title: e.target.value})}
@@ -520,20 +533,20 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                             required
                           />
                         </div>
-              
+
                         <div>
                           <label className="block text-sm font-bold text-gray-700 mb-1">Açıklama</label>
-                          <textarea 
+                          <textarea
                             value={formData.description}
                             onChange={e => setFormData({...formData, description: e.target.value})}
                             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 min-h-[80px]"
                           />
                         </div>
-              
+
                         <div className="grid grid-cols-2 gap-4">
                            <div>
                               <label className="block text-sm font-bold text-gray-700 mb-1">Tutar (₺)</label>
-                              <input 
+                              <input
                                 type="number"
                                 step="0.01"
                                 value={formData.amount}
@@ -557,11 +570,11 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                               </select>
                            </div>
                         </div>
-                        
+
                         <div className="grid grid-cols-2 gap-4">
                            <div>
                               <label className="block text-sm font-bold text-gray-700 mb-1">Firma / Tedarikçi</label>
-                              <input 
+                              <input
                                 type="text"
                                 value={formData.supplier}
                                 onChange={e => setFormData({...formData, supplier: e.target.value})}
@@ -570,7 +583,7 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                            </div>
                            <div>
                               <label className="block text-sm font-bold text-gray-700 mb-1">Fatura Numarası</label>
-                              <input 
+                              <input
                                 type="text"
                                 value={formData.invoice_number}
                                 onChange={e => setFormData({...formData, invoice_number: e.target.value})}
@@ -593,9 +606,11 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                              <p className="text-gray-500 text-sm font-medium mb-1">Toplam Tutar</p>
                              <div className="text-3xl font-black text-gray-900 tracking-tight"><FormatAmount amount={expense.amount || 0} originalCurrency={(expense as any).currency || 'TRY'} exchangeRateAtTransaction={expense.exchange_rate_at_transaction} /></div>
                            </div>
-                           <button onClick={() => setIsEditing(true)} className="px-4 py-2 bg-white border border-gray-200 text-gray-700 font-bold rounded-lg shadow-sm hover:bg-gray-50 transition-colors">
-                             Düzenle
-                           </button>
+                           {!isReadOnly && (
+                             <button onClick={() => setIsEditing(true)} className="px-4 py-2 bg-white border border-gray-200 text-gray-700 font-bold rounded-lg shadow-sm hover:bg-gray-50 transition-colors">
+                               Düzenle
+                             </button>
+                           )}
                         </div>
 
                         <div className="grid grid-cols-2 sm:grid-cols-3 gap-6">
@@ -629,7 +644,7 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                              </div>
                           </div>
                         )}
-                        
+
                         <div className="pt-6 border-t border-gray-100 flex items-center gap-4 text-xs text-gray-400">
                           <p>Oluşturulma: {expense.created_at ? new Date(expense.created_at).toLocaleString('tr-TR') : '-'}</p>
                           <p>ID: {expense.id}</p>
@@ -646,12 +661,14 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                         <h4 className="font-bold text-blue-900 text-sm">Fatura ve Ek Belgeler</h4>
                         <p className="text-blue-700/70 text-xs mt-0.5">JPG, PNG, WEBP, PDF - Maks 10MB</p>
                       </div>
-                      <label className="px-4 py-2 bg-blue-600 text-white font-bold text-sm rounded-lg hover:bg-blue-700 cursor-pointer transition shadow-sm relative overflow-hidden">
-                        {uploading ? (
-                           <span className="flex items-center"><div className="w-4 h-4 mr-2 border-2 border-white/30 border-t-white rounded-full animate-spin"></div> Yükleniyor...</span>
-                        ) : "Dosya Yükle"}
-                        <input type="file" className="hidden" accept=".jpg,.jpeg,.png,.webp,.pdf" onChange={handleFileUpload} disabled={uploading}/>
-                      </label>
+                      {!isReadOnly && (
+                        <label className="px-4 py-2 bg-blue-600 text-white font-bold text-sm rounded-lg hover:bg-blue-700 cursor-pointer transition shadow-sm relative overflow-hidden">
+                          {uploading ? (
+                             <span className="flex items-center"><div className="w-4 h-4 mr-2 border-2 border-white/30 border-t-white rounded-full animate-spin"></div> Yükleniyor...</span>
+                          ) : "Dosya Yükle"}
+                          <input type="file" className="hidden" accept=".jpg,.jpeg,.png,.webp,.pdf" onChange={handleFileUpload} disabled={uploading}/>
+                        </label>
+                      )}
                     </div>
 
                     <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
@@ -670,15 +687,15 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                                 <img src={url} alt={att.file_name} className="w-full h-full object-cover" />
                               </a>
                             )}
-                            <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                              <button 
+                            {!isReadOnly && <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button
                                 onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDeleteAttachment(att.id); }}
                                 className="p-1.5 bg-red-600 text-white rounded-md shadow-lg hover:bg-red-700"
                                 title="Sil"
                               >
                                 <Trash2 className="w-4 h-4" />
                               </button>
-                            </div>
+                            </div>}
                             <div className="p-2 border-t border-gray-100 bg-gray-50 flex items-center justify-between text-xs">
                               <span className="truncate flex-1 text-gray-500" title={att.file_name}>{att.file_name}</span>
                               <span className="text-gray-400 ml-2">{(att.file_size / 1024).toFixed(0)}KB</span>

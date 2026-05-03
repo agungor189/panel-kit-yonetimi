@@ -1,3 +1,5 @@
+export type UserRole = 'admin' | 'user' | 'readonly';
+
 export interface Product {
   id: string;
   name: string;

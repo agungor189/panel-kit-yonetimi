@@ -2,8 +2,10 @@ import React, { useState } from 'react';
 import { X, Save, Edit3, Trash2, MapPin, Truck, Hash, User, Phone, Package, Calendar } from 'lucide-react';
 import { useCurrency } from '../../CurrencyContext';
 import { api } from '../../lib/api';
+import { useAuth } from '../../App';
 
 export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: any, onClose: () => void, onUpdated?: () => void }) {
+  const { isReadOnly } = useAuth();
   const { FormatAmount } = useCurrency();
   const [isEditing, setIsEditing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -18,6 +20,7 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
   });
 
   const handleSave = async () => {
+    if (isReadOnly) return;
     setSaving(true);
     try {
       if (formData.status !== sale.status) {
@@ -46,7 +49,7 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
             </h2>
           </div>
           <div className="flex items-center gap-3">
-             {!isEditing ? (
+             {!isReadOnly && (!isEditing ? (
                <button onClick={() => setIsEditing(true)} className="flex items-center gap-2 px-4 py-2 bg-gray-100/80 hover:bg-gray-200 text-gray-700 font-bold rounded-xl transition-colors">
                  <Edit3 className="w-4 h-4" /> Düzenle
                </button>
@@ -54,7 +57,7 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
                <button disabled={saving} onClick={handleSave} className="flex items-center gap-2 px-4 py-2 bg-primary text-white font-bold rounded-xl hover:bg-primary-hover transition-colors">
                  {saving ? 'Kaydediliyor...' : <><Save className="w-4 h-4" /> Kaydet</>}
                </button>
-             )}
+             ))}
             <button onClick={onClose} className="p-2 hover:bg-gray-100 text-gray-400 hover:text-gray-600 rounded-xl transition-colors">
               <X className="w-6 h-6" />
             </button>
