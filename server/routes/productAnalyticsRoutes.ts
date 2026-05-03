@@ -4,48 +4,86 @@ import Database from "better-sqlite3";
 export function createProductAnalyticsRouter(db: Database.Database) {
   const router = Router();
 
-  const buildWhere = (req: any) => {
-    const { startDate, endDate, material, model, pipeSize, tubeType } = req.query;
-    let where = "p.status != 'deleted'";
-    const params: any[] = [];
+  const firstQueryValue = (value: unknown): string | undefined => {
+    if (Array.isArray(value)) return value[0] ? String(value[0]) : undefined;
+    if (value === undefined || value === null) return undefined;
+    return String(value);
+  };
 
-    if (material && material !== 'Tümü' && material !== 'Hepsi') {
-      where += " AND IFNULL(p.normalized_material, 'Bilinmiyor') = ?";
-      params.push(material);
+  const isActiveFilter = (value: string | undefined) =>
+    !!value && value !== 'Tümü' && value !== 'Hepsi';
+
+  const normalizeEndDate = (value: string) =>
+    /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value} 23:59:59` : value;
+
+  const buildWhere = (req: any) => {
+    const startDate = firstQueryValue(req.query.startDate);
+    const endDate = firstQueryValue(req.query.endDate);
+    const material = firstQueryValue(req.query.material);
+    const model = firstQueryValue(req.query.model);
+    const pipeSize = firstQueryValue(req.query.pipeSize ?? req.query.pipe_size);
+    const tubeType = firstQueryValue(req.query.tubeType ?? req.query.tube_type);
+
+    let productWhere = "p.status != 'deleted'";
+    const productParams: any[] = [];
+
+    if (isActiveFilter(material)) {
+      productWhere += " AND IFNULL(p.normalized_material, 'Bilinmiyor') = ?";
+      productParams.push(material);
     }
-    if (model && model !== 'Tümü' && model !== 'Hepsi') {
-      where += " AND IFNULL(p.normalized_model, 'Bilinmiyor') = ?";
-      params.push(model);
+    if (isActiveFilter(model)) {
+      productWhere += " AND IFNULL(p.normalized_model, 'Bilinmiyor') = ?";
+      productParams.push(model);
     }
-    if (pipeSize && pipeSize !== 'Tümü' && pipeSize !== 'Hepsi') {
-      where += " AND COALESCE(p.normalized_pipe_size, p.normalized_size, 'Bilinmiyor') = ?";
-      params.push(pipeSize);
+    if (isActiveFilter(pipeSize)) {
+      productWhere += " AND COALESCE(p.normalized_pipe_size, p.normalized_size, 'Bilinmiyor') = ?";
+      productParams.push(pipeSize);
     }
-    if (tubeType && tubeType !== 'Tümü' && tubeType !== 'Hepsi') {
-      where += " AND IFNULL(p.normalized_tube_type, 'Bilinmiyor') = ?";
-      params.push(tubeType);
+    if (isActiveFilter(tubeType)) {
+      productWhere += " AND IFNULL(p.normalized_tube_type, 'Bilinmiyor') = ?";
+      productParams.push(tubeType);
     }
 
     let salesWhere = "s.status NOT IN ('İptal Edildi', 'İade Edildi')";
+    const salesParams: any[] = [];
     if (startDate) {
       salesWhere += " AND s.created_at >= ?";
-      params.push(startDate);
+      salesParams.push(startDate);
     }
     if (endDate) {
       salesWhere += " AND s.created_at <= ?";
-      params.push(endDate);
+      salesParams.push(normalizeEndDate(endDate));
     }
 
-    return { where, salesWhere, params };
+    return {
+      productWhere,
+      salesWhere,
+      productParams,
+      salesParams,
+      queryParams: [...salesParams, ...productParams],
+    };
   };
 
-  const getValidSalesJoin = (salesWhere: string) => `
+  const getSalesStatsJoin = (salesWhere: string) => `
     LEFT JOIN (
-      SELECT si.product_id, si.quantity, si.unit_price, si.sale_id
+      SELECT
+        si.product_id,
+        SUM(si.quantity) as soldQty,
+        SUM(si.unit_price * si.quantity) as revenue,
+        MAX(s.created_at) as lastSaleDate
       FROM sale_items si
       JOIN sales s ON si.sale_id = s.id
       WHERE ${salesWhere}
-    ) vsi ON vsi.product_id = p.id
+      GROUP BY si.product_id
+    ) ss ON ss.product_id = p.id
+  `;
+
+  const getStockJoin = () => `
+    LEFT JOIN (
+      SELECT product_id, SUM(stock) as stock
+      FROM product_platforms
+      GROUP BY product_id
+    ) ws ON ws.product_id = p.id
   `;
 
   // 0. Filter Options
@@ -64,33 +102,35 @@ export function createProductAnalyticsRouter(db: Database.Database) {
   // 1. Dashboard / Summary
   router.get("/products/summary", (req, res) => {
     try {
-      const { where, salesWhere, params } = buildWhere(req);
-      const joinSql = getValidSalesJoin(salesWhere);
+      const { productWhere, salesWhere, queryParams } = buildWhere(req);
+      const salesJoinSql = getSalesStatsJoin(salesWhere);
+      const stockJoinSql = getStockJoin();
       
       const summary = db.prepare(`
         SELECT 
           COUNT(DISTINCT p.id) as totalSku,
-          IFNULL(SUM(vsi.quantity), 0) as totalSoldQty,
-          IFNULL(SUM(vsi.unit_price * vsi.quantity), 0) as totalRevenue,
-          (SELECT SUM(stock) FROM product_platforms w JOIN products p2 ON w.product_id = p2.id WHERE p2.status != 'deleted') as totalStock
+          IFNULL(SUM(ss.soldQty), 0) as totalSoldQty,
+          IFNULL(SUM(ss.revenue), 0) as totalRevenue,
+          IFNULL(SUM(ws.stock), 0) as totalStock
         FROM products p
-        ${joinSql}
-        WHERE ${where}
-      `).get(...params) as any;
+        ${salesJoinSql}
+        ${stockJoinSql}
+        WHERE ${productWhere}
+      `).get(...queryParams) as any;
 
       const getTop = (field: string) => db.prepare(`
-        SELECT ${field} as name, SUM(vsi.quantity) as qty
-        FROM products p ${joinSql}
-        WHERE ${where} AND ${field} IS NOT NULL AND ${field} != 'Bilinmiyor'
-        GROUP BY name ORDER BY qty DESC LIMIT 1
-      `).get(...params) as any;
+        SELECT ${field} as name, IFNULL(SUM(ss.soldQty), 0) as qty
+        FROM products p ${salesJoinSql}
+        WHERE ${productWhere} AND ${field} IS NOT NULL AND ${field} != 'Bilinmiyor'
+        GROUP BY ${field} ORDER BY qty DESC LIMIT 1
+      `).get(...queryParams) as any;
 
       const getBottom = (field: string) => db.prepare(`
-        SELECT ${field} as name, SUM(vsi.quantity) as qty
-        FROM products p ${joinSql}
-        WHERE ${where} AND ${field} IS NOT NULL AND ${field} != 'Bilinmiyor'
-        GROUP BY name ORDER BY qty ASC LIMIT 1
-      `).get(...params) as any;
+        SELECT ${field} as name, IFNULL(SUM(ss.soldQty), 0) as qty
+        FROM products p ${salesJoinSql}
+        WHERE ${productWhere} AND ${field} IS NOT NULL AND ${field} != 'Bilinmiyor'
+        GROUP BY ${field} ORDER BY qty ASC LIMIT 1
+      `).get(...queryParams) as any;
 
       const topMaterial = getTop("IFNULL(p.normalized_material, 'Bilinmiyor')");
       const topModel = getTop("IFNULL(p.normalized_model, 'Bilinmiyor')");
@@ -120,8 +160,9 @@ export function createProductAnalyticsRouter(db: Database.Database) {
   // 2. Cross Analysis
   router.get("/products/cross", (req, res) => {
     try {
-      const { where, salesWhere, params } = buildWhere(req);
-      const joinSql = getValidSalesJoin(salesWhere);
+      const { productWhere, salesWhere, queryParams } = buildWhere(req);
+      const salesJoinSql = getSalesStatsJoin(salesWhere);
+      const stockJoinSql = getStockJoin();
       
       const query = `
         SELECT 
@@ -130,21 +171,21 @@ export function createProductAnalyticsRouter(db: Database.Database) {
           COALESCE(p.normalized_pipe_size, p.normalized_size, 'Bilinmiyor') as size,
           IFNULL(p.normalized_tube_type, 'Bilinmiyor') as tubeType,
           COUNT(DISTINCT p.id) as skuCount,
-          IFNULL(SUM(vsi.quantity), 0) as soldQty,
-          IFNULL(SUM(vsi.unit_price * vsi.quantity), 0) as revenue,
-          (SELECT SUM(w.stock) FROM product_platforms w WHERE w.product_id IN (
-            SELECT id FROM products p2 
-            WHERE IFNULL(p2.normalized_material, 'Bilinmiyor') = IFNULL(p.normalized_material, 'Bilinmiyor') 
-              AND IFNULL(p2.normalized_model, 'Bilinmiyor') = IFNULL(p.normalized_model, 'Bilinmiyor')
-              AND COALESCE(p2.normalized_pipe_size, p2.normalized_size, 'Bilinmiyor') = COALESCE(p.normalized_pipe_size, p.normalized_size, 'Bilinmiyor')
-          )) as currentStock
+          IFNULL(SUM(ss.soldQty), 0) as soldQty,
+          IFNULL(SUM(ss.revenue), 0) as revenue,
+          IFNULL(SUM(ws.stock), 0) as currentStock
         FROM products p
-        ${joinSql}
-        WHERE ${where}
-        GROUP BY material, model, size, tubeType
+        ${salesJoinSql}
+        ${stockJoinSql}
+        WHERE ${productWhere}
+        GROUP BY
+          IFNULL(p.normalized_material, 'Bilinmiyor'),
+          IFNULL(p.normalized_model, 'Bilinmiyor'),
+          COALESCE(p.normalized_pipe_size, p.normalized_size, 'Bilinmiyor'),
+          IFNULL(p.normalized_tube_type, 'Bilinmiyor')
         ORDER BY soldQty DESC
       `;
-      res.json(db.prepare(query).all(...params));
+      res.json(db.prepare(query).all(...queryParams));
     } catch (error) {
       res.status(500).json({ error: "Internal error" });
     }
@@ -153,8 +194,8 @@ export function createProductAnalyticsRouter(db: Database.Database) {
   // 3. Reorder Suggestions
   router.get("/products/reorder-suggestions", (req, res) => {
     try {
-      const { where, salesWhere, params } = buildWhere(req);
-      const joinSql = getValidSalesJoin(salesWhere);
+      const { productWhere, salesWhere, queryParams } = buildWhere(req);
+      const salesJoinSql = getSalesStatsJoin(salesWhere);
       
       const query = `
         SELECT 
@@ -166,17 +207,16 @@ export function createProductAnalyticsRouter(db: Database.Database) {
           COALESCE(p.normalized_pipe_size, p.normalized_size, 'Bilinmiyor') as size,
           IFNULL(p.normalized_tube_type, 'Bilinmiyor') as tubeType,
           IFNULL((SELECT SUM(w.stock) FROM product_platforms w WHERE w.product_id = p.id), 0) as currentStock,
-          IFNULL(SUM(vsi.quantity), 0) as soldQty,
-          IFNULL(SUM(vsi.unit_price * vsi.quantity), 0) as revenue,
-          MAX(s.created_at) as lastSaleDate
+          IFNULL(ss.soldQty, 0) as soldQty,
+          IFNULL(ss.revenue, 0) as revenue,
+          ss.lastSaleDate as lastSaleDate
         FROM products p
-        ${joinSql}
-        LEFT JOIN sales s ON vsi.sale_id = s.id
-        WHERE ${where}
+        ${salesJoinSql}
+        WHERE ${productWhere}
         GROUP BY p.id
         ORDER BY soldQty DESC, currentStock ASC
       `;
-      res.json(db.prepare(query).all(...params));
+      res.json(db.prepare(query).all(...queryParams));
     } catch (error) {
       res.status(500).json({ error: "Internal error" });
     }
@@ -185,40 +225,25 @@ export function createProductAnalyticsRouter(db: Database.Database) {
   // 4. Reports (Material, Model, Size)
   router.get("/products/reports", (req, res) => {
     try {
-      const { where, salesWhere, params } = buildWhere(req);
-      const joinSql = getValidSalesJoin(salesWhere);
-      
-      const runReport = (groupCol: string) => db.prepare(`
-        SELECT 
-          ${groupCol} as name,
-          COUNT(DISTINCT p.id) as skuCount,
-          IFNULL(SUM(vsi.quantity), 0) as soldQty,
-          IFNULL(SUM(vsi.unit_price * vsi.quantity), 0) as revenue,
-          (SELECT SUM(w.stock) FROM product_platforms w JOIN products p2 ON w.product_id = p2.id WHERE COALESCE(p2.normalized_pipe_size, p2.normalized_size, p2.normalized_material, p2.normalized_model, 'Bilinmiyor') = ${groupCol} OR p2.normalized_material = ${groupCol} OR p2.normalized_model = ${groupCol} OR COALESCE(p2.normalized_pipe_size, p2.normalized_size, 'Bilinmiyor') = ${groupCol}) as currentStock
-        FROM products p
-        ${joinSql}
-        WHERE ${where}
-        GROUP BY name
-        ORDER BY soldQty DESC
-      `).all(...params);
+      const { productWhere, salesWhere, queryParams } = buildWhere(req);
+      const salesJoinSql = getSalesStatsJoin(salesWhere);
+      const stockJoinSql = getStockJoin();
 
-      // We'll write specific subqueries for currentStock to be simpler later, but doing an approx via a complex grouped subquery is hard, let's fix the stock subquery.
-      // Wait, let's do group level stock directly via another query if needed, or by joining warehouse_stocks in a derived table.
       const getStats = (groupCol: string) => {
         return db.prepare(`
           SELECT 
             ${groupCol} as name,
             COUNT(DISTINCT p.id) as skuCount,
-            IFNULL(SUM(vsi.quantity), 0) as soldQty,
-            IFNULL(SUM(vsi.unit_price * vsi.quantity), 0) as revenue,
+            IFNULL(SUM(ss.soldQty), 0) as soldQty,
+            IFNULL(SUM(ss.revenue), 0) as revenue,
             IFNULL(SUM(ws.stock), 0) as currentStock
           FROM products p
-          ${joinSql}
-          LEFT JOIN (SELECT product_id, SUM(stock) as stock FROM product_platforms GROUP BY product_id) ws ON ws.product_id = p.id
-          WHERE ${where}
-          GROUP BY name
+          ${salesJoinSql}
+          ${stockJoinSql}
+          WHERE ${productWhere}
+          GROUP BY ${groupCol}
           ORDER BY soldQty DESC
-        `).all(...params);
+        `).all(...queryParams);
       };
 
       res.json({
@@ -235,28 +260,28 @@ export function createProductAnalyticsRouter(db: Database.Database) {
   // 5. Charts Data
   router.get("/products/charts", (req, res) => {
     try {
-      const { where, salesWhere, params } = buildWhere(req);
-      const joinSql = getValidSalesJoin(salesWhere);
+      const { productWhere, salesWhere, queryParams } = buildWhere(req);
+      const salesJoinSql = getSalesStatsJoin(salesWhere);
 
       const getDistribution = (groupCol: string, limit: number = 10) => db.prepare(`
-        SELECT ${groupCol} as name, IFNULL(SUM(vsi.quantity), 0) as value
-        FROM products p ${joinSql}
-        WHERE ${where}
-        GROUP BY name ORDER BY value DESC LIMIT ${limit}
-      `).all(...params);
+        SELECT ${groupCol} as name, IFNULL(SUM(ss.soldQty), 0) as value
+        FROM products p ${salesJoinSql}
+        WHERE ${productWhere}
+        GROUP BY ${groupCol} ORDER BY value DESC LIMIT ${limit}
+      `).all(...queryParams);
 
       const getSalesTrend = () => db.prepare(`
         SELECT 
           strftime('%Y-%m-%d', s.created_at) as date,
-          SUM(vsi.quantity) as qty,
-          SUM(vsi.unit_price * vsi.quantity) as revenue
-        FROM products p
-        ${joinSql}
-        JOIN sales s ON vsi.sale_id = s.id
-        WHERE ${where}
+          SUM(si.quantity) as qty,
+          SUM(si.unit_price * si.quantity) as revenue
+        FROM sale_items si
+        JOIN sales s ON si.sale_id = s.id
+        JOIN products p ON p.id = si.product_id
+        WHERE ${salesWhere} AND ${productWhere}
         GROUP BY date
         ORDER BY date ASC
-      `).all(...params);
+      `).all(...queryParams);
 
       res.json({
         materialShare: getDistribution("IFNULL(p.normalized_material, 'Bilinmiyor')"),
