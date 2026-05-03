@@ -191,6 +191,45 @@ function cleanText(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function mergeProductPlatforms(platforms: any[] | undefined, fallbackPrice?: unknown): any[] {
+  if (!Array.isArray(platforms)) return [];
+
+  const merged = new Map<string, any>();
+  for (const platform of platforms) {
+    const name = cleanText(platform?.name ?? platform?.platform_name);
+    if (!name) continue;
+
+    const existing = merged.get(name) || {
+      ...platform,
+      name,
+      platform_name: name,
+      stock: 0,
+      is_listed: 0,
+    };
+
+    if (platform?.stock !== undefined && platform.stock !== null) {
+      existing.stock = (Number(existing.stock) || 0) + (Number(platform.stock) || 0);
+      existing.stockProvided = true;
+    }
+
+    if (platform?.price !== undefined && platform.price !== null) {
+      existing.price = Number(platform.price) || 0;
+      existing.priceProvided = true;
+    } else if (existing.price === undefined && fallbackPrice !== undefined) {
+      existing.price = Number(fallbackPrice) || 0;
+    }
+
+    if (platform?.is_listed !== undefined && platform.is_listed !== null) {
+      existing.is_listed = existing.is_listed || (platform.is_listed ? 1 : 0);
+      existing.listedProvided = true;
+    }
+
+    merged.set(name, existing);
+  }
+
+  return [...merged.values()];
+}
+
 function buildExpenseCashDescription(expense: any): string {
   const category = cleanText(expense?.category) || 'Gider';
   const detail =
@@ -996,8 +1035,10 @@ async function startServer() {
     pipe_size: z.string().optional().default("Bilinmiyor"),
     platforms: z.array(z.object({
       name: z.string(),
-      stock: z.number().min(0, "Stok negatif olamaz")
-    })).optional()
+      stock: z.number().min(0, "Stok negatif olamaz"),
+      price: z.number().min(0, "Platform fiyatı negatif olamaz").optional(),
+      is_listed: z.boolean().optional()
+    }).passthrough()).optional()
   }).passthrough();
 
   app.post("/api/products/bulk-import", (req, res) => {
@@ -1031,8 +1072,8 @@ async function startServer() {
           );
 
           if (validated.platforms) {
-             for (const p of validated.platforms) {
-               db.prepare(`INSERT INTO product_platforms (id, product_id, platform_name, stock, price, is_listed) VALUES (?, ?, ?, ?, ?, ?)`).run(uuidv4(), id, p.name, p.stock || 0, p.price || validated.sale_price, p.is_listed ? 1 : 0);
+             for (const p of mergeProductPlatforms(validated.platforms, validated.sale_price)) {
+               db.prepare(`INSERT INTO product_platforms (id, product_id, platform_name, stock, price, is_listed) VALUES (?, ?, ?, ?, ?, ?)`).run(uuidv4(), id, p.name, p.stock || 0, p.price ?? validated.sale_price ?? 0, p.is_listed ? 1 : 0);
              }
           }
         }
@@ -1099,8 +1140,8 @@ async function startServer() {
         VALUES (?, ?, ?, ?, ?, ?)
       `);
 
-      for (const p of platforms) {
-        insertPlatform.run(uuidv4(), id, p.name, p.stock || 0, p.price || sale_price, p.is_listed ? 1 : 0);
+      for (const p of mergeProductPlatforms(platforms, sale_price)) {
+        insertPlatform.run(uuidv4(), id, p.name, p.stock || 0, p.price ?? sale_price ?? 0, p.is_listed ? 1 : 0);
       }
 
       if (images && Array.isArray(images)) {
@@ -1242,13 +1283,13 @@ async function startServer() {
       `);
 
       if (Array.isArray(platforms)) {
-        for (const p of platforms) {
+        for (const p of mergeProductPlatforms(platforms, sale_price)) {
           const platformName = p.name ?? p.platform_name;
           if (!platformName) continue;
 
-          const stockProvided = p.stock !== undefined && p.stock !== null;
-          const priceProvided = p.price !== undefined && p.price !== null;
-          const listedProvided = p.is_listed !== undefined && p.is_listed !== null;
+          const stockProvided = p.stockProvided === true;
+          const priceProvided = p.priceProvided === true;
+          const listedProvided = p.listedProvided === true;
           const stockValue = stockProvided ? Number(p.stock) || 0 : 0;
           const priceValue = priceProvided ? Number(p.price) || 0 : (Number(sale_price) || 0);
           const listedValue = p.is_listed ? 1 : 0;

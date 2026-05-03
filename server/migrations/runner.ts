@@ -283,6 +283,97 @@ const migrations: Migration[] = [
       try { db.exec("CREATE INDEX IF NOT EXISTS idx_cash_transactions_deleted ON cash_transactions(is_deleted)"); } catch (_) {}
     },
   },
+  {
+    version: 21,
+    name: "dedupe_product_platforms_unique_index",
+    up(db) {
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(product_platforms)").all() as { name: string }[]).map((col) => col.name),
+      );
+      if (!columns.has("product_id") || !columns.has("platform_name")) return;
+
+      try {
+        db.exec("UPDATE product_platforms SET platform_name = TRIM(platform_name) WHERE platform_name IS NOT NULL");
+      } catch (_) {}
+
+      const orderParts = [];
+      if (columns.has("updated_at")) orderParts.push("datetime(COALESCE(updated_at, '1970-01-01')) DESC");
+      if (columns.has("created_at")) orderParts.push("datetime(COALESCE(created_at, '1970-01-01')) DESC");
+      orderParts.push("rowid DESC");
+      const orderClause = `ORDER BY ${orderParts.join(", ")}`;
+
+      const duplicateGroups = db.prepare(`
+        SELECT product_id, platform_name
+        FROM product_platforms
+        WHERE product_id IS NOT NULL
+          AND platform_name IS NOT NULL
+        GROUP BY product_id, platform_name
+        HAVING COUNT(*) > 1
+      `).all() as { product_id: string; platform_name: string }[];
+
+      for (const group of duplicateGroups) {
+        const rows = db.prepare(`
+          SELECT rowid as _rowid, *
+          FROM product_platforms
+          WHERE product_id = ? AND platform_name = ?
+          ${orderClause}
+        `).all(group.product_id, group.platform_name) as any[];
+
+        if (rows.length <= 1) continue;
+
+        const keeper = rows[0];
+        const stockTotal = columns.has("stock")
+          ? rows.reduce((total, row) => total + (Number(row.stock) || 0), 0)
+          : null;
+        const priceRow = columns.has("price")
+          ? rows.find((row) => row.price !== null && row.price !== undefined && row.price !== "")
+          : null;
+        const isListed = columns.has("is_listed")
+          ? (rows.some((row) => Number(row.is_listed) === 1) ? 1 : 0)
+          : null;
+
+        const assignments: string[] = [];
+        const values: unknown[] = [];
+        if (columns.has("stock")) {
+          assignments.push("stock = ?");
+          values.push(stockTotal);
+        }
+        if (columns.has("price")) {
+          assignments.push("price = ?");
+          values.push(priceRow ? Number(priceRow.price) : null);
+        }
+        if (columns.has("is_listed")) {
+          assignments.push("is_listed = ?");
+          values.push(isListed);
+        }
+        for (const optionalColumn of ["sku", "barcode"]) {
+          if (!columns.has(optionalColumn)) continue;
+          const source = rows.find((row) => String(row[optionalColumn] || "").trim() !== "");
+          if (source) {
+            assignments.push(`${optionalColumn} = ?`);
+            values.push(source[optionalColumn]);
+          }
+        }
+        if (columns.has("updated_at")) assignments.push("updated_at = CURRENT_TIMESTAMP");
+
+        if (assignments.length > 0) {
+          db.prepare(`UPDATE product_platforms SET ${assignments.join(", ")} WHERE rowid = ?`).run(
+            ...values,
+            keeper._rowid,
+          );
+        }
+
+        const duplicateRowIds = rows.slice(1).map((row) => row._rowid);
+        const placeholders = duplicateRowIds.map(() => "?").join(",");
+        db.prepare(`DELETE FROM product_platforms WHERE rowid IN (${placeholders})`).run(...duplicateRowIds);
+      }
+
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_product_platforms_unique_product_platform
+        ON product_platforms(product_id, platform_name)
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {
