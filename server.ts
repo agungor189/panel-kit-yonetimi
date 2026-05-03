@@ -2829,6 +2829,13 @@ async function startServer() {
     }
   });
 
+  const getSaleWithItems = (saleId: string) => {
+    const sale = db.prepare("SELECT * FROM sales WHERE id = ?").get(saleId) as any;
+    if (!sale) return null;
+    sale.items = db.prepare("SELECT * FROM sale_items WHERE sale_id = ?").all(sale.id);
+    return sale;
+  };
+
   app.get("/api/sales", (req, res) => {
     try {
       const sales = db.prepare("SELECT * FROM sales ORDER BY created_at DESC").all();
@@ -2841,10 +2848,22 @@ async function startServer() {
     }
   });
 
+  app.get("/api/sales/:id", (req, res) => {
+    try {
+      const sale = getSaleWithItems(req.params.id);
+      if (!sale) {
+        return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Satış bulunamadı.' } });
+      }
+      res.json(sale);
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: { code: 'SALE_FETCH_FAILED', message: err.message } });
+    }
+  });
+
   app.put("/api/sales/:id", (req, res) => {
     try {
       const updatedSale = updateSaleRecord(req.params.id, req.body, req.user?.id);
-      res.json({ success: true, message: "Satış güncellendi.", sale: updatedSale });
+      res.json({ success: true, message: "Satış güncellendi.", sale: getSaleWithItems(updatedSale.id) });
     } catch (err: any) {
       AppLogger.error('SALE_UPDATE_ERROR', 'Sale update failed', err);
       res.status(err.statusCode || 400).json({ success: false, error: { code: 'UPDATE_FAILED', message: err.message } });

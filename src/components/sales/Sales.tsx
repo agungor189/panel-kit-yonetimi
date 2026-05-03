@@ -9,11 +9,10 @@ export default function Sales() {
   const { isReadOnly } = useAuth();
   const [showForm, setShowForm] = useState(false);
   const [selectedSale, setSelectedSale] = useState<any>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const handleSaleUpdated = () => {
-    // Optionally trigger a reload in SalesList if needed.
-    // For now we just close the modal which remounts SalesList and fetches fresh data
-    setSelectedSale(null);
+    setRefreshKey((key) => key + 1);
   };
 
   return (
@@ -41,7 +40,7 @@ export default function Sales() {
             )}
           </div>
 
-          <SalesList onSaleClick={setSelectedSale} />
+          <SalesList refreshKey={refreshKey} onSaleClick={setSelectedSale} />
           {selectedSale && (
             <SaleDetailModal
               sale={selectedSale}
