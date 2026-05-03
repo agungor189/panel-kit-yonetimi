@@ -134,20 +134,34 @@ export function createDashboardDataRouter(db: Database) {
   const getProductFilters = (req: any) => {
     let q = "";
     let params: any[] = [];
-    if (req.query.dateFrom) { q += " AND datetime >= ?"; params.push(req.query.dateFrom + ' 00:00:00'); }
-    if (req.query.dateTo) { q += " AND datetime <= ?"; params.push(req.query.dateTo + ' 23:59:59'); }
+    if (req.query.dateFrom) { q += " AND s.created_at >= ?"; params.push(req.query.dateFrom + ' 00:00:00'); }
+    if (req.query.dateTo) { q += " AND s.created_at <= ?"; params.push(req.query.dateTo + ' 23:59:59'); }
     
     let productJoin = "";
     let productWhere = "";
     if (req.query.material || req.query.model || req.query.pipeType || req.query.pipeSize) {
       productJoin = " JOIN products p ON p.id = i.product_id ";
-      if (req.query.material) { productWhere += " AND p.material = ?"; params.push(req.query.material); }
-      if (req.query.model) { productWhere += " AND p.model = ?"; params.push(req.query.model); }
-      if (req.query.pipeType) { productWhere += " AND p.pipe_type = ?"; params.push(req.query.pipeType); }
-      if (req.query.pipeSize) { productWhere += " AND p.pipe_size = ?"; params.push(req.query.pipeSize); }
+      if (req.query.material) {
+        productWhere += " AND (p.material = ? OR p.normalized_material = ?)";
+        params.push(req.query.material, req.query.material);
+      }
+      if (req.query.model) {
+        productWhere += " AND (p.model = ? OR p.normalized_model = ?)";
+        params.push(req.query.model, req.query.model);
+      }
+      if (req.query.pipeType) {
+        productWhere += " AND (p.connection_type = ? OR p.normalized_tube_type = ?)";
+        params.push(req.query.pipeType, req.query.pipeType);
+      }
+      if (req.query.pipeSize) {
+        productWhere += " AND (p.pipe_size = ? OR p.normalized_pipe_size = ?)";
+        params.push(req.query.pipeSize, req.query.pipeSize);
+      }
     }
     return { q, params, productJoin, productWhere };
   };
+
+  const activeSalesFilter = "s.status NOT IN ('İptal Edildi', 'İade Edildi')";
 
   router.get("/widgets/product-analysis/summary", (req, res) => {
     try {
@@ -155,7 +169,7 @@ export function createDashboardDataRouter(db: Database) {
       const salesQuery = `
         SELECT SUM(i.quantity) as total_sold, SUM(i.quantity * i.unit_price * COALESCE(s.exchange_rate_at_transaction, 1)) as total_revenue
         FROM sale_items i
-        JOIN sales s ON s.id = i.sale_id AND s.status != 'cancelled'
+        JOIN sales s ON s.id = i.sale_id AND ${activeSalesFilter}
         ${productJoin}
         WHERE 1=1 ${q} ${productWhere}
       `;
@@ -174,7 +188,7 @@ export function createDashboardDataRouter(db: Database) {
       const data = db.prepare(`
         SELECT COALESCE(p.material, 'Bilinmiyor') as name, SUM(i.quantity) as value
         FROM sale_items i
-        JOIN sales s ON s.id = i.sale_id AND s.status != 'cancelled'
+        JOIN sales s ON s.id = i.sale_id AND ${activeSalesFilter}
         JOIN products p ON p.id = i.product_id
         WHERE 1=1 ${q} ${productWhere}
         GROUP BY p.material
@@ -190,7 +204,7 @@ export function createDashboardDataRouter(db: Database) {
       const data = db.prepare(`
         SELECT COALESCE(p.model, 'Bilinmiyor') as name, SUM(i.quantity) as value
         FROM sale_items i
-        JOIN sales s ON s.id = i.sale_id AND s.status != 'cancelled'
+        JOIN sales s ON s.id = i.sale_id AND ${activeSalesFilter}
         JOIN products p ON p.id = i.product_id
         WHERE 1=1 ${q} ${productWhere}
         GROUP BY p.model
@@ -204,12 +218,12 @@ export function createDashboardDataRouter(db: Database) {
     try {
       const { q, params, productWhere } = getProductFilters(req);
       const data = db.prepare(`
-        SELECT COALESCE(p.pipe_size, 'Bilinmiyor') as name, SUM(i.quantity) as value
+        SELECT COALESCE(p.normalized_pipe_size, p.pipe_size, p.size, 'Bilinmiyor') as name, SUM(i.quantity) as value
         FROM sale_items i
-        JOIN sales s ON s.id = i.sale_id AND s.status != 'cancelled'
+        JOIN sales s ON s.id = i.sale_id AND ${activeSalesFilter}
         JOIN products p ON p.id = i.product_id
         WHERE 1=1 ${q} ${productWhere}
-        GROUP BY p.pipe_size
+        GROUP BY COALESCE(p.normalized_pipe_size, p.pipe_size, p.size, 'Bilinmiyor')
         ORDER BY value DESC
       `).all(...params);
       res.json(data);
@@ -220,12 +234,12 @@ export function createDashboardDataRouter(db: Database) {
     try {
       const { q, params, productWhere } = getProductFilters(req);
       const data = db.prepare(`
-        SELECT COALESCE(p.pipe_type, 'Bilinmiyor') as name, SUM(i.quantity) as value
+        SELECT COALESCE(p.normalized_tube_type, p.connection_type, 'Bilinmiyor') as name, SUM(i.quantity) as value
         FROM sale_items i
-        JOIN sales s ON s.id = i.sale_id AND s.status != 'cancelled'
+        JOIN sales s ON s.id = i.sale_id AND ${activeSalesFilter}
         JOIN products p ON p.id = i.product_id
         WHERE 1=1 ${q} ${productWhere}
-        GROUP BY p.pipe_type
+        GROUP BY COALESCE(p.normalized_tube_type, p.connection_type, 'Bilinmiyor')
         ORDER BY value DESC
       `).all(...params);
       res.json(data);
@@ -236,12 +250,12 @@ export function createDashboardDataRouter(db: Database) {
     try {
       const { q, params, productJoin, productWhere } = getProductFilters(req);
       const data = db.prepare(`
-        SELECT substr(s.datetime, 1, 10) as name, SUM(i.quantity) as value
+        SELECT substr(s.created_at, 1, 10) as name, SUM(i.quantity) as value
         FROM sale_items i
-        JOIN sales s ON s.id = i.sale_id AND s.status != 'cancelled'
+        JOIN sales s ON s.id = i.sale_id AND ${activeSalesFilter}
         ${productJoin}
         WHERE 1=1 ${q} ${productWhere}
-        GROUP BY substr(s.datetime, 1, 10)
+        GROUP BY substr(s.created_at, 1, 10)
         ORDER BY name ASC
       `).all(...params);
       res.json(data);
@@ -251,9 +265,18 @@ export function createDashboardDataRouter(db: Database) {
   router.get("/widgets/product-analysis/reorder-summary", (req, res) => {
     try {
       const data = db.prepare(`
-        SELECT COUNT(*) as critical_count, SUM(min_stock_level - stock_quantity) as est_order_qty
-        FROM products 
-        WHERE stock_quantity <= min_stock_level
+        SELECT COUNT(*) as critical_count, SUM(deficit) as est_order_qty
+        FROM (
+          SELECT
+            p.id,
+            COALESCE(p.min_stock_level, 50) as min_stock_level,
+            COALESCE(SUM(pp.stock), 0) as stock_quantity,
+            MAX(COALESCE(p.min_stock_level, 50) - COALESCE(SUM(pp.stock), 0), 0) as deficit
+          FROM products p
+          LEFT JOIN product_platforms pp ON pp.product_id = p.id
+          GROUP BY p.id, p.min_stock_level
+          HAVING stock_quantity <= min_stock_level
+        )
       `).get() as any;
       res.json({
         critical_count: data.critical_count || 0,

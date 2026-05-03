@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
@@ -19,9 +20,7 @@ import { createProductAnalyticsRouter } from "./server/routes/productAnalyticsRo
 import { createRecurringPaymentsRouter } from "./server/routes/recurringPaymentsRoutes.js";
 import { createDashboardDataRouter } from "./server/routes/dashboardDataRoutes.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
-import { runMigrations } from "./server/migrations/runner.js";
-import { applySchema } from "./server/db/schema.js";
-import { applySeed } from "./server/db/seed.js";
+import { initializeDatabase, openDatabase } from "./server/db/initialize.js";
 
 declare global {
   namespace Express {
@@ -112,39 +111,8 @@ if (!fs.existsSync(uploadsDir)) {
 // Database initialization — path is configurable via DB_PATH env var.
 // Docker volumes: set DB_PATH=/data/dsdst_panel.db and mount /data as a volume.
 const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), "dsdst_panel.db");
-let db = new Database(DB_PATH);
-db.pragma("journal_mode = WAL");
-db.pragma("foreign_keys = ON");
-db.pragma("busy_timeout = 5000"); // wait up to 5s on locked DB instead of immediately throwing
-
-// Apply full schema (CREATE TABLE IF NOT EXISTS for all tables) then run
-// versioned migrations to bring existing databases up to date.
-// Seed default users / settings / accounts if tables are empty.
-applySchema(db);
-runMigrations(db);
-
-// Backfill normalized fields for existing products that were added before normalization was introduced.
-try {
-  const unnormalizedProducts = db.prepare(
-    "SELECT id, material, model, size, pipe_size, category, name FROM products WHERE normalized_material IS NULL OR normalized_pipe_size IS NULL"
-  ).all();
-  if (unnormalizedProducts.length > 0) {
-    const updateProduct = db.prepare(
-      "UPDATE products SET normalized_material=?, normalized_model=?, normalized_size=?, normalized_tube_type=?, normalized_pipe_size=? WHERE id=?"
-    );
-    db.transaction(() => {
-      for (const p of unnormalizedProducts) {
-        const fields = generateNormalizedFields(p);
-        updateProduct.run(fields.normalized_material, fields.normalized_model, fields.normalized_size, fields.normalized_tube_type, fields.normalized_pipe_size, p.id);
-      }
-    })();
-    console.log(`[Seed] Backfilled normalized fields for ${unnormalizedProducts.length} product(s).`);
-  }
-} catch (e) {
-  console.error("[Seed] Normalized field backfill failed:", e);
-}
-
-applySeed(db);
+let db = openDatabase(DB_PATH);
+initializeDatabase(db);
 
 // Multer setup for image uploads
 const storage = multer.diskStorage({
@@ -291,6 +259,7 @@ export function getActiveExchangeRate() {
 async function startServer() {
   const app = express();
   const PORT = 3000;
+  app.set('trust proxy', 1);
 
   // Security Headers (Helmet)
   // Disabled Content Security Policy for Vite/React development compatibility.
@@ -449,8 +418,8 @@ async function startServer() {
 
   // API Authentication Middleware
   app.use("/api", (req, res, next) => {
-    // allow auth routes
-    if (req.path.startsWith('/auth/')) return next();
+    // allow auth routes and public API routes with their own auth/limits
+    if (req.path.startsWith('/auth/') || req.path.startsWith('/public/')) return next();
 
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -460,7 +429,7 @@ async function startServer() {
          (req as any).user = decoded;
          return next();
        } catch (err: any) {
-         console.log("JWT Verification Error:", err.message, "Token:", authHeader.split(' ')[1]);
+         AppLogger.warn('AUTH_ERROR', 'JWT verification failed', { message: err.message, ip: req.ip });
          return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Invalid or expired token.' } });
        }
     }
@@ -469,23 +438,24 @@ async function startServer() {
     const settingsApiKey = db.prepare("SELECT value FROM settings WHERE key='api_key'").get() as any;
     
     if (settingsApiKey && settingsApiKey.value && apiKeyHeader === settingsApiKey.value) {
+        (req as any).user = { id: 'legacy-api-key', username: 'legacy-api-key', role: 'api_key' };
         return next();
     }
 
     return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Unauthorized access.' } });
   });
 
-  // Server-side write protection: readonly users cannot call mutating methods.
+  // Server-side write protection: readonly users and the legacy static API key cannot call mutating methods.
   // This enforces access control on the server, not just the client.
   app.use("/api", (req, res, next) => {
     if (req.path.startsWith('/auth/') || req.path.startsWith('/public/')) return next();
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
 
     const user = (req as any).user;
-    if (user?.role === 'readonly') {
+    if (user?.role === 'readonly' || user?.role === 'api_key') {
       return res.status(403).json({
         success: false,
-        error: { code: 'FORBIDDEN', message: 'Salt okunur hesap — bu işlem için yetkiniz yok.' },
+        error: { code: 'FORBIDDEN', message: 'Bu kimlik bilgisi yazma işlemleri için yetkili değil.' },
       });
     }
     next();
@@ -948,8 +918,25 @@ async function startServer() {
     try {
       const { updates, settings } = req.body;
       const { exchangeRate, bufferPercentage, profitPercentage } = settings;
+      let updatedCount = 0;
+      let skippedLockedCount = 0;
+      let skippedMissingCount = 0;
 
       db.transaction(() => {
+        const currentProductStmt = db.prepare(`
+          SELECT id, purchase_price_usd, purchase_cost, sale_price, buffer_percentage,
+                 profit_percentage, exchange_rate_used, price_locked
+          FROM products
+          WHERE id = ?
+        `);
+        const historyStmt = db.prepare(`
+          INSERT INTO pricing_history (
+            id, product_id, purchase_price_usd, purchase_cost, sale_price,
+            buffer_percentage, profit_percentage, exchange_rate_used, price_locked,
+            changed_by, change_reason
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
         const stmt = db.prepare(`
           UPDATE products 
           SET sale_price = ?, 
@@ -957,7 +944,7 @@ async function startServer() {
               buffer_percentage = ?, 
               profit_percentage = ?, 
               updated_at = CURRENT_TIMESTAMP
-          WHERE id = ?
+          WHERE id = ? AND COALESCE(price_locked, 0) = 0
         `);
         
         const platformStmt = db.prepare(`
@@ -967,12 +954,39 @@ async function startServer() {
         `);
 
         for (const update of updates) {
-          stmt.run(update.newSalePrice, exchangeRate, bufferPercentage, profitPercentage, update.id);
-          platformStmt.run(update.newSalePrice, update.id);
+          const currentProduct = currentProductStmt.get(update.id) as any;
+          if (!currentProduct) {
+            skippedMissingCount += 1;
+            continue;
+          }
+          if (currentProduct.price_locked === 1) {
+            skippedLockedCount += 1;
+            continue;
+          }
+
+          historyStmt.run(
+            uuidv4(),
+            currentProduct.id,
+            currentProduct.purchase_price_usd,
+            currentProduct.purchase_cost,
+            currentProduct.sale_price,
+            currentProduct.buffer_percentage,
+            currentProduct.profit_percentage,
+            currentProduct.exchange_rate_used,
+            currentProduct.price_locked,
+            (req as any).user?.id ?? null,
+            'bulk-pricing'
+          );
+
+          const result = stmt.run(update.newSalePrice, exchangeRate, bufferPercentage, profitPercentage, update.id);
+          if (result.changes > 0) {
+            updatedCount += result.changes;
+            platformStmt.run(update.newSalePrice, update.id);
+          }
         }
       })();
 
-      res.json({ success: true });
+      res.json({ success: true, updatedCount, skippedLockedCount, skippedMissingCount });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1008,27 +1022,60 @@ async function startServer() {
         normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size, req.params.id
       );
 
-      db.prepare("DELETE FROM product_platforms WHERE product_id = ?").run(req.params.id);
-      
+      const getPlatform = db.prepare("SELECT * FROM product_platforms WHERE product_id = ? AND platform_name = ? LIMIT 1");
+      const updatePlatform = db.prepare(`
+        UPDATE product_platforms
+        SET
+          stock = CASE WHEN ? THEN ? ELSE stock END,
+          price = CASE WHEN ? THEN ? ELSE price END,
+          is_listed = CASE WHEN ? THEN ? ELSE is_listed END
+        WHERE product_id = ? AND platform_name = ?
+      `);
       const insertPlatform = db.prepare(`
         INSERT INTO product_platforms (id, product_id, platform_name, stock, price, is_listed)
         VALUES (?, ?, ?, ?, ?, ?)
       `);
+      const insertStockMovement = db.prepare(`
+        INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason)
+        VALUES (?, ?, ?, ?, ?)
+      `);
 
-      for (const p of platforms) {
-        insertPlatform.run(uuidv4(), req.params.id, p.name, p.stock || 0, p.price || sale_price, p.is_listed ? 1 : 0);
-        
-        // Track stock movements
-        if (beforeState && beforeState.platforms) {
-           const oldPlat = beforeState.platforms.find((bp: any) => bp.platform_name === p.name);
-           const oldStock = oldPlat ? oldPlat.stock : 0;
-           const diff = (p.stock || 0) - oldStock;
-           if (diff !== 0) {
-              db.prepare(`
-                INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason)
-                VALUES (?, ?, ?, ?, ?)
-              `).run(uuidv4(), req.params.id, p.name, diff, 'Oto: Ürün Güncelleme');
-           }
+      if (Array.isArray(platforms)) {
+        for (const p of platforms) {
+          const platformName = p.name ?? p.platform_name;
+          if (!platformName) continue;
+
+          const stockProvided = p.stock !== undefined && p.stock !== null;
+          const priceProvided = p.price !== undefined && p.price !== null;
+          const listedProvided = p.is_listed !== undefined && p.is_listed !== null;
+          const stockValue = stockProvided ? Number(p.stock) || 0 : 0;
+          const priceValue = priceProvided ? Number(p.price) || 0 : (Number(sale_price) || 0);
+          const listedValue = p.is_listed ? 1 : 0;
+          const existingPlatform = getPlatform.get(req.params.id, platformName) as any;
+
+          if (existingPlatform) {
+            updatePlatform.run(
+              stockProvided ? 1 : 0,
+              stockValue,
+              priceProvided ? 1 : 0,
+              priceValue,
+              listedProvided ? 1 : 0,
+              listedValue,
+              req.params.id,
+              platformName
+            );
+          } else {
+            insertPlatform.run(uuidv4(), req.params.id, platformName, stockValue, priceValue, listedValue);
+          }
+
+          // Track stock movements only when the request explicitly changes stock.
+          if (stockProvided) {
+            const oldStock = existingPlatform ? Number(existingPlatform.stock) || 0 : 0;
+            const diff = stockValue - oldStock;
+            if (diff !== 0) {
+              insertStockMovement.run(uuidv4(), req.params.id, platformName, diff, 'Oto: Ürün Güncelleme');
+            }
+          }
         }
       }
 
@@ -1055,12 +1102,15 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  app.delete("/api/products", (req, res) => {
-    console.log("Bulk deleting all products...");
-    const result = db.prepare("DELETE FROM products").run();
-    console.log(`Deleted ${result.changes} products.`);
-    logActivity('DELETE_ALL', 'product', 'all', { count: result.changes });
-    res.json({ success: true, deletedCount: result.changes });
+  app.delete("/api/products", requireAdmin, (req, res) => {
+    logActivity('DELETE_ALL_BLOCKED', 'product', 'all', { ip: req.ip }, (req as any).user?.id);
+    res.status(410).json({
+      success: false,
+      error: {
+        code: 'ENDPOINT_DISABLED',
+        message: 'Toplu ürün silme endpointi veri güvenliği nedeniyle devre dışı bırakıldı.',
+      },
+    });
   });
 
   app.delete("/api/products/:id", (req, res) => {
@@ -1779,55 +1829,176 @@ async function startServer() {
   });
 
   // --- SALES ---
+  const FINAL_SALE_STATUSES = ['İptal Edildi', 'İade Edildi'];
+  const isFinalSaleStatus = (status?: string) => FINAL_SALE_STATUSES.includes(status || '');
+
+  const restoreSaleStock = (sale: any, finalStatus: string) => {
+    const originalMovementReason = `Satış No: ${sale.id}`;
+    const restoredByProduct = new Map<string, number>();
+
+    const originalMovements = db.prepare(`
+      SELECT product_id, platform_name, SUM(ABS(change_amount)) as quantity
+      FROM stock_movements
+      WHERE reason = ? AND type = 'OUT' AND change_amount < 0
+      GROUP BY product_id, platform_name
+    `).all(originalMovementReason) as any[];
+
+    const restoreToPlatform = (productId: string, preferredPlatform: string | null | undefined, quantity: number) => {
+      if (!productId || quantity <= 0) return;
+
+      const preferred = preferredPlatform
+        ? db.prepare("SELECT * FROM product_platforms WHERE product_id = ? AND platform_name = ?").get(productId, preferredPlatform) as any
+        : null;
+      const platform = preferred || db.prepare("SELECT * FROM product_platforms WHERE product_id = ? ORDER BY platform_name ASC LIMIT 1").get(productId) as any;
+      if (!platform) return;
+
+      db.prepare("UPDATE product_platforms SET stock = stock + ? WHERE id = ?").run(quantity, platform.id);
+      db.prepare(`
+        INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(uuidv4(), productId, platform.platform_name, quantity, `${finalStatus} — Satış No: ${sale.id}`, 'IN');
+
+      restoredByProduct.set(productId, (restoredByProduct.get(productId) || 0) + quantity);
+    };
+
+    for (const movement of originalMovements) {
+      restoreToPlatform(movement.product_id, movement.platform_name, Number(movement.quantity) || 0);
+    }
+
+    const saleItems = db.prepare("SELECT product_id, SUM(quantity) as quantity FROM sale_items WHERE sale_id = ? GROUP BY product_id").all(sale.id) as any[];
+    for (const item of saleItems) {
+      if (!item.product_id) continue;
+      const soldQty = Number(item.quantity) || 0;
+      const restoredQty = restoredByProduct.get(item.product_id) || 0;
+      const remainingQty = soldQty - restoredQty;
+      if (remainingQty > 0) {
+        restoreToPlatform(item.product_id, sale.platform, remainingQty);
+      }
+    }
+  };
+
+  const reverseSaleLedger = (sale: any, finalStatus: string) => {
+    restoreSaleStock(sale, finalStatus);
+
+    if (sale.income_transaction_id) {
+      db.prepare(`
+        UPDATE transactions
+        SET is_deleted = 1,
+            note = COALESCE(note, '') || ' [İptal/İade]'
+        WHERE id = ? AND COALESCE(is_deleted, 0) = 0
+      `).run(sale.income_transaction_id);
+    }
+
+    const existingReversal = db.prepare(`
+      SELECT id FROM cash_transactions
+      WHERE source_id = ? AND source_type IN ('sale_refund', 'sale_reversal')
+      LIMIT 1
+    `).get(sale.id) as any;
+    if (existingReversal) return;
+
+    const originalCash = db.prepare(`
+      SELECT * FROM cash_transactions
+      WHERE source_type = 'sale' AND source_id = ? AND type = 'IN'
+      ORDER BY created_at ASC
+      LIMIT 1
+    `).get(sale.id) as any;
+
+    const accountId = originalCash?.account_id || sale.cash_account_id;
+    if (!accountId) return;
+
+    db.prepare(`
+      INSERT INTO cash_transactions (
+        id, account_id, type, amount, currency, exchange_rate_at_transaction,
+        source_type, source_id, description
+      )
+      VALUES (?, ?, 'OUT', ?, ?, ?, 'sale_reversal', ?, ?)
+    `).run(
+      uuidv4(),
+      accountId,
+      originalCash?.amount ?? (sale.net_total ?? sale.total_amount),
+      originalCash?.currency || 'TRY',
+      originalCash?.exchange_rate_at_transaction || 1,
+      sale.id,
+      `${finalStatus}: Satış No ${sale.id}`
+    );
+  };
+
+  const updateSaleRecord = (saleId: string, changes: any, userId?: string) => {
+    let updatedSale: any = null;
+
+    db.transaction(() => {
+      const sale = db.prepare("SELECT * FROM sales WHERE id = ?").get(saleId) as any;
+      if (!sale) {
+        const err = new Error("Satış bulunamadı.") as any;
+        err.statusCode = 404;
+        throw err;
+      }
+
+      const targetStatus = changes.status || sale.status;
+      const wasFinal = isFinalSaleStatus(sale.status);
+      const willBeFinal = isFinalSaleStatus(targetStatus);
+
+      if (wasFinal && targetStatus !== sale.status) {
+        throw new Error(`Durumu '${sale.status}' olan satış farklı bir duruma alınamaz.`);
+      }
+      if (!willBeFinal && wasFinal) {
+        throw new Error("İptal/iade edilmiş bir satış geri alınamaz.");
+      }
+
+      const isBecomingFinal = willBeFinal && !wasFinal;
+      if (isBecomingFinal) {
+        reverseSaleLedger(sale, targetStatus);
+        logActivity(targetStatus === 'İptal Edildi' ? 'SALE_CANCELLED' : 'SALE_RETURNED', 'sale', saleId,
+          { reason: changes.return_reason, previous_status: sale.status }, userId);
+      } else {
+        logActivity('SALE_UPDATED', 'sale', saleId, { previous_status: sale.status, status: targetStatus }, userId);
+      }
+
+      db.prepare(`
+        UPDATE sales SET
+          customer_name=?,
+          customer_phone=?,
+          customer_address=?,
+          shipping_company=?,
+          tracking_number=?,
+          status=?,
+          return_reason=?,
+          returned_at=CASE WHEN ? THEN COALESCE(returned_at, CURRENT_TIMESTAMP) ELSE returned_at END,
+          updated_at=CURRENT_TIMESTAMP
+        WHERE id=?
+      `).run(
+        changes.customer_name ?? sale.customer_name,
+        changes.customer_phone ?? sale.customer_phone,
+        changes.customer_address ?? sale.customer_address,
+        changes.shipping_company ?? sale.shipping_company,
+        changes.tracking_number ?? sale.tracking_number,
+        targetStatus,
+        changes.return_reason ?? sale.return_reason,
+        willBeFinal ? 1 : 0,
+        saleId,
+      );
+
+      updatedSale = db.prepare("SELECT * FROM sales WHERE id = ?").get(saleId);
+    })();
+
+    return updatedSale;
+  };
+
   app.patch("/api/sales/:id/status", (req, res) => {
     try {
       const { status } = req.body;
-      db.transaction(() => {
-        const sale = db.prepare("SELECT * FROM sales WHERE id = ?").get(req.params.id) as any;
-        if (!sale) throw new Error("Satış bulunamadı.");
+      if (!status) {
+        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Durum zorunludur.' } });
+      }
 
-        const oldStatus = sale.status;
-        if (oldStatus === status) return;
+      const updatedSale = updateSaleRecord(req.params.id, {
+        status,
+        return_reason: req.body.return_reason,
+      }, (req as any).user?.id);
 
-        const isCancel = ['İptal Edildi', 'İade Edildi'].includes(status);
-        const wasCancel = ['İptal Edildi', 'İade Edildi'].includes(oldStatus);
-
-        if (!isCancel && wasCancel) {
-          throw new Error("İptal edilmiş bir satış geri alınamaz.");
-        }
-
-        db.prepare("UPDATE sales SET status = ? WHERE id = ?").run(status, req.params.id);
-
-        if (isCancel && !wasCancel) {
-          // Restore stock
-          const items = db.prepare("SELECT * FROM sale_items WHERE sale_id = ?").all(req.params.id) as any[];
-          for (const item of items) {
-            const plat = db.prepare("SELECT * FROM product_platforms WHERE product_id = ? AND platform_name = ?").get(item.product_id, sale.platform) as any;
-            if (plat) {
-              db.prepare("UPDATE product_platforms SET stock = stock + ? WHERE id = ?").run(item.quantity, plat.id);
-            } else {
-              const anyPlat = db.prepare("SELECT * FROM product_platforms WHERE product_id = ? LIMIT 1").get(item.product_id) as any;
-              if (anyPlat) {
-                db.prepare("UPDATE product_platforms SET stock = stock + ? WHERE id = ?").run(item.quantity, anyPlat.id);
-              }
-            }
-            db.prepare("INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type) VALUES (?, ?, ?, ?, ?, ?)")
-              .run(uuidv4(), item.product_id, sale.platform, item.quantity, `Satış iptali (No: ${sale.id})`, 'IN');
-          }
-
-          // Reverse cash transaction
-          const existingCash = db.prepare("SELECT * FROM cash_transactions WHERE source_type = 'sale' AND source_id = ? AND type = 'IN'").get(sale.id) as any;
-          if (existingCash) {
-             db.prepare(`
-               INSERT INTO cash_transactions (id, account_id, type, amount, currency, exchange_rate_at_transaction, source_type, source_id, description)
-               VALUES (?, ?, 'OUT', ?, ?, 1, 'sale_refund', ?, ?)
-             `).run(uuidv4(), existingCash.account_id, existingCash.amount, existingCash.currency, sale.id, `Satış İptali / İade: ${sale.customer_name}`);
-          }
-        }
-      })();
-      res.json({ success: true, message: "Durum güncellendi" });
+      res.json({ success: true, message: "Durum güncellendi", sale: updatedSale });
     } catch (err: any) {
-      res.status(400).json({ error: err.message });
+      res.status(err.statusCode || 400).json({ success: false, error: { code: 'UPDATE_FAILED', message: err.message } });
     }
   });
 
@@ -1845,89 +2016,11 @@ async function startServer() {
 
   app.put("/api/sales/:id", (req, res) => {
     try {
-      const {
-        customer_name, customer_phone, customer_address,
-        shipping_company, tracking_number, status, return_reason,
-      } = req.body;
-
-      const sale = db.prepare("SELECT * FROM sales WHERE id = ?").get(req.params.id) as any;
-      if (!sale) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Satış bulunamadı.' } });
-
-      const FINAL_STATUSES = ['İptal Edildi', 'İade Edildi'];
-      if (FINAL_STATUSES.includes(sale.status)) {
-        return res.status(400).json({
-          success: false,
-          error: { code: 'INVALID_STATE', message: `Durumu '${sale.status}' olan satış artık değiştirilemez.` },
-        });
-      }
-
-      db.transaction(() => {
-        const isBecomingCancelled = status === 'İptal Edildi' && !FINAL_STATUSES.includes(sale.status);
-        const isBecomingReturned  = status === 'İade Edildi'  && !FINAL_STATUSES.includes(sale.status);
-
-        if (isBecomingCancelled || isBecomingReturned) {
-          // Reverse stock: add back the sold quantities
-          const saleItems = db.prepare("SELECT * FROM sale_items WHERE sale_id = ?").all(req.params.id) as any[];
-          for (const item of saleItems) {
-            const platforms = db.prepare(
-              "SELECT * FROM product_platforms WHERE product_id = ? ORDER BY stock DESC"
-            ).all(item.product_id) as any[];
-
-            if (platforms.length > 0) {
-              // Return stock to the first platform (highest stock) as a simple heuristic
-              db.prepare("UPDATE product_platforms SET stock = stock + ? WHERE id = ?")
-                .run(item.quantity, platforms[0].id);
-              db.prepare(
-                "INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type) VALUES (?, ?, ?, ?, ?, ?)"
-              ).run(uuidv4(), item.product_id, platforms[0].platform_name, item.quantity,
-                `${status} — Satış No: ${req.params.id}`, 'IN');
-            }
-          }
-
-          // Soft-delete the linked income transaction (mark as deleted / reversed)
-          if (sale.income_transaction_id) {
-            db.prepare("UPDATE transactions SET is_deleted = 1, note = note || ' [İptal/İade]' WHERE id = ?")
-              .run(sale.income_transaction_id);
-          }
-
-          // Reverse cash transaction
-          if (sale.cash_account_id) {
-            db.prepare(`
-              INSERT INTO cash_transactions (id, account_id, type, amount, currency,
-                exchange_rate_at_transaction, source_type, source_id, description)
-              VALUES (?, ?, 'OUT', ?, 'TRY', 1, 'sale_reversal', ?, ?)
-            `).run(uuidv4(), sale.cash_account_id, sale.net_total ?? sale.total_amount,
-              req.params.id, `${status}: Satış No ${req.params.id}`);
-          }
-
-          logActivity(isBecomingCancelled ? 'SALE_CANCELLED' : 'SALE_RETURNED', 'sale', req.params.id,
-            { reason: return_reason, previous_status: sale.status }, (req as any).user?.id);
-        }
-
-        db.prepare(`
-          UPDATE sales SET
-            customer_name=?, customer_phone=?, customer_address=?,
-            shipping_company=?, tracking_number=?, status=?,
-            return_reason=?, returned_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE returned_at END,
-            updated_at=CURRENT_TIMESTAMP
-          WHERE id=?
-        `).run(
-          customer_name ?? sale.customer_name,
-          customer_phone ?? sale.customer_phone,
-          customer_address ?? sale.customer_address,
-          shipping_company ?? sale.shipping_company,
-          tracking_number ?? sale.tracking_number,
-          status ?? sale.status,
-          return_reason ?? sale.return_reason,
-          isBecomingCancelled || isBecomingReturned ? 1 : 0,
-          req.params.id,
-        );
-      })();
-
-      res.json({ success: true, message: "Satış güncellendi." });
+      const updatedSale = updateSaleRecord(req.params.id, req.body, (req as any).user?.id);
+      res.json({ success: true, message: "Satış güncellendi.", sale: updatedSale });
     } catch (err: any) {
       AppLogger.error('SALE_UPDATE_ERROR', 'Sale update failed', err);
-      res.status(400).json({ success: false, error: { code: 'UPDATE_FAILED', message: err.message } });
+      res.status(err.statusCode || 400).json({ success: false, error: { code: 'UPDATE_FAILED', message: err.message } });
     }
   });
 
@@ -2660,8 +2753,18 @@ async function startServer() {
     }
   });
 
-  app.post("/api/maintenance/fix-pricing", (req, res) => {
+  app.post("/api/maintenance/fix-pricing", requireAdmin, (req, res) => {
     try {
+      if (req.body?.confirm !== 'FIX_PRICING') {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'CONFIRMATION_REQUIRED',
+            message: "Fiyat onarımı için confirm alanı 'FIX_PRICING' olmalıdır.",
+          },
+        });
+      }
+
       db.transaction(() => {
         // 1. Fill purchase_price_usd from purchase_cost if purchase_price_usd is 0 and purchase_cost > 0
         // Use a default exchange rate if activeRate is not available, but let's assume we read settings
@@ -2765,12 +2868,13 @@ async function startServer() {
   // Restore is admin-only and uses a mutex flag to prevent concurrent access during the swap.
   let isRestoring = false;
 
-  app.post("/api/backup/restore", requireAdmin, backupUpload.single("zipfile"), (req, res) => {
+  app.post("/api/backup/restore", requireAdmin, backupUpload.single("zipfile"), async (req, res) => {
     if (isRestoring) {
       return res.status(503).json({ success: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Restore işlemi zaten devam ediyor.' } });
     }
 
     const uploadedPath = req.file?.path;
+    let beforeRestorePath: string | null = null;
     try {
       if (!uploadedPath) {
         return res.status(400).json({ success: false, error: { code: 'NO_FILE', message: 'Yedek dosyası yüklenmedi.' } });
@@ -2800,6 +2904,12 @@ async function startServer() {
         testDb?.close();
       }
 
+      if (fs.existsSync(DB_PATH)) {
+        const safeTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        beforeRestorePath = `${DB_PATH}.before-restore-${safeTimestamp}.db`;
+        await db.backup(beforeRestorePath);
+      }
+
       // Swap: close current DB, replace file, reopen.
       db.close();
 
@@ -2818,27 +2928,14 @@ async function startServer() {
         }
       }
 
-      db = new Database(DB_PATH);
-      db.pragma("journal_mode = WAL");
-      db.pragma("foreign_keys = ON");
-      db.pragma("busy_timeout = 5000");
+      db = openDatabase(DB_PATH);
+      initializeDatabase(db);
 
-      // Re-apply any migrations that older backups might be missing.
-      runMigrations(db);
-
-      // Seed critical settings that may be absent in older backups.
-      const seed = db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)");
-      seed.run("company_name", "DSDST Panel");
-      seed.run("low_stock_threshold", "50");
-      seed.run("currency_symbol", "₺");
-      seed.run("language", "tr");
-      seed.run("default_buffer_percentage", "20");
-      seed.run("commission_rates", JSON.stringify({ "Trendyol": 15, "Hepsiburada": 15, "Amazon": 10, "N11": 15, "Website": 2, "Instagram": 0 }));
-      seed.run("product_categories", JSON.stringify(["Aliminyum", "PPR", "Dokum Demir", "Karbon Celik"]));
-      seed.run("income_categories", JSON.stringify(["Satış", "İade", "Hizmet Bedeli", "Diğer"]));
-      seed.run("expense_categories", JSON.stringify(["Kargo", "Komisyon", "Maliyet", "Reklam", "Vergi", "Diğer"]));
-
-      logActivity("DB_RESTORED", "system", "system", { restoredBy: (req as any).user?.username, ip: req.ip }, (req as any).user?.id);
+      logActivity("DB_RESTORED", "system", "system", {
+        restoredBy: (req as any).user?.username,
+        ip: req.ip,
+        beforeRestorePath,
+      }, (req as any).user?.id);
 
       // Restore done. Imported routers (analytics, dashboard, recurring) hold a
       // reference to the OLD db object captured at startup. Rather than rewiring
@@ -2848,6 +2945,7 @@ async function startServer() {
       res.json({
         success: true,
         message: "Yedek başarıyla geri yüklendi. Sunucu 3 saniye içinde yeniden başlatılacak.",
+        before_restore_backup: beforeRestorePath,
         restart_in_seconds: 3,
       });
       setTimeout(() => {
