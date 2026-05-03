@@ -395,8 +395,20 @@ async function startServer() {
      if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'No token' } });
      try {
        const token = authHeader.split(' ')[1];
-       const decoded = jwt.verify(token, JWT_SECRET);
-       res.json({ success: true, user: decoded });
+       const decoded = jwt.verify(token, JWT_SECRET) as any;
+       const user = db.prepare("SELECT id, username, role, is_active, must_change_password FROM users WHERE id = ?").get(decoded.id) as any;
+       if (!user || user.is_active === 0) {
+         return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Invalid user' } });
+       }
+       res.json({
+         success: true,
+         user: {
+           id: user.id,
+           username: user.username,
+           role: user.role,
+           must_change_password: user.must_change_password === 1,
+         },
+       });
      } catch (err) {
        res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Invalid token' } });
      }
@@ -443,6 +455,29 @@ async function startServer() {
     }
 
     return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Unauthorized access.' } });
+  });
+
+  // Enforce first-login password changes server-side. Login and change-password
+  // remain available through /api/auth; every other JWT-backed route is blocked
+  // until the user's password is changed.
+  app.use("/api", (req, res, next) => {
+    if (req.path.startsWith('/auth/') || req.path.startsWith('/public/')) return next();
+
+    const user = (req as any).user;
+    if (!user || user.role === 'api_key') return next();
+
+    const currentUser = db.prepare("SELECT must_change_password FROM users WHERE id = ?").get(user.id) as any;
+    if (currentUser?.must_change_password === 1) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'PASSWORD_CHANGE_REQUIRED',
+          message: 'Devam etmeden önce şifrenizi değiştirmeniz gerekiyor.',
+        },
+      });
+    }
+
+    next();
   });
 
   // Server-side write protection: readonly users and the legacy static API key cannot call mutating methods.
