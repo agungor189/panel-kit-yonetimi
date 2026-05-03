@@ -20,6 +20,7 @@ import { createProductAnalyticsRouter } from "./server/routes/productAnalyticsRo
 import { createRecurringPaymentsRouter } from "./server/routes/recurringPaymentsRoutes.js";
 import { createDashboardDataRouter } from "./server/routes/dashboardDataRoutes.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
+import { restoreUploadEntry } from "./server/utils/restoreUploads.js";
 import { initializeDatabase, openDatabase } from "./server/db/initialize.js";
 
 declare global {
@@ -3285,14 +3286,10 @@ async function startServer() {
       fs.copyFileSync(restoredDbPath, DB_PATH);
       try { fs.unlinkSync(restoredDbPath); } catch (_) {}
 
-      // Restore /uploads from the zip if present
-      const uploadsDest = path.join(process.cwd(), "uploads");
+      // Restore /uploads from the zip if present. Entries are resolved through
+      // a path traversal guard before writing anything to disk.
       for (const entry of zipEntries) {
-        if (entry.entryName.startsWith("uploads/") && !entry.isDirectory) {
-          const destPath = path.join(process.cwd(), entry.entryName);
-          fs.mkdirSync(path.dirname(destPath), { recursive: true });
-          fs.writeFileSync(destPath, entry.getData());
-        }
+        restoreUploadEntry(entry);
       }
 
       db = openDatabase(DB_PATH);
