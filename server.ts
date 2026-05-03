@@ -25,6 +25,7 @@ import { initializeDatabase, openDatabase } from "./server/db/initialize.js";
 declare global {
   namespace Express {
     interface Request {
+      user?: AuthenticatedUser;
       panelApiKey?: {
         id: string;
         name: string;
@@ -33,6 +34,14 @@ declare global {
     }
   }
 }
+
+type AuthenticatedUser = {
+  id: string;
+  username: string;
+  role: string;
+  permissions: Record<string, unknown>;
+  must_change_password: boolean;
+};
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -306,6 +315,36 @@ async function startServer() {
   // JWT_SECRET validated at startup — no fallback allowed.
   const JWT_SECRET = process.env.JWT_SECRET!;
 
+  const parseUserPermissions = (permissions: string | null | undefined): Record<string, unknown> => {
+    try {
+      const parsed = JSON.parse(permissions || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  };
+
+  const loadUserForAuth = (userId: string): { user?: AuthenticatedUser; disabled?: boolean } => {
+    const dbUser = db.prepare(`
+      SELECT id, username, role, is_active, permissions, must_change_password
+      FROM users
+      WHERE id = ?
+    `).get(userId) as any;
+
+    if (!dbUser) return {};
+    if (dbUser.is_active === 0) return { disabled: true };
+
+    return {
+      user: {
+        id: dbUser.id,
+        username: dbUser.username,
+        role: dbUser.role,
+        permissions: parseUserPermissions(dbUser.permissions),
+        must_change_password: dbUser.must_change_password === 1,
+      },
+    };
+  };
+
   const authRouter = express.Router();
   authRouter.post('/login', (req, res) => {
     try {
@@ -333,7 +372,7 @@ async function startServer() {
       db.prepare("UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?").run(user.id);
       logActivity('LOGIN_SUCCESS', 'auth', user.id, { username, ip: req.ip }, user.id);
 
-      const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, { expiresIn: '12h' });
+      const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '12h' });
       res.json({
         success: true,
         token,
@@ -370,6 +409,9 @@ async function startServer() {
 
       const user = db.prepare("SELECT * FROM users WHERE id = ?").get(decoded.id) as any;
       if (!user) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Kullanıcı bulunamadı.' } });
+      if (user.is_active === 0) {
+        return res.status(403).json({ success: false, error: { code: 'USER_DISABLED', message: 'Bu hesap devre dışı bırakılmış.' } });
+      }
 
       if (!bcrypt.compareSync(current_password, user.password_hash)) {
         return res.status(401).json({ success: false, error: { code: 'AUTH_FAILED', message: 'Mevcut şifre yanlış.' } });
@@ -396,18 +438,16 @@ async function startServer() {
      try {
        const token = authHeader.split(' ')[1];
        const decoded = jwt.verify(token, JWT_SECRET) as any;
-       const user = db.prepare("SELECT id, username, role, is_active, must_change_password FROM users WHERE id = ?").get(decoded.id) as any;
-       if (!user || user.is_active === 0) {
+       const authUser = loadUserForAuth(decoded.id);
+       if (authUser.disabled) {
+         return res.status(403).json({ success: false, error: { code: 'USER_DISABLED', message: 'Bu hesap devre dışı bırakılmış.' } });
+       }
+       if (!authUser.user) {
          return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Invalid user' } });
        }
        res.json({
          success: true,
-         user: {
-           id: user.id,
-           username: user.username,
-           role: user.role,
-           must_change_password: user.must_change_password === 1,
-         },
+         user: authUser.user,
        });
      } catch (err) {
        res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Invalid token' } });
@@ -437,8 +477,21 @@ async function startServer() {
     if (authHeader && authHeader.startsWith('Bearer ')) {
        try {
          const token = authHeader.split(' ')[1];
-         const decoded = jwt.verify(token, JWT_SECRET);
-         (req as any).user = decoded;
+         const decoded = jwt.verify(token, JWT_SECRET) as any;
+         const authUser = loadUserForAuth(decoded.id);
+         if (authUser.disabled) {
+           return res.status(403).json({
+             success: false,
+             error: { code: 'USER_DISABLED', message: 'Bu hesap devre dışı bırakılmış.' },
+           });
+         }
+         if (!authUser.user) {
+           return res.status(401).json({
+             success: false,
+             error: { code: 'UNAUTHORIZED', message: 'Invalid user.' },
+           });
+         }
+         req.user = authUser.user;
          return next();
        } catch (err: any) {
          AppLogger.warn('AUTH_ERROR', 'JWT verification failed', { message: err.message, ip: req.ip });
@@ -450,7 +503,13 @@ async function startServer() {
     const settingsApiKey = db.prepare("SELECT value FROM settings WHERE key='api_key'").get() as any;
     
     if (settingsApiKey && settingsApiKey.value && apiKeyHeader === settingsApiKey.value) {
-        (req as any).user = { id: 'legacy-api-key', username: 'legacy-api-key', role: 'api_key' };
+        req.user = {
+          id: 'legacy-api-key',
+          username: 'legacy-api-key',
+          role: 'api_key',
+          permissions: {},
+          must_change_password: false,
+        };
         return next();
     }
 
@@ -463,11 +522,10 @@ async function startServer() {
   app.use("/api", (req, res, next) => {
     if (req.path.startsWith('/auth/') || req.path.startsWith('/public/')) return next();
 
-    const user = (req as any).user;
+    const user = req.user;
     if (!user || user.role === 'api_key') return next();
 
-    const currentUser = db.prepare("SELECT must_change_password FROM users WHERE id = ?").get(user.id) as any;
-    if (currentUser?.must_change_password === 1) {
+    if (user.must_change_password) {
       return res.status(403).json({
         success: false,
         error: {
@@ -486,7 +544,7 @@ async function startServer() {
     if (req.path.startsWith('/auth/') || req.path.startsWith('/public/')) return next();
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
 
-    const user = (req as any).user;
+    const user = req.user;
     if (user?.role === 'readonly' || user?.role === 'api_key') {
       return res.status(403).json({
         success: false,
@@ -498,7 +556,7 @@ async function startServer() {
 
   // Helper middleware — admin-only routes (backup, restore, user management, settings).
   const requireAdmin = (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const user = (req as any).user;
+    const user = req.user;
     if (!user || user.role !== 'admin') {
       logActivity('FORBIDDEN_ACCESS', 'system', req.path, { method: req.method, ip: req.ip }, user?.id);
       return res.status(403).json({
@@ -1009,7 +1067,7 @@ async function startServer() {
             currentProduct.profit_percentage,
             currentProduct.exchange_rate_used,
             currentProduct.price_locked,
-            (req as any).user?.id ?? null,
+            req.user?.id ?? null,
             'bulk-pricing'
           );
 
@@ -1138,7 +1196,7 @@ async function startServer() {
   });
 
   app.delete("/api/products", requireAdmin, (req, res) => {
-    logActivity('DELETE_ALL_BLOCKED', 'product', 'all', { ip: req.ip }, (req as any).user?.id);
+    logActivity('DELETE_ALL_BLOCKED', 'product', 'all', { ip: req.ip }, req.user?.id);
     res.status(410).json({
       success: false,
       error: {
@@ -2029,7 +2087,7 @@ async function startServer() {
       const updatedSale = updateSaleRecord(req.params.id, {
         status,
         return_reason: req.body.return_reason,
-      }, (req as any).user?.id);
+      }, req.user?.id);
 
       res.json({ success: true, message: "Durum güncellendi", sale: updatedSale });
     } catch (err: any) {
@@ -2051,7 +2109,7 @@ async function startServer() {
 
   app.put("/api/sales/:id", (req, res) => {
     try {
-      const updatedSale = updateSaleRecord(req.params.id, req.body, (req as any).user?.id);
+      const updatedSale = updateSaleRecord(req.params.id, req.body, req.user?.id);
       res.json({ success: true, message: "Satış güncellendi.", sale: updatedSale });
     } catch (err: any) {
       AppLogger.error('SALE_UPDATE_ERROR', 'Sale update failed', err);
@@ -2210,7 +2268,7 @@ async function startServer() {
 
         logActivity('SALE_CREATED', 'sale', id, {
           customer: customer_name, platform: plat, total: total_amount, net_profit: netProfit,
-        }, (req as any).user?.id);
+        }, req.user?.id);
 
       })();
 
@@ -2774,7 +2832,7 @@ async function startServer() {
 
       zip.writeZip(zipPath);
 
-      logActivity("BACKUP_DOWNLOADED", "system", "backup", { ip: req.ip }, (req as any).user?.id);
+      logActivity("BACKUP_DOWNLOADED", "system", "backup", { ip: req.ip }, req.user?.id);
 
       res.download(zipPath, `dsdst_backup_${new Date().toISOString().split('T')[0]}.zip`, () => {
         try { fs.unlinkSync(backupPath); } catch (_) {}
@@ -2967,10 +3025,10 @@ async function startServer() {
       initializeDatabase(db);
 
       logActivity("DB_RESTORED", "system", "system", {
-        restoredBy: (req as any).user?.username,
+        restoredBy: req.user?.username,
         ip: req.ip,
         beforeRestorePath,
-      }, (req as any).user?.id);
+      }, req.user?.id);
 
       // Restore done. Imported routers (analytics, dashboard, recurring) hold a
       // reference to the OLD db object captured at startup. Rather than rewiring
