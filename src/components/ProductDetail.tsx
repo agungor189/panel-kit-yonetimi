@@ -97,7 +97,7 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
 
   const bufferedCostTRY = product.purchase_cost * (1 + (product.buffer_percentage || 0) / 100);
   const profit = product.sale_price - bufferedCostTRY;
-  const margin = product.sale_price ? ((profit / product.sale_price) * 100).toFixed(1) : 0;
+  const centralStock = product.central_stock ?? product.total_stock ?? 0;
 
   return (
     <div className="space-y-8 animate-in slide-in-from-bottom-4 duration-500">
@@ -209,8 +209,9 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-6 py-6 border-y border-border-color">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-6 py-6 border-y border-border-color">
                 <DetailStat label="Satış Fiyatı" value={<FormatAmount amount={product.sale_price} />} color="text-primary font-black" />
+                <DetailStat label="Merkez Depo Stoğu" value={`${centralStock} Adet`} color={centralStock <= (product.min_stock_level || 0) ? "text-danger" : "text-success"} />
                 <DetailStat label="Ağırlık" value={`${product.weight} gr`} color="text-text-muted" />
                 <DetailStat label="Boru Ölçüsü" value={product.pipe_size || 'Bilinmiyor'} color="text-text-muted font-mono text-sm" />
                 <DetailStat label="Alış ($)" value={`$${product.purchase_price_usd.toFixed(2)}`} color="text-text-muted" subLabel={`₺${product.exchange_rate_used} kur ile`} />

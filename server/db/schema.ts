@@ -29,6 +29,7 @@ export function applySchema(db: Database.Database): void {
       usage_area              TEXT,
       supplier                TEXT,
       min_stock_level         INTEGER DEFAULT 50,
+      central_stock           INTEGER DEFAULT 0,
       purchase_price_usd      REAL    DEFAULT 0,
       purchase_cost           REAL    DEFAULT 0,
       sale_price              REAL    DEFAULT 0,

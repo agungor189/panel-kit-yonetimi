@@ -73,6 +73,10 @@ npm run dev        # Vite + Express birlikte localhost:3000
 - **WAL modu** açık → eşzamanlı okuma performansı yüksek.
 - **Versiyonlu migration sistemi** — `server/migrations/runner.ts`. Her uygulama başlangıcında yeni migration'lar otomatik uygulanır. `schema_migrations` tablosunda izlenir.
 
+### Stok Modeli
+
+Stok modeli tek merkezi depo stoğudur. Platform bazlı stok fiziksel stok değildir; `product_platforms` kanal/listelenme/fiyat bilgisi için tutulur, gerçek stok kaynağı `products.central_stock` alanıdır.
+
 ### Yedek & Geri Yükleme
 
 Panelden **Ayarlar → Yedek İndir** ile ZIP yedek al.
@@ -111,8 +115,8 @@ Varsayılan kullanıcı: `admin` / `admin` — **ilk girişte şifreyi değişti
 
 | Modül | Açıklama |
 |---|---|
-| Ürünler | SKU/barkod, çoklu platform stok, görsel, fiyat hesaplama |
-| Stok | Platform bazlı stok hareketleri, hareket geçmişi |
+| Ürünler | SKU/barkod, merkezi depo stoğu, kanal fiyatları, görsel, fiyat hesaplama |
+| Stok | Merkezi depo stok hareketleri, hareket geçmişi |
 | Satışlar | Sipariş yönetimi, otomatik stok düşme, otomatik gelir kaydı, iade/iptal akışı |
 | Gelir/Gider | İşlem kaydı, fatura ekleri, kasa hesapları |
 | Tekrarlayan Ödemeler | Aylık/yıllık/özel frekans planlar, takvim görünümü |

@@ -270,11 +270,10 @@ export function createDashboardDataRouter(db: Database) {
           SELECT
             p.id,
             COALESCE(p.min_stock_level, 50) as min_stock_level,
-            COALESCE(SUM(pp.stock), 0) as stock_quantity,
-            MAX(COALESCE(p.min_stock_level, 50) - COALESCE(SUM(pp.stock), 0), 0) as deficit
+            COALESCE(p.central_stock, 0) as stock_quantity,
+            MAX(COALESCE(p.min_stock_level, 50) - COALESCE(p.central_stock, 0), 0) as deficit
           FROM products p
-          LEFT JOIN product_platforms pp ON pp.product_id = p.id
-          GROUP BY p.id, p.min_stock_level
+          GROUP BY p.id, p.min_stock_level, p.central_stock
           HAVING stock_quantity <= min_stock_level
         )
       `).get() as any;

@@ -44,6 +44,8 @@ const COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899'
 
 type TabView = 'financial' | 'products' | 'platform' | 'cashflow' | 'risk';
 
+const getCentralProductStock = (product: Product) => Number(product.central_stock ?? product.total_stock ?? 0) || 0;
+
 export default function Analytics({ settings, initialTab }: { settings: Settings | null, initialTab?: string }) {
   const { FormatAmount, activeRate } = useCurrency();
   const [activeTab, setActiveTab] = useState<string>(initialTab || 'financial');
@@ -197,7 +199,7 @@ export default function Analytics({ settings, initialTab }: { settings: Settings
        const mat = p.material || 'Belirtilmedi';
        const mod = p.model || 'Belirtilmedi';
        const sz = p.size || 'Belirtilmedi';
-       const stock = (p.platforms ? p.platforms.reduce((sum: number, s: any) => sum + (s.stock || 0), 0) : 0);
+       const stock = getCentralProductStock(p);
 
        const comboKey = `${mat}---${mod}---${sz}`;
        if (!combos[comboKey]) combos[comboKey] = { key: comboKey, material: mat, model: mod, size: sz, soldQty: 0, revenue: 0, profit: 0, stock: 0 };
@@ -248,7 +250,7 @@ export default function Analytics({ settings, initialTab }: { settings: Settings
      return productStats.map(p => {
         const pSales = sales.filter(s => saleItems.some(si => si.sale_id === s.id && si.product_id === p.id));
         const lastSale = pSales.length > 0 ? new Date(Math.max(...pSales.map(t => new Date(t.created_at).getTime()))) : null;
-        const totalStock = (p.platforms ? p.platforms.reduce((sum, s) => sum + (s.stock || 0), 0) : 0);
+        const totalStock = getCentralProductStock(p);
         
         const isCritical = totalStock <= (p.min_stock_level || threshold) && p.status === 'Active';
         const isDead = p.status === 'Active' && totalStock > 0 && (!lastSale || (now - lastSale.getTime() > deadThresholdMillis));
@@ -288,7 +290,7 @@ export default function Analytics({ settings, initialTab }: { settings: Settings
      let currentStockCost = 0;
 
      products.forEach(p => {
-        const totalStock = (p.platforms ? p.platforms.reduce((sum: number, s: any) => sum + (s.stock || 0), 0) : 0);
+        const totalStock = getCentralProductStock(p);
         if (totalStock > 0 && p.purchase_price_usd > 0) {
            originalStockCost += (totalStock * p.purchase_cost);
            currentStockCost += (totalStock * (p.purchase_price_usd * activeRate));

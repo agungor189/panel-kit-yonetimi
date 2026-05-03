@@ -55,7 +55,9 @@ const getDiffs = (details: any) => {
     const bStr = JSON.stringify(beforeObj[key]);
     const aStr = JSON.stringify(afterObj[key]);
     if (bStr !== aStr && key !== 'updated_at' && key !== 'imageChanged') {
-      if (key === 'platforms' && Array.isArray(beforeObj[key]) && Array.isArray(afterObj[key])) {
+      if (key === 'central_stock') {
+        diffs.push({ key: 'Merkez Depo Stoğu', old: beforeObj[key] || 0, new: afterObj[key] || 0 });
+      } else if (key === 'platforms' && Array.isArray(beforeObj[key]) && Array.isArray(afterObj[key])) {
         const oldP = beforeObj[key];
         const newP = afterObj[key];
         

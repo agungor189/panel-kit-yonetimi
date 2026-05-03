@@ -83,7 +83,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
     sku: 'Ürün Kodu',
     name: 'Ürün Adı',
     category: 'Malzeme',
-    stock: 'Toplam Stok',
+    stock: 'Merkez Depo Stoğu',
     price: 'Satış Fiyatı',
     barcode: 'Barkod',
     description: 'Açıklama',
@@ -100,7 +100,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
       'Malzeme': p.category,
       'Ürün Adı': p.name || p.title,
       'Boru Ölçüsü': p.pipe_size || '',
-      'Toplam Stok': p.total_stock || 0,
+      'Merkez Depo Stoğu': p.total_stock || 0,
       'Satış Fiyatı': p.sale_price,
       'Barkod': p.barcode || '',
       'Açıklama': p.description || '',
@@ -145,7 +145,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
         newMapping.sku = findMatch(['sku', 'kod', 'ürün kodu']) || headers[0] || '';
         newMapping.name = findMatch(['ad', 'isim', 'başlık', 'ürün adı']) || headers[1] || '';
         newMapping.category = findMatch(['malzeme', 'kategori', 'category']) || headers[2] || '';
-        newMapping.stock = findMatch(['stok', 'adet', 'stock', 'toplam stok']) || headers[3] || '';
+        newMapping.stock = findMatch(['stok', 'adet', 'stock', 'toplam stok', 'merkez depo stoğu']) || headers[3] || '';
         newMapping.price = findMatch(['fiyat', 'price', 'satış fiyatı']) || headers[4] || '';
         newMapping.barcode = findMatch(['barkod', 'barcode', 'ean']) || headers[5] || '';
         newMapping.description = findMatch(['açıklama', 'description', 'detay']) || headers[6] || '';
@@ -216,10 +216,12 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
           profit_percentage: 0,
           price_locked: false,
           exchange_rate_used: 0,
+          central_stock: totalStock,
+          total_stock: totalStock,
           status: totalStock > 0 ? 'Active' : 'Out of stock',
-          platforms: PLATFORMS.map((pName, idx) => ({
+          platforms: PLATFORMS.map((pName) => ({
             name: pName,
-            stock: idx === 0 ? totalStock : 0,
+            stock: 0,
             price: 0,
             is_listed: true
           }))
@@ -349,7 +351,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                 'Ürün Kodu': 'URUN-001',
                 'Ürün Adı': 'Örnek Ürün',
                 'Malzeme': 'Aliminyum',
-                'Toplam Stok': '100',
+                'Merkez Depo Stoğu': '100',
                 'Satış Fiyatı': '250',
                 'Barkod': '8690000000001',
                 'Açıklama': 'Siyah kaliteli kaplama',
@@ -541,7 +543,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                   <th className="px-4 py-5 hidden lg:table-cell text-right">Buffer TL</th>
                   <th className="px-4 py-5 font-bold text-blue-600 text-right">Satış TL</th>
                   <th className="px-4 py-5 hidden sm:table-cell text-center">Marj %</th>
-                  <th className="px-4 py-5 text-center">Stok</th>
+                  <th className="px-4 py-5 text-center">Merkez Stok</th>
                   <th className="px-4 py-5 font-bold text-gray-700 text-right">Toplam Değer</th>
                   <th className="px-4 py-5 hidden sm:table-cell text-center">Durum</th>
                 </tr>
@@ -672,7 +674,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                           {field === 'sku' && 'Ürün Kodu (Zorunlu)'}
                           {field === 'name' && 'Ürün Adı (Zorunlu)'}
                           {field === 'category' && 'Malzeme / Kategori'}
-                          {field === 'stock' && 'Stok Miktarı'}
+                          {field === 'stock' && 'Merkez Depo Stoğu'}
                           {field === 'price' && 'Alış Fiyatı (USD)'}
                           {field === 'barcode' && 'Barkod'}
                           {field === 'description' && 'Açıklama'}

@@ -78,14 +78,6 @@ export function createProductAnalyticsRouter(db: Database.Database) {
     ) ss ON ss.product_id = p.id
   `;
 
-  const getStockJoin = () => `
-    LEFT JOIN (
-      SELECT product_id, SUM(stock) as stock
-      FROM product_platforms
-      GROUP BY product_id
-    ) ws ON ws.product_id = p.id
-  `;
-
   // 0. Filter Options
   router.get("/products/filter-options", (req, res) => {
     try {
@@ -104,17 +96,15 @@ export function createProductAnalyticsRouter(db: Database.Database) {
     try {
       const { productWhere, salesWhere, queryParams } = buildWhere(req);
       const salesJoinSql = getSalesStatsJoin(salesWhere);
-      const stockJoinSql = getStockJoin();
       
       const summary = db.prepare(`
         SELECT 
           COUNT(DISTINCT p.id) as totalSku,
           IFNULL(SUM(ss.soldQty), 0) as totalSoldQty,
           IFNULL(SUM(ss.revenue), 0) as totalRevenue,
-          IFNULL(SUM(ws.stock), 0) as totalStock
+          IFNULL(SUM(COALESCE(p.central_stock, 0)), 0) as totalStock
         FROM products p
         ${salesJoinSql}
-        ${stockJoinSql}
         WHERE ${productWhere}
       `).get(...queryParams) as any;
 
@@ -162,7 +152,6 @@ export function createProductAnalyticsRouter(db: Database.Database) {
     try {
       const { productWhere, salesWhere, queryParams } = buildWhere(req);
       const salesJoinSql = getSalesStatsJoin(salesWhere);
-      const stockJoinSql = getStockJoin();
       
       const query = `
         SELECT 
@@ -173,10 +162,9 @@ export function createProductAnalyticsRouter(db: Database.Database) {
           COUNT(DISTINCT p.id) as skuCount,
           IFNULL(SUM(ss.soldQty), 0) as soldQty,
           IFNULL(SUM(ss.revenue), 0) as revenue,
-          IFNULL(SUM(ws.stock), 0) as currentStock
+          IFNULL(SUM(COALESCE(p.central_stock, 0)), 0) as currentStock
         FROM products p
         ${salesJoinSql}
-        ${stockJoinSql}
         WHERE ${productWhere}
         GROUP BY
           IFNULL(p.normalized_material, 'Bilinmiyor'),
@@ -206,7 +194,7 @@ export function createProductAnalyticsRouter(db: Database.Database) {
           IFNULL(p.normalized_model, 'Bilinmiyor') as model,
           COALESCE(p.normalized_pipe_size, p.normalized_size, 'Bilinmiyor') as size,
           IFNULL(p.normalized_tube_type, 'Bilinmiyor') as tubeType,
-          IFNULL((SELECT SUM(w.stock) FROM product_platforms w WHERE w.product_id = p.id), 0) as currentStock,
+          IFNULL(p.central_stock, 0) as currentStock,
           IFNULL(ss.soldQty, 0) as soldQty,
           IFNULL(ss.revenue, 0) as revenue,
           ss.lastSaleDate as lastSaleDate
@@ -227,7 +215,6 @@ export function createProductAnalyticsRouter(db: Database.Database) {
     try {
       const { productWhere, salesWhere, queryParams } = buildWhere(req);
       const salesJoinSql = getSalesStatsJoin(salesWhere);
-      const stockJoinSql = getStockJoin();
 
       const getStats = (groupCol: string) => {
         return db.prepare(`
@@ -236,10 +223,9 @@ export function createProductAnalyticsRouter(db: Database.Database) {
             COUNT(DISTINCT p.id) as skuCount,
             IFNULL(SUM(ss.soldQty), 0) as soldQty,
             IFNULL(SUM(ss.revenue), 0) as revenue,
-            IFNULL(SUM(ws.stock), 0) as currentStock
+            IFNULL(SUM(COALESCE(p.central_stock, 0)), 0) as currentStock
           FROM products p
           ${salesJoinSql}
-          ${stockJoinSql}
           WHERE ${productWhere}
           GROUP BY ${groupCol}
           ORDER BY soldQty DESC

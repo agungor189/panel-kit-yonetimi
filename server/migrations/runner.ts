@@ -374,6 +374,44 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 22,
+    name: "add_products_central_stock",
+    up(db) {
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(products)").all() as { name: string }[]).map((col) => col.name),
+      );
+      const hadCentralStock = columns.has("central_stock");
+
+      if (!hadCentralStock) {
+        db.exec("ALTER TABLE products ADD COLUMN central_stock INTEGER DEFAULT 0");
+      }
+
+      const platformColumns = new Set(
+        (db.prepare("PRAGMA table_info(product_platforms)").all() as { name: string }[]).map((col) => col.name),
+      );
+      if (!platformColumns.has("product_id") || !platformColumns.has("stock")) {
+        db.exec("UPDATE products SET central_stock = COALESCE(central_stock, 0)");
+        return;
+      }
+
+      if (hadCentralStock) {
+        db.exec("UPDATE products SET central_stock = 0 WHERE central_stock IS NULL");
+        return;
+      }
+
+      db.exec(`
+        UPDATE products
+        SET central_stock = COALESCE((
+          SELECT SUM(COALESCE(pp.stock, 0))
+          FROM product_platforms pp
+          WHERE pp.product_id = products.id
+        ), 0)
+        WHERE central_stock IS NULL OR central_stock = 0
+      `);
+      db.exec("UPDATE products SET central_stock = 0 WHERE central_stock IS NULL");
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

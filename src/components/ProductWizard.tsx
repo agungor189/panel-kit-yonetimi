@@ -79,13 +79,13 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
   const loadProduct = async () => {
     try {
       const data = await api.get(`/products/${productId}`);
-      const totalStock = data.platforms?.reduce((acc: number, p: any) => acc + (p.stock || 0), 0) || 0;
+      const totalStock = data.central_stock ?? data.total_stock ?? 0;
       setFormData({
         ...data,
         total_stock: totalStock,
         platforms: PLATFORMS.map(name => {
-          const p = data.platforms.find((dp: any) => dp.platform_name === name);
-          return p ? { name, stock: p.stock, price: p.price, is_listed: !!p.is_listed } : { name, stock: 0, price: data.sale_price, is_listed: false };
+          const p = data.platforms?.find((dp: any) => dp.platform_name === name);
+          return p ? { name, stock: 0, price: p.price, is_listed: !!p.is_listed } : { name, stock: 0, price: data.sale_price, is_listed: false };
         })
       });
       setImages(data.images || []);
@@ -97,12 +97,7 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
   const handleInputChange = (e: any) => {
     const { name, value } = e.target;
     setFormData((prev: any) => {
-      const next = { ...prev, [name]: value };
-      if (name === 'total_stock' && value !== '') {
-        const val = parseInt(value) || 0;
-        next.platforms = next.platforms.map((p: any) => ({ ...p, stock: val }));
-      }
-      return next;
+      return { ...prev, [name]: value };
     });
   };
 
@@ -143,7 +138,18 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
     setLoading(true);
     try {
       let savedId = productId;
-      const payload = { ...formData, images, imageChanged };
+      const centralStock = parseInt(formData.total_stock) || 0;
+      const payload = {
+        ...formData,
+        central_stock: centralStock,
+        total_stock: centralStock,
+        platforms: (formData.platforms || []).map((platform: any) => ({
+          ...platform,
+          stock: 0,
+        })),
+        images,
+        imageChanged,
+      };
       
       if (productId) {
         await api.put(`/products/${productId}`, payload);
@@ -265,7 +271,7 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                   className="form-input font-bold" 
                 />
               </Field>
-              <Field label="Stok Adeti" required>
+              <Field label="Merkez Depo Stoğu" required>
                 <input 
                   type="number"
                   name="total_stock" 

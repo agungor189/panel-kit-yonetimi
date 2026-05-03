@@ -231,6 +231,42 @@ function mergeProductPlatforms(platforms: any[] | undefined, fallbackPrice?: unk
   return [...merged.values()];
 }
 
+function stockQuantity(value: unknown): number {
+  const parsed = Math.trunc(Number(value));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function legacyPlatformStockTotal(platforms: any[] | undefined): number {
+  if (!Array.isArray(platforms)) return 0;
+  return platforms.reduce((total, platform) => total + stockQuantity(platform?.stock), 0);
+}
+
+function hasCentralStockPayload(body: any): boolean {
+  if (!body) return false;
+  if (body.central_stock !== undefined || body.total_stock !== undefined || body.stock !== undefined) return true;
+  return Array.isArray(body.platforms) && body.platforms.some((platform: any) => platform?.stock !== undefined && platform?.stock !== null);
+}
+
+function resolveCentralStock(body: any, fallback = 0): number {
+  if (body?.central_stock !== undefined && body.central_stock !== null && body.central_stock !== '') {
+    return stockQuantity(body.central_stock);
+  }
+  if (body?.total_stock !== undefined && body.total_stock !== null && body.total_stock !== '') {
+    return stockQuantity(body.total_stock);
+  }
+  if (body?.stock !== undefined && body.stock !== null && body.stock !== '') {
+    return stockQuantity(body.stock);
+  }
+  const legacyStock = legacyPlatformStockTotal(body?.platforms);
+  if (legacyStock > 0) return legacyStock;
+  return stockQuantity(fallback);
+}
+
+function centralStockChannel(platformName?: string | null): string {
+  const channel = cleanText(platformName);
+  return channel || 'Merkez Depo';
+}
+
 function buildExpenseCashDescription(expense: any): string {
   const category = cleanText(expense?.category) || 'Gider';
   const detail =
@@ -921,16 +957,16 @@ async function startServer() {
       const lowStockProductsQuery = db.prepare(`
         SELECT p.*,
           (SELECT path FROM product_images WHERE product_id = p.id ORDER BY sort_order ASC LIMIT 1) as cover_image,
-          COALESCE((SELECT SUM(stock) FROM product_platforms WHERE product_id = p.id), 0) as total_stock
+          COALESCE(p.central_stock, 0) as total_stock
         FROM products p
-        WHERE COALESCE((SELECT SUM(stock) FROM product_platforms WHERE product_id = p.id), 0) <= COALESCE(NULLIF(p.min_stock_level, 0), CAST((SELECT value FROM settings WHERE key = 'low_stock_threshold') AS INTEGER), 50)
+        WHERE COALESCE(p.central_stock, 0) <= COALESCE(NULLIF(p.min_stock_level, 0), CAST((SELECT value FROM settings WHERE key = 'low_stock_threshold') AS INTEGER), 50)
         AND p.status = 'Active'
         ORDER BY total_stock ASC
       `).all() as any[];
 
       const allProducts = db.prepare(`
         SELECT p.id, p.purchase_cost, p.sale_price, p.purchase_price_usd, p.exchange_rate_used, p.buffer_percentage, p.material, p.model, p.size, p.category,
-          COALESCE((SELECT SUM(stock) FROM product_platforms WHERE product_id = p.id), 0) as total_stock
+          COALESCE(p.central_stock, 0) as total_stock
         FROM products p
       `).all() as any[];
 
@@ -1034,9 +1070,11 @@ async function startServer() {
     model: z.string().optional().default("Bilinmiyor"),
     size: z.string().optional().default("Bilinmiyor"),
     pipe_size: z.string().optional().default("Bilinmiyor"),
+    central_stock: z.coerce.number().min(0, "Merkez depo stoğu negatif olamaz").optional(),
+    total_stock: z.coerce.number().min(0, "Merkez depo stoğu negatif olamaz").optional(),
     platforms: z.array(z.object({
       name: z.string(),
-      stock: z.number().min(0, "Stok negatif olamaz"),
+      stock: z.coerce.number().min(0, "Stok negatif olamaz").optional(),
       price: z.number().min(0, "Platform fiyatı negatif olamaz").optional(),
       is_listed: z.boolean().optional()
     }).passthrough()).optional()
@@ -1060,21 +1098,22 @@ async function startServer() {
           }
 
           const id = uuidv4();
+          const centralStock = resolveCentralStock(validated);
           const { normalized_material, normalized_model, normalized_size, normalized_tube_type } = generateNormalizedFields({ material: validated.material, model: validated.model, size: validated.size, category: validated.category, name: validated.name });
 
           db.prepare(`
-            INSERT INTO products (id, name, title, sku, barcode, category, model, description, purchase_price_usd, purchase_cost, sale_price, buffer_percentage, profit_percentage, exchange_rate_used, price_locked, weight, status, material, size, connection_type, usage_area, supplier, min_stock_level, normalized_material, normalized_model, normalized_size, normalized_tube_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO products (id, name, title, sku, barcode, category, model, description, purchase_price_usd, purchase_cost, sale_price, buffer_percentage, profit_percentage, exchange_rate_used, price_locked, weight, status, material, size, connection_type, usage_area, supplier, min_stock_level, central_stock, normalized_material, normalized_model, normalized_size, normalized_tube_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(
             id, validated.name, validated.title, validated.sku, validated.barcode, validated.category, validated.model, validated.description, 
             validated.purchase_price_usd || 0, validated.purchase_cost || 0, validated.sale_price || 0, validated.buffer_percentage || 0, validated.profit_percentage || 0, validated.exchange_rate_used || 0, validated.price_locked ? 1 : 0, 
-            validated.weight || 0, validated.status || 'active', validated.material, validated.size, validated.connection_type, validated.usage_area, validated.supplier, validated.min_stock_level !== undefined ? validated.min_stock_level : 50,
+            validated.weight || 0, validated.status || 'active', validated.material, validated.size, validated.connection_type, validated.usage_area, validated.supplier, validated.min_stock_level !== undefined ? validated.min_stock_level : 50, centralStock,
             normalized_material, normalized_model, normalized_size, normalized_tube_type
           );
 
           if (validated.platforms) {
              for (const p of mergeProductPlatforms(validated.platforms, validated.sale_price)) {
-               db.prepare(`INSERT INTO product_platforms (id, product_id, platform_name, stock, price, is_listed) VALUES (?, ?, ?, ?, ?, ?)`).run(uuidv4(), id, p.name, p.stock || 0, p.price ?? validated.sale_price ?? 0, p.is_listed ? 1 : 0);
+               db.prepare(`INSERT INTO product_platforms (id, product_id, platform_name, stock, price, is_listed) VALUES (?, ?, ?, ?, ?, ?)`).run(uuidv4(), id, p.name, 0, p.price ?? validated.sale_price ?? 0, p.is_listed ? 1 : 0);
              }
           }
         }
@@ -1093,7 +1132,7 @@ async function startServer() {
     const products = db.prepare(`
       SELECT p.*, 
         (SELECT path FROM product_images WHERE product_id = p.id ORDER BY sort_order ASC LIMIT 1) as cover_image,
-        COALESCE((SELECT SUM(stock) FROM product_platforms WHERE product_id = p.id), 0) as total_stock
+        COALESCE(p.central_stock, 0) as total_stock
       FROM products p
       ORDER BY p.created_at DESC
     `).all();
@@ -1107,7 +1146,7 @@ async function startServer() {
     const images = db.prepare("SELECT * FROM product_images WHERE product_id = ? ORDER BY sort_order ASC").all(req.params.id);
     const platforms = db.prepare("SELECT * FROM product_platforms WHERE product_id = ?").all(req.params.id);
     
-    res.json({ ...product, images, platforms });
+    res.json({ ...product, total_stock: product.central_stock || 0, images, platforms });
   });
 
 
@@ -1119,20 +1158,21 @@ async function startServer() {
       purchase_price_usd, purchase_cost, sale_price, buffer_percentage, profit_percentage, exchange_rate_used, price_locked,
       weight, status, notes, platforms, images, material, size, pipe_size, connection_type, usage_area, supplier, min_stock_level
     } = req.body;
+    const centralStock = resolveCentralStock(req.body);
     
     // We pass the full body to generateNormalizedFields to use pipe_size inside it if needed.
     const { normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size } = generateNormalizedFields({ ...req.body, material, model, size, category, name, pipe_size });
 
     const insertProduct = db.prepare(`
-      INSERT INTO products (id, name, title, warehouse_location, sku, barcode, category, model, description, purchase_price_usd, purchase_cost, sale_price, buffer_percentage, profit_percentage, exchange_rate_used, price_locked, weight, status, notes, material, size, pipe_size, connection_type, usage_area, supplier, min_stock_level, normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO products (id, name, title, warehouse_location, sku, barcode, category, model, description, purchase_price_usd, purchase_cost, sale_price, buffer_percentage, profit_percentage, exchange_rate_used, price_locked, weight, status, notes, material, size, pipe_size, connection_type, usage_area, supplier, min_stock_level, central_stock, normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     db.transaction(() => {
       insertProduct.run(
         id, name, title, warehouse_location, sku || `SKU-${Date.now()}`, barcode, category, model, description, 
         purchase_price_usd || 0, purchase_cost || 0, sale_price || 0, buffer_percentage || 0, profit_percentage || 0, exchange_rate_used || 0, price_locked ? 1 : 0, 
-        weight || 0, status, notes, material, size, pipe_size, connection_type, usage_area, supplier, min_stock_level !== undefined ? min_stock_level : 50,
+        weight || 0, status, notes, material, size, pipe_size, connection_type, usage_area, supplier, min_stock_level !== undefined ? min_stock_level : 50, centralStock,
         normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size
       );
       
@@ -1142,7 +1182,14 @@ async function startServer() {
       `);
 
       for (const p of mergeProductPlatforms(platforms, sale_price)) {
-        insertPlatform.run(uuidv4(), id, p.name, p.stock || 0, p.price ?? sale_price ?? 0, p.is_listed ? 1 : 0);
+        insertPlatform.run(uuidv4(), id, p.name, 0, p.price ?? sale_price ?? 0, p.is_listed ? 1 : 0);
+      }
+
+      if (centralStock > 0) {
+        db.prepare(`
+          INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(uuidv4(), id, 'Merkez Depo', centralStock, 'İlk merkez depo stoğu', 'ADJUST');
       }
 
       if (images && Array.isArray(images)) {
@@ -1250,18 +1297,22 @@ async function startServer() {
         beforeState.platforms = db.prepare("SELECT platform_name, stock, price, is_listed FROM product_platforms WHERE product_id = ?").all(req.params.id);
         beforeState.images = db.prepare("SELECT id, path, sort_order FROM product_images WHERE product_id = ? ORDER BY sort_order ASC").all(req.params.id);
       }
+      const previousCentralStock = stockQuantity(beforeState?.central_stock);
+      const nextCentralStock = hasCentralStockPayload(req.body)
+        ? resolveCentralStock(req.body, previousCentralStock)
+        : previousCentralStock;
 
       db.prepare(`
         UPDATE products SET 
           name=?, title=?, warehouse_location=?, sku=?, barcode=?, category=?, model=?, description=?, 
           purchase_price_usd=?, purchase_cost=?, sale_price=?, buffer_percentage=?, profit_percentage=?, exchange_rate_used=?, price_locked=?,
-          weight=?, status=?, notes=?, material=?, size=?, pipe_size=?, connection_type=?, usage_area=?, supplier=?, min_stock_level=?, 
+          weight=?, status=?, notes=?, material=?, size=?, pipe_size=?, connection_type=?, usage_area=?, supplier=?, min_stock_level=?, central_stock=?,
           normalized_material=?, normalized_model=?, normalized_size=?, normalized_tube_type=?, normalized_pipe_size=?, updated_at=CURRENT_TIMESTAMP
         WHERE id=?
       `).run(
         name, title, warehouse_location, sku, barcode, category, model, description, 
         purchase_price_usd || 0, purchase_cost || 0, sale_price || 0, buffer_percentage || 0, profit_percentage || 0, exchange_rate_used || 0, price_locked ? 1 : 0,
-        weight || 0, status, notes, material, size, pipe_size, connection_type, usage_area, supplier, min_stock_level !== undefined ? min_stock_level : 50,
+        weight || 0, status, notes, material, size, pipe_size, connection_type, usage_area, supplier, min_stock_level !== undefined ? min_stock_level : 50, nextCentralStock,
         normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size, req.params.id
       );
 
@@ -1269,7 +1320,6 @@ async function startServer() {
       const updatePlatform = db.prepare(`
         UPDATE product_platforms
         SET
-          stock = CASE WHEN ? THEN ? ELSE stock END,
           price = CASE WHEN ? THEN ? ELSE price END,
           is_listed = CASE WHEN ? THEN ? ELSE is_listed END
         WHERE product_id = ? AND platform_name = ?
@@ -1278,28 +1328,20 @@ async function startServer() {
         INSERT INTO product_platforms (id, product_id, platform_name, stock, price, is_listed)
         VALUES (?, ?, ?, ?, ?, ?)
       `);
-      const insertStockMovement = db.prepare(`
-        INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason)
-        VALUES (?, ?, ?, ?, ?)
-      `);
 
       if (Array.isArray(platforms)) {
         for (const p of mergeProductPlatforms(platforms, sale_price)) {
           const platformName = p.name ?? p.platform_name;
           if (!platformName) continue;
 
-          const stockProvided = p.stockProvided === true;
           const priceProvided = p.priceProvided === true;
           const listedProvided = p.listedProvided === true;
-          const stockValue = stockProvided ? Number(p.stock) || 0 : 0;
           const priceValue = priceProvided ? Number(p.price) || 0 : (Number(sale_price) || 0);
           const listedValue = p.is_listed ? 1 : 0;
           const existingPlatform = getPlatform.get(req.params.id, platformName) as any;
 
           if (existingPlatform) {
             updatePlatform.run(
-              stockProvided ? 1 : 0,
-              stockValue,
               priceProvided ? 1 : 0,
               priceValue,
               listedProvided ? 1 : 0,
@@ -1308,18 +1350,17 @@ async function startServer() {
               platformName
             );
           } else {
-            insertPlatform.run(uuidv4(), req.params.id, platformName, stockValue, priceValue, listedValue);
-          }
-
-          // Track stock movements only when the request explicitly changes stock.
-          if (stockProvided) {
-            const oldStock = existingPlatform ? Number(existingPlatform.stock) || 0 : 0;
-            const diff = stockValue - oldStock;
-            if (diff !== 0) {
-              insertStockMovement.run(uuidv4(), req.params.id, platformName, diff, 'Oto: Ürün Güncelleme');
-            }
+            insertPlatform.run(uuidv4(), req.params.id, platformName, 0, priceValue, listedValue);
           }
         }
+      }
+
+      const centralStockDiff = nextCentralStock - previousCentralStock;
+      if (centralStockDiff !== 0) {
+        db.prepare(`
+          INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(uuidv4(), req.params.id, 'Merkez Depo', centralStockDiff, 'Oto: Ürün Güncelleme', 'ADJUST');
       }
 
       if (images && Array.isArray(images)) {
@@ -1394,21 +1435,42 @@ async function startServer() {
   // Stock Movement
   app.post("/api/stock/adjust", (req, res) => {
     const { product_id, platform_name, change_amount, reason } = req.body;
-    
-    db.transaction(() => {
-      const beforeState = db.prepare("SELECT stock FROM product_platforms WHERE product_id = ? AND platform_name = ?").get(product_id, platform_name);
 
-      db.prepare("UPDATE product_platforms SET stock = stock + ? WHERE product_id = ? AND platform_name = ?")
-        .run(change_amount, product_id, platform_name);
-      
-      db.prepare("INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason) VALUES (?, ?, ?, ?, ?)")
-        .run(uuidv4(), product_id, platform_name, change_amount, reason);
-      
-      const afterState = db.prepare("SELECT stock FROM product_platforms WHERE product_id = ? AND platform_name = ?").get(product_id, platform_name);
-      logActivity('UPDATE_STOCK', 'product', product_id, { platform_name, change_amount, reason, before: beforeState, after: afterState });
-    })();
+    try {
+      const delta = Math.trunc(Number(change_amount));
+      if (!Number.isFinite(delta) || delta === 0) {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_STOCK_CHANGE', message: 'Stok değişimi 0 olamaz.' } });
+      }
 
-    res.json({ success: true });
+      db.transaction(() => {
+        const beforeState = db.prepare("SELECT id, central_stock FROM products WHERE id = ?").get(product_id) as any;
+        if (!beforeState) throw new Error("Ürün bulunamadı.");
+
+        const beforeStock = stockQuantity(beforeState.central_stock);
+        const nextStock = beforeStock + delta;
+        if (nextStock < 0) throw new Error(`Yetersiz merkez depo stoğu. Mevcut stok: ${beforeStock} adet.`);
+
+        db.prepare("UPDATE products SET central_stock = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+          .run(nextStock, product_id);
+
+        db.prepare(`
+          INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(uuidv4(), product_id, centralStockChannel(platform_name), delta, reason || 'Manuel merkez depo stok ayarı', 'ADJUST');
+
+        logActivity('UPDATE_STOCK', 'product', product_id, {
+          channel: centralStockChannel(platform_name),
+          change_amount: delta,
+          reason,
+          before: { central_stock: beforeStock },
+          after: { central_stock: nextStock },
+        });
+      })();
+
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(400).json({ success: false, error: { code: 'STOCK_ADJUST_FAILED', message: err.message } });
+    }
   });
 
   app.get("/api/stock/movements/:productId", (req, res) => {
@@ -1667,9 +1729,9 @@ async function startServer() {
       const totalExpense = expensesRes?.total || 0;
 
       // 4. Stoka Bağlanan Sermaye
-      // Active stock value based on purchase_cost * total_stock. Calculate dynamically or just use current stock
+      // Active stock value based on central warehouse stock.
       const stockRes = db.prepare(`
-        SELECT SUM(p.purchase_cost * COALESCE((SELECT SUM(stock) FROM product_platforms WHERE product_id = p.id), 0)) as total
+        SELECT SUM(p.purchase_cost * COALESCE(p.central_stock, 0)) as total
         FROM products p
       `).get() as any;
       const capitalInStock = stockRes?.total || 0;
@@ -2209,26 +2271,21 @@ async function startServer() {
       GROUP BY product_id, platform_name
     `).all(originalMovementReason) as any[];
 
-    const restoreToPlatform = (productId: string, preferredPlatform: string | null | undefined, quantity: number) => {
+    const restoreToCentralStock = (productId: string, saleChannel: string | null | undefined, quantity: number) => {
       if (!productId || quantity <= 0) return;
 
-      const preferred = preferredPlatform
-        ? db.prepare("SELECT * FROM product_platforms WHERE product_id = ? AND platform_name = ?").get(productId, preferredPlatform) as any
-        : null;
-      const platform = preferred || db.prepare("SELECT * FROM product_platforms WHERE product_id = ? ORDER BY platform_name ASC LIMIT 1").get(productId) as any;
-      if (!platform) return;
-
-      db.prepare("UPDATE product_platforms SET stock = stock + ? WHERE id = ?").run(quantity, platform.id);
+      db.prepare("UPDATE products SET central_stock = COALESCE(central_stock, 0) + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .run(quantity, productId);
       db.prepare(`
         INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type)
         VALUES (?, ?, ?, ?, ?, ?)
-      `).run(uuidv4(), productId, platform.platform_name, quantity, `${finalStatus} — Satış No: ${sale.id}`, 'IN');
+      `).run(uuidv4(), productId, centralStockChannel(saleChannel), quantity, `${finalStatus} — Satış No: ${sale.id}`, 'IN');
 
       restoredByProduct.set(productId, (restoredByProduct.get(productId) || 0) + quantity);
     };
 
     for (const movement of originalMovements) {
-      restoreToPlatform(movement.product_id, movement.platform_name, Number(movement.quantity) || 0);
+      restoreToCentralStock(movement.product_id, movement.platform_name, Number(movement.quantity) || 0);
     }
 
     const saleItems = db.prepare("SELECT product_id, SUM(quantity) as quantity FROM sale_items WHERE sale_id = ? GROUP BY product_id").all(sale.id) as any[];
@@ -2238,7 +2295,7 @@ async function startServer() {
       const restoredQty = restoredByProduct.get(item.product_id) || 0;
       const remainingQty = soldQty - restoredQty;
       if (remainingQty > 0) {
-        restoreToPlatform(item.product_id, sale.platform, remainingQty);
+        restoreToCentralStock(item.product_id, sale.platform, remainingQty);
       }
     }
   };
@@ -2429,17 +2486,17 @@ async function startServer() {
 
         let totalPurchaseCost = 0;
         const processedItems = mergedItems.map((item: any) => {
-          const product = db.prepare("SELECT purchase_cost FROM products WHERE id = ?").get(item.product_id) as any;
+          const product = db.prepare("SELECT purchase_cost, central_stock FROM products WHERE id = ?").get(item.product_id) as any;
+          if (!product) throw new Error(`Ürün bulunamadı: ${item.product_name || item.product_id}`);
           const pc = product?.purchase_cost || 0;
           totalPurchaseCost += (pc * item.quantity);
-          return { ...item, purchase_cost: pc, price: item.price || 0 };
+          return { ...item, purchase_cost: pc, price: item.price || 0, available_stock: stockQuantity(product.central_stock) };
         });
 
-        // 1. Stock Validation for all items
+        // 1. Central warehouse stock validation for all items
         for (const item of processedItems) {
-          const totalStockResult = db.prepare("SELECT COALESCE(SUM(stock), 0) as total FROM product_platforms WHERE product_id = ?").get(item.product_id) as any;
-          if (totalStockResult.total < item.quantity) {
-            throw new Error(`Yetersiz stok. ${item.product_name} için mevcut stok: ${totalStockResult.total} adet.`);
+          if (item.available_stock < item.quantity) {
+            throw new Error(`Yetersiz merkez depo stoğu. ${item.product_name} için mevcut stok: ${item.available_stock} adet.`);
           }
         }
 
@@ -2504,7 +2561,7 @@ async function startServer() {
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
 
-        // 3. Process items: Sale Items, Stock deduction, Stock Movements
+        // 3. Process items: Sale Items, central stock deduction, Stock Movements
         for (const item of processedItems) {
           const lineRevenue = item.price * item.quantity;
           const lineCost = item.purchase_cost * item.quantity;
@@ -2513,17 +2570,20 @@ async function startServer() {
 
           insertItem.run(uuidv4(), id, item.product_id, item.product_name, item.quantity, item.weight, item.price, item.purchase_cost, itemNetProfit);
 
-          let remainingToDeduct = item.quantity;
-          const platforms = db.prepare("SELECT * FROM product_platforms WHERE product_id = ? AND stock > 0 ORDER BY stock DESC").all(item.product_id) as any[];
+          const stockUpdate = db.prepare(`
+            UPDATE products
+            SET central_stock = COALESCE(central_stock, 0) - ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND COALESCE(central_stock, 0) >= ?
+          `).run(item.quantity, item.product_id, item.quantity);
 
-          for (const platRow of platforms) {
-            if (remainingToDeduct <= 0) break;
-            const deduct = Math.min(platRow.stock, remainingToDeduct);
-            db.prepare("UPDATE product_platforms SET stock = stock - ? WHERE id = ?").run(deduct, platRow.id);
-            db.prepare("INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type) VALUES (?, ?, ?, ?, ?, ?)")
-              .run(uuidv4(), item.product_id, platRow.platform_name, -deduct, `Satış No: ${id}`, 'OUT');
-            remainingToDeduct -= deduct;
+          if (stockUpdate.changes === 0) {
+            const currentStock = db.prepare("SELECT COALESCE(central_stock, 0) as central_stock FROM products WHERE id = ?").get(item.product_id) as any;
+            throw new Error(`Yetersiz merkez depo stoğu. ${item.product_name} için mevcut stok: ${currentStock?.central_stock || 0} adet.`);
           }
+
+          db.prepare("INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type) VALUES (?, ?, ?, ?, ?, ?)")
+            .run(uuidv4(), item.product_id, centralStockChannel(plat), -item.quantity, `Satış No: ${id}`, 'OUT');
         }
 
         // 4. Auto-create income transaction so the financial ledger is always consistent.
@@ -3058,7 +3118,11 @@ async function startServer() {
   });
 
   app.get("/api/public/stock", publicApiAuth("stock:read"), (req, res) => {
-    const stock = db.prepare("SELECT * FROM product_platforms").all();
+    const stock = db.prepare(`
+      SELECT id as product_id, sku, title, COALESCE(central_stock, 0) as central_stock
+      FROM products
+      WHERE status != 'deleted'
+    `).all();
     logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip });
     res.json({ success: true, data: stock });
   });

@@ -28,6 +28,7 @@ export interface Product {
   created_at: string;
   updated_at: string;
   cover_image?: string;
+  central_stock?: number;
   total_stock?: number;
   images?: ProductImage[];
   platforms?: ProductPlatform[];
