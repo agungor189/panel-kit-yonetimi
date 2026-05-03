@@ -351,6 +351,8 @@ export function applySchema(db: Database.Database): void {
       source_type                 TEXT,
       source_id                   TEXT,
       description                 TEXT,
+      transaction_date            DATETIME,
+      is_deleted                  INTEGER DEFAULT 0,
       created_at                  DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(account_id) REFERENCES cash_accounts(id)
     );

@@ -272,6 +272,17 @@ const migrations: Migration[] = [
       } catch (_) {}
     },
   },
+  {
+    version: 20,
+    name: "add_cash_transactions_soft_delete",
+    up(db) {
+      try { db.exec("ALTER TABLE cash_transactions ADD COLUMN transaction_date DATETIME"); } catch (_) {}
+      try { db.exec("ALTER TABLE cash_transactions ADD COLUMN is_deleted INTEGER DEFAULT 0"); } catch (_) {}
+      try { db.exec("UPDATE cash_transactions SET is_deleted = 0 WHERE is_deleted IS NULL"); } catch (_) {}
+      try { db.exec("CREATE INDEX IF NOT EXISTS idx_cash_transactions_source ON cash_transactions(source_type, source_id)"); } catch (_) {}
+      try { db.exec("CREATE INDEX IF NOT EXISTS idx_cash_transactions_deleted ON cash_transactions(is_deleted)"); } catch (_) {}
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

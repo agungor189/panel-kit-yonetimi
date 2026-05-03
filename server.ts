@@ -187,6 +187,114 @@ function logActivity(action: string, entity_type: string, entity_id: string, det
   }
 }
 
+function cleanText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function buildExpenseCashDescription(expense: any): string {
+  const category = cleanText(expense?.category) || 'Gider';
+  const detail =
+    cleanText(expense?.title) ||
+    cleanText(expense?.note) ||
+    cleanText(expense?.description) ||
+    cleanText(expense?.reference_number);
+
+  return detail ? `Gider: ${category} - ${detail}` : `Gider: ${category}`;
+}
+
+function getExpensePaymentAccountId(expense: any): string | null {
+  return expense?.payer_person_id || expense?.cash_account_id || null;
+}
+
+function ensureActiveCashAccount(accountId: string): any {
+  const account = db.prepare("SELECT * FROM cash_accounts WHERE id = ?").get(accountId) as any;
+  if (!account) throw new Error("Geçersiz hesap.");
+  if (account.is_active === 0) throw new Error("Seçili hesap pasif.");
+  return account;
+}
+
+function insertExpenseCashTransaction(expense: any): string {
+  const accountId = getExpensePaymentAccountId(expense);
+  if (!accountId) throw new Error("Gider eklerken ödeme hesabı veya ödeyen kişi seçimi zorunludur.");
+  ensureActiveCashAccount(accountId);
+
+  const amount = Number(expense.amount);
+  if (!Number.isFinite(amount) || amount <= 0) throw new Error("Tutar 0'dan büyük olmalıdır.");
+
+  const exchangeRate = Number(expense.exchange_rate_at_transaction || expense.exchange_rate || 1);
+  if (!Number.isFinite(exchangeRate) || exchangeRate <= 0) throw new Error("Döviz kuru geçerli değil.");
+
+  const cashTxId = uuidv4();
+  db.prepare(`
+    INSERT INTO cash_transactions (
+      id, account_id, type, amount, currency, exchange_rate_at_transaction,
+      source_type, source_id, description, transaction_date, is_deleted
+    )
+    VALUES (?, ?, 'OUT', ?, ?, ?, 'expense', ?, ?, ?, 0)
+  `).run(
+    cashTxId,
+    accountId,
+    amount,
+    expense.currency || 'TRY',
+    exchangeRate,
+    expense.id,
+    buildExpenseCashDescription(expense),
+    expense.date || new Date().toISOString(),
+  );
+
+  return cashTxId;
+}
+
+function syncExpenseCashTransaction(expense: any): void {
+  const accountId = getExpensePaymentAccountId(expense);
+  if (!accountId) throw new Error("Gider eklerken ödeme hesabı veya ödeyen kişi seçimi zorunludur.");
+  ensureActiveCashAccount(accountId);
+
+  const amount = Number(expense.amount);
+  if (!Number.isFinite(amount) || amount <= 0) throw new Error("Tutar 0'dan büyük olmalıdır.");
+
+  const exchangeRate = Number(expense.exchange_rate_at_transaction || expense.exchange_rate || 1);
+  if (!Number.isFinite(exchangeRate) || exchangeRate <= 0) throw new Error("Döviz kuru geçerli değil.");
+
+  const existingCash = db.prepare(`
+    SELECT *
+    FROM cash_transactions
+    WHERE source_type = 'expense'
+      AND source_id = ?
+      AND COALESCE(is_deleted, 0) = 0
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(expense.id) as any;
+
+  if (!existingCash) {
+    insertExpenseCashTransaction(expense);
+    return;
+  }
+
+  if (existingCash.account_id !== accountId) {
+    db.prepare("UPDATE cash_transactions SET is_deleted = 1 WHERE id = ?").run(existingCash.id);
+    insertExpenseCashTransaction(expense);
+    return;
+  }
+
+  db.prepare(`
+    UPDATE cash_transactions
+    SET amount = ?,
+        currency = ?,
+        exchange_rate_at_transaction = ?,
+        description = ?,
+        transaction_date = ?
+    WHERE id = ?
+  `).run(
+    amount,
+    expense.currency || 'TRY',
+    exchangeRate,
+    buildExpenseCashDescription(expense),
+    expense.date || existingCash.transaction_date || existingCash.created_at,
+    existingCash.id,
+  );
+}
+
 // -- EXCHANGE RATES LOGIC --
 async function fetchExchangeRate() {
   let rate = 0;
@@ -728,7 +836,7 @@ async function startServer() {
       // Metrics (Exclude Cancelled Sales)
       const revenueResult = db.prepare("SELECT SUM(net_total) as total FROM sales WHERE created_at >= ? AND status NOT IN ('İptal Edildi', 'İade Edildi')").get(firstDayOfMonth) as any;
       const salesProfitResult = db.prepare("SELECT SUM(net_profit) as total, SUM(gross_profit) as gross FROM sales WHERE created_at >= ? AND status NOT IN ('İptal Edildi', 'İade Edildi')").get(firstDayOfMonth) as any;
-      const realizedExpensesResult = db.prepare("SELECT SUM(amount) as total FROM transactions WHERE type = 'Expense' AND date >= ?").get(firstDayOfMonth) as any;
+      const realizedExpensesResult = db.prepare("SELECT SUM(amount) as total FROM transactions WHERE type = 'Expense' AND date >= ? AND COALESCE(is_deleted, 0) = 0").get(firstDayOfMonth) as any;
 
       // Cash Metrics
       // 1. Total Cash Balance
@@ -736,8 +844,8 @@ async function startServer() {
          SELECT 
            SUM(
              opening_balance + 
-             COALESCE((SELECT SUM(amount) FROM cash_transactions WHERE account_id = a.id AND type='IN'), 0) - 
-             COALESCE((SELECT SUM(amount) FROM cash_transactions WHERE account_id = a.id AND type='OUT'), 0)
+             COALESCE((SELECT SUM(amount) FROM cash_transactions WHERE account_id = a.id AND type='IN' AND COALESCE(is_deleted, 0) = 0), 0) -
+             COALESCE((SELECT SUM(amount) FROM cash_transactions WHERE account_id = a.id AND type='OUT' AND COALESCE(is_deleted, 0) = 0), 0)
            ) as total
          FROM cash_accounts a
          WHERE a.type != 'platform'
@@ -747,15 +855,15 @@ async function startServer() {
          SELECT 
            SUM(
              opening_balance + 
-             COALESCE((SELECT SUM(amount) FROM cash_transactions WHERE account_id = a.id AND type='IN'), 0) - 
-             COALESCE((SELECT SUM(amount) FROM cash_transactions WHERE account_id = a.id AND type='OUT'), 0)
+             COALESCE((SELECT SUM(amount) FROM cash_transactions WHERE account_id = a.id AND type='IN' AND COALESCE(is_deleted, 0) = 0), 0) -
+             COALESCE((SELECT SUM(amount) FROM cash_transactions WHERE account_id = a.id AND type='OUT' AND COALESCE(is_deleted, 0) = 0), 0)
            ) as total
          FROM cash_accounts a
          WHERE a.type = 'platform'
       `).get() as any;
 
-      const monthlyCashIn = db.prepare("SELECT SUM(amount) as total FROM cash_transactions WHERE type='IN' AND created_at >= ? AND source_type='sale'").get(firstDayOfMonth) as any;
-      const monthlyCashOut = db.prepare("SELECT SUM(amount) as total FROM cash_transactions WHERE type='OUT' AND created_at >= ? AND source_type='expense'").get(firstDayOfMonth) as any;
+      const monthlyCashIn = db.prepare("SELECT SUM(amount) as total FROM cash_transactions WHERE type='IN' AND COALESCE(transaction_date, created_at) >= ? AND source_type='sale' AND COALESCE(is_deleted, 0) = 0").get(firstDayOfMonth) as any;
+      const monthlyCashOut = db.prepare("SELECT SUM(amount) as total FROM cash_transactions WHERE type='OUT' AND COALESCE(transaction_date, created_at) >= ? AND source_type='expense' AND COALESCE(is_deleted, 0) = 0").get(firstDayOfMonth) as any;
 
       const pendingOccurrences = db.prepare(`
         SELECT SUM(amount_try) as total 
@@ -1282,7 +1390,7 @@ async function startServer() {
     const expense = db.prepare(`
       SELECT t.*
       FROM transactions t 
-      WHERE t.id = ? AND t.type = 'Expense'
+      WHERE t.id = ? AND t.type = 'Expense' AND COALESCE(t.is_deleted, 0) = 0
     `).get(req.params.id);
 
     if (!expense) return res.status(404).json({ error: "Expense not found" });
@@ -1312,10 +1420,20 @@ async function startServer() {
         if (account.is_active === 0) throw new Error("Seçili hesap pasif.");
         if (amount <= 0) throw new Error("Tutar 0'dan büyük olmalıdır.");
 
-        db.prepare(`
-          INSERT INTO cash_transactions (id, account_id, type, amount, currency, exchange_rate_at_transaction, source_type, source_id, description)
-          VALUES (?, ?, 'OUT', ?, ?, ?, 'expense', ?, ?)
-        `).run(uuidv4(), actualAccountId, amount, currency || 'TRY', activeRate, txId, `Gider: ${category} - ${title || note}`);
+        insertExpenseCashTransaction({
+          id: txId,
+          date: date || new Date().toISOString(),
+          category,
+          title,
+          note,
+          description,
+          reference_number,
+          amount,
+          currency: currency || 'TRY',
+          exchange_rate_at_transaction: activeRate,
+          payer_person_id,
+          cash_account_id,
+        });
 
         db.prepare(`
           INSERT INTO transactions (
@@ -1343,29 +1461,115 @@ async function startServer() {
       is_stock_related, distribute_to_product_cost, cash_account_id
     } = req.body;
     
-    const beforeState = db.prepare("SELECT * FROM transactions WHERE id = ?").get(req.params.id);
-    
-    db.prepare(`
-      UPDATE transactions
-      SET date = ?, category = ?, platform = ?, amount = ?, note = ?, reference_number = ?, title = ?, description = ?, payment_method = ?, supplier = ?, invoice_number = ?,
-          currency = ?, amount_try = ?, payer_person_id = ?, will_be_refunded = ?, refund_status = ?, is_invoice = ?, invoice_name = ?, is_stock_related = ?, distribute_to_product_cost = ?, cash_account_id = ?
-      WHERE id = ? AND type = 'Expense'
-    `).run(
-      date || new Date().toISOString(), category, platform, amount, note, reference_number, title, description, payment_method, supplier, invoice_number,
-      currency || 'TRY', amount_try || (currency === 'USD' ? amount * (exchange_rate || beforeState.exchange_rate_at_transaction || 1) : amount), payer_person_id, will_be_refunded || 0, refund_status, is_invoice || 0, invoice_name, is_stock_related || 0, distribute_to_product_cost || 0, cash_account_id,
-      req.params.id
-    );
-    
-    logActivity('UPDATE', 'expense', req.params.id, { before: beforeState, after: req.body });
-    res.json({ success: true });
+    try {
+      const result = db.transaction(() => {
+        const beforeState = db.prepare(`
+          SELECT *
+          FROM transactions
+          WHERE id = ?
+            AND type = 'Expense'
+            AND COALESCE(is_deleted, 0) = 0
+        `).get(req.params.id) as any;
+
+        if (!beforeState) {
+          const err = new Error("Expense not found") as any;
+          err.statusCode = 404;
+          throw err;
+        }
+
+        const nextAmount = amount !== undefined ? Number(amount) : Number(beforeState.amount);
+        if (!Number.isFinite(nextAmount) || nextAmount <= 0) throw new Error("Tutar 0'dan büyük olmalıdır.");
+
+        const hasField = (name: string) => Object.prototype.hasOwnProperty.call(req.body, name);
+        const nextCurrency = hasField('currency') ? (currency || 'TRY') : (beforeState.currency || 'TRY');
+        const activeRate = Number(exchange_rate || beforeState.exchange_rate_at_transaction || getActiveExchangeRate());
+        if (!Number.isFinite(activeRate) || activeRate <= 0) throw new Error("Döviz kuru geçerli değil.");
+
+        const nextExpense = {
+          ...beforeState,
+          id: req.params.id,
+          date: hasField('date') ? (date || new Date().toISOString()) : (beforeState.date || new Date().toISOString()),
+          category: hasField('category') ? category : beforeState.category,
+          platform: hasField('platform') ? platform : beforeState.platform,
+          amount: nextAmount,
+          note: hasField('note') ? note : beforeState.note,
+          reference_number: hasField('reference_number') ? reference_number : beforeState.reference_number,
+          title: hasField('title') ? title : beforeState.title,
+          description: hasField('description') ? description : beforeState.description,
+          payment_method: hasField('payment_method') ? payment_method : beforeState.payment_method,
+          supplier: hasField('supplier') ? supplier : beforeState.supplier,
+          invoice_number: hasField('invoice_number') ? invoice_number : beforeState.invoice_number,
+          currency: nextCurrency,
+          exchange_rate_at_transaction: activeRate,
+          amount_try: amount_try !== undefined && amount_try !== null && amount_try !== ''
+            ? Number(amount_try)
+            : (nextCurrency === 'USD' ? nextAmount * activeRate : nextAmount),
+          payer_person_id: hasField('payer_person_id') ? payer_person_id : beforeState.payer_person_id,
+          will_be_refunded: hasField('will_be_refunded') ? (will_be_refunded || 0) : (beforeState.will_be_refunded ?? 0),
+          refund_status: hasField('refund_status') ? refund_status : beforeState.refund_status,
+          is_invoice: hasField('is_invoice') ? (is_invoice || 0) : (beforeState.is_invoice ?? 0),
+          invoice_name: hasField('invoice_name') ? invoice_name : beforeState.invoice_name,
+          is_stock_related: hasField('is_stock_related') ? (is_stock_related || 0) : (beforeState.is_stock_related ?? 0),
+          distribute_to_product_cost: hasField('distribute_to_product_cost') ? (distribute_to_product_cost || 0) : (beforeState.distribute_to_product_cost ?? 0),
+          cash_account_id: hasField('cash_account_id') ? cash_account_id : beforeState.cash_account_id,
+        };
+
+        if (!Number.isFinite(Number(nextExpense.amount_try))) throw new Error("TRY tutarı geçerli değil.");
+        syncExpenseCashTransaction(nextExpense);
+
+        db.prepare(`
+          UPDATE transactions
+          SET date = ?, category = ?, platform = ?, amount = ?, note = ?, reference_number = ?, title = ?, description = ?, payment_method = ?, supplier = ?, invoice_number = ?,
+              currency = ?, amount_try = ?, payer_person_id = ?, will_be_refunded = ?, refund_status = ?, is_invoice = ?, invoice_name = ?, is_stock_related = ?, distribute_to_product_cost = ?, cash_account_id = ?, exchange_rate_at_transaction = ?
+          WHERE id = ? AND type = 'Expense'
+        `).run(
+          nextExpense.date, nextExpense.category, nextExpense.platform, nextExpense.amount, nextExpense.note, nextExpense.reference_number, nextExpense.title, nextExpense.description, nextExpense.payment_method, nextExpense.supplier, nextExpense.invoice_number,
+          nextExpense.currency, nextExpense.amount_try, nextExpense.payer_person_id, nextExpense.will_be_refunded, nextExpense.refund_status, nextExpense.is_invoice, nextExpense.invoice_name, nextExpense.is_stock_related, nextExpense.distribute_to_product_cost, nextExpense.cash_account_id, nextExpense.exchange_rate_at_transaction,
+          req.params.id
+        );
+
+        logActivity('UPDATE', 'expense', req.params.id, { before: beforeState, after: nextExpense }, req.user?.id);
+        return nextExpense;
+      })();
+
+      res.json({ success: true, expense: result });
+    } catch (err: any) {
+      res.status(err.statusCode || 400).json({ error: err.message });
+    }
   });
 
   app.delete("/api/expenses/:id", (req, res) => {
-    const beforeState = db.prepare("SELECT * FROM transactions WHERE id = ?").get(req.params.id);
-    db.prepare("UPDATE transactions SET is_deleted = 1 WHERE id = ?").run(req.params.id);
-    db.prepare("DELETE FROM cash_transactions WHERE source_type = 'expense' AND source_id = ?").run(req.params.id);
-    logActivity('DELETE', 'expense', req.params.id, { before: beforeState, after: { is_deleted: 1 } });
-    res.json({ success: true });
+    try {
+      db.transaction(() => {
+        const beforeState = db.prepare(`
+          SELECT *
+          FROM transactions
+          WHERE id = ?
+            AND type = 'Expense'
+            AND COALESCE(is_deleted, 0) = 0
+        `).get(req.params.id) as any;
+
+        if (!beforeState) {
+          const err = new Error("Expense not found") as any;
+          err.statusCode = 404;
+          throw err;
+        }
+
+        db.prepare("UPDATE transactions SET is_deleted = 1 WHERE id = ?").run(req.params.id);
+        db.prepare(`
+          UPDATE cash_transactions
+          SET is_deleted = 1
+          WHERE source_type = 'expense'
+            AND source_id = ?
+            AND COALESCE(is_deleted, 0) = 0
+        `).run(req.params.id);
+        logActivity('DELETE', 'expense', req.params.id, { before: beforeState, after: { is_deleted: 1 } }, req.user?.id);
+      })();
+
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(err.statusCode || 400).json({ error: err.message });
+    }
   });
 
   app.post("/api/expenses/:id/attachments", expenseUpload.single("file"), (req, res) => {
@@ -1405,7 +1609,7 @@ async function startServer() {
   app.get("/api/finance-summary", (req, res) => {
     try {
       // 1. Toplam Sermaye Girişi
-      const capitalRes = db.prepare("SELECT SUM(amount * (CASE WHEN currency='USD' THEN exchange_rate_at_transaction ELSE 1 END)) as total FROM cash_transactions WHERE source_type = 'capital_injection'").get() as any;
+      const capitalRes = db.prepare("SELECT SUM(amount * (CASE WHEN currency='USD' THEN exchange_rate_at_transaction ELSE 1 END)) as total FROM cash_transactions WHERE source_type = 'capital_injection' AND COALESCE(is_deleted, 0) = 0").get() as any;
       const capitalInjection = capitalRes?.total || 0;
 
       // 2. Satış Geliri
@@ -1439,7 +1643,7 @@ async function startServer() {
                (SELECT SUM(CASE 
                   WHEN type='IN' THEN amount * (CASE WHEN currency='USD' THEN exchange_rate_at_transaction ELSE 1 END) 
                   ELSE -amount * (CASE WHEN currency='USD' THEN exchange_rate_at_transaction ELSE 1 END) 
-               END) FROM cash_transactions WHERE account_id = ca.id) as net_flow
+               END) FROM cash_transactions WHERE account_id = ca.id AND COALESCE(is_deleted, 0) = 0) as net_flow
         FROM cash_accounts ca
         WHERE ca.is_active = 1
       `).all() as any[];
@@ -1549,7 +1753,8 @@ async function startServer() {
         SELECT ct.*, ca.name as account_name, ca.currency as account_currency
         FROM cash_transactions ct
         LEFT JOIN cash_accounts ca ON ct.account_id = ca.id
-        ORDER BY ct.created_at DESC
+        WHERE COALESCE(ct.is_deleted, 0) = 0
+        ORDER BY COALESCE(ct.transaction_date, ct.created_at) DESC, ct.created_at DESC
       `).all();
       res.json(txs);
     } catch (err: any) {
@@ -1680,11 +1885,17 @@ async function startServer() {
             if (account.is_active === 0) throw new Error("Seçili hesap pasif.");
             if (amount <= 0) throw new Error("Tutar 0'dan büyük olmalıdır.");
 
-            // Decrease balance or increase debt for the payment account
-            db.prepare(`
-              INSERT INTO cash_transactions (id, account_id, type, amount, currency, exchange_rate_at_transaction, source_type, source_id, description)
-              VALUES (?, ?, 'OUT', ?, ?, ?, 'expense', ?, ?)
-            `).run(uuidv4(), actualPaymentAccountId, amount, currency || 'TRY', activeRate, txId, `Gider: ${category} - ${note}`);
+            insertExpenseCashTransaction({
+              id: txId,
+              date: date || new Date().toISOString(),
+              category,
+              note,
+              amount,
+              currency: currency || 'TRY',
+              exchange_rate_at_transaction: activeRate,
+              payer_person_id,
+              cash_account_id,
+            });
           }
           
           logActivity('CREATE', 'transaction', txId, { 
@@ -1699,12 +1910,32 @@ async function startServer() {
   });
 
   app.delete("/api/transactions/:id", (req, res) => {
-    const beforeState = db.prepare("SELECT * FROM transactions WHERE id = ?").get(req.params.id);
-    db.prepare("UPDATE transactions SET is_deleted = 1 WHERE id = ?").run(req.params.id);
-    // Remove associated cash transactions to reflect soft delete
-    db.prepare("DELETE FROM cash_transactions WHERE source_type = 'expense' AND source_id = ?").run(req.params.id);
-    logActivity('DELETE', 'transaction', req.params.id, { before: beforeState, after: { is_deleted: 1 } });
-    res.json({ success: true });
+    try {
+      db.transaction(() => {
+        const beforeState = db.prepare("SELECT * FROM transactions WHERE id = ? AND COALESCE(is_deleted, 0) = 0").get(req.params.id) as any;
+        if (!beforeState) {
+          const err = new Error("Transaction not found") as any;
+          err.statusCode = 404;
+          throw err;
+        }
+
+        db.prepare("UPDATE transactions SET is_deleted = 1 WHERE id = ?").run(req.params.id);
+        if (beforeState.type === 'Expense') {
+          db.prepare(`
+            UPDATE cash_transactions
+            SET is_deleted = 1
+            WHERE source_type = 'expense'
+              AND source_id = ?
+              AND COALESCE(is_deleted, 0) = 0
+          `).run(req.params.id);
+        }
+        logActivity('DELETE', 'transaction', req.params.id, { before: beforeState, after: { is_deleted: 1 } }, req.user?.id);
+      })();
+
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(err.statusCode || 400).json({ error: err.message });
+    }
   });
 
   // New recurring-payments routes will be imported here
@@ -1985,6 +2216,7 @@ async function startServer() {
     const existingReversal = db.prepare(`
       SELECT id FROM cash_transactions
       WHERE source_id = ? AND source_type IN ('sale_refund', 'sale_reversal')
+        AND COALESCE(is_deleted, 0) = 0
       LIMIT 1
     `).get(sale.id) as any;
     if (existingReversal) return;
@@ -1992,6 +2224,7 @@ async function startServer() {
     const originalCash = db.prepare(`
       SELECT * FROM cash_transactions
       WHERE source_type = 'sale' AND source_id = ? AND type = 'IN'
+        AND COALESCE(is_deleted, 0) = 0
       ORDER BY created_at ASC
       LIMIT 1
     `).get(sale.id) as any;
