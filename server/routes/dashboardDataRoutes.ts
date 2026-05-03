@@ -162,6 +162,13 @@ export function createDashboardDataRouter(db: Database) {
   };
 
   const activeSalesFilter = "s.status NOT IN ('İptal Edildi', 'İade Edildi')";
+  const modelDisplayExpr = `
+    CASE
+      WHEN TRIM(COALESCE(p.normalized_model, '')) NOT IN ('', 'Bilinmiyor', 'Standart') THEN TRIM(p.normalized_model)
+      WHEN TRIM(COALESCE(p.model, '')) NOT IN ('', 'Bilinmiyor', 'Standart') THEN TRIM(p.model)
+      ELSE COALESCE(NULLIF(TRIM(p.title), ''), NULLIF(TRIM(p.name), ''), 'Model Belirtilmemiş')
+    END
+  `;
 
   router.get("/widgets/product-analysis/summary", (req, res) => {
     try {
@@ -202,12 +209,12 @@ export function createDashboardDataRouter(db: Database) {
     try {
       const { q, params, productWhere } = getProductFilters(req);
       const data = db.prepare(`
-        SELECT COALESCE(p.model, 'Bilinmiyor') as name, SUM(i.quantity) as value
+        SELECT ${modelDisplayExpr} as name, SUM(i.quantity) as value
         FROM sale_items i
         JOIN sales s ON s.id = i.sale_id AND ${activeSalesFilter}
         JOIN products p ON p.id = i.product_id
         WHERE 1=1 ${q} ${productWhere}
-        GROUP BY p.model
+        GROUP BY ${modelDisplayExpr}
         ORDER BY value DESC
       `).all(...params);
       res.json(data);

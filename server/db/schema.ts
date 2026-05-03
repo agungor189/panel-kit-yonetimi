@@ -124,6 +124,7 @@ export function applySchema(db: Database.Database): void {
       entity_id    TEXT,
       details      TEXT,
       user_id      TEXT,
+      actor_username TEXT,
       created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -441,5 +442,6 @@ export function applySchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_activity_logs_created    ON activity_logs(created_at);
     CREATE INDEX IF NOT EXISTS idx_cash_transactions_account ON cash_transactions(account_id);
     CREATE INDEX IF NOT EXISTS idx_pricing_history_product  ON pricing_history(product_id);
+    CREATE INDEX IF NOT EXISTS idx_dashboard_widgets_user   ON dashboard_widgets(user_id, position);
   `);
 }

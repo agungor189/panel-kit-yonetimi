@@ -412,6 +412,106 @@ const migrations: Migration[] = [
       db.exec("UPDATE products SET central_stock = 0 WHERE central_stock IS NULL");
     },
   },
+  {
+    version: 23,
+    name: "ensure_users_management_columns",
+    up(db) {
+      const cols = [
+        "ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1",
+        "ALTER TABLE users ADD COLUMN last_login_at DATETIME",
+        "ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN locked_until DATETIME",
+        "ALTER TABLE users ADD COLUMN permissions TEXT DEFAULT '{}'",
+        "ALTER TABLE users ADD COLUMN notes TEXT",
+        "ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN created_at DATETIME",
+        "ALTER TABLE users ADD COLUMN updated_at DATETIME",
+      ];
+      for (const sql of cols) { try { db.exec(sql); } catch (_) {} }
+      try { db.exec("UPDATE users SET is_active = 1 WHERE is_active IS NULL"); } catch (_) {}
+      try { db.exec("UPDATE users SET must_change_password = 0 WHERE must_change_password IS NULL"); } catch (_) {}
+      try { db.exec("UPDATE users SET permissions = '{}' WHERE permissions IS NULL OR permissions = ''"); } catch (_) {}
+      try { db.exec("UPDATE users SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL"); } catch (_) {}
+      try { db.exec("UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL"); } catch (_) {}
+    },
+  },
+  {
+    version: 24,
+    name: "add_actor_username_to_activity_logs",
+    up(db) {
+      try { db.exec("ALTER TABLE activity_logs ADD COLUMN actor_username TEXT"); } catch (_) {}
+      try { db.exec("CREATE INDEX IF NOT EXISTS idx_activity_logs_actor_username ON activity_logs(actor_username)"); } catch (_) {}
+      try {
+        db.exec(`
+          UPDATE activity_logs
+          SET actor_username = (
+            SELECT username
+            FROM users
+            WHERE users.id = activity_logs.user_id
+          )
+          WHERE actor_username IS NULL
+            AND user_id IS NOT NULL
+            AND EXISTS (
+              SELECT 1
+              FROM users
+              WHERE users.id = activity_logs.user_id
+            )
+        `);
+      } catch (_) {}
+      try {
+        db.exec("UPDATE activity_logs SET actor_username = 'legacy-api-key' WHERE actor_username IS NULL AND user_id = 'legacy-api-key'");
+      } catch (_) {}
+    },
+  },
+  {
+    version: 25,
+    name: "add_dashboard_overview_widgets",
+    up(db) {
+      const insertWidget = db.prepare(`
+        INSERT INTO dashboard_widgets
+          (id, user_id, widget_key, title, description, widget_type, source_module, size, position, is_visible, settings_json)
+        SELECT lower(hex(randomblob(16))), 'admin', ?, ?, ?, ?, ?, ?, ?, 1, ?
+        WHERE NOT EXISTS (
+          SELECT 1 FROM dashboard_widgets WHERE user_id = 'admin' AND widget_key = ?
+        )
+      `);
+      const widgets = [
+        ['dashboard_month_revenue', 'Bu Ay Toplam Ciro', 'Aktif satışlardan bu ay oluşan net ciro.', 'kpi', 'overview', 'small', 0, { x: 0, y: 0, w: 4, h: 3 }],
+        ['dashboard_total_expenses', 'Toplam Giderler', 'Bu ay gerçekleşen giderler ve bekleyen periyodik ödemeler.', 'kpi', 'overview', 'small', 1, { x: 4, y: 0, w: 4, h: 3 }],
+        ['dashboard_est_net_profit', 'Tahmini Net Kar', 'Bu ay toplam ciro eksi toplam gider tahmini.', 'kpi', 'overview', 'small', 2, { x: 8, y: 0, w: 4, h: 3 }],
+        ['dashboard_low_stock', 'Kritik Stok', 'Merkez depo stoğu kritik seviyede olan ürün sayısı.', 'kpi', 'overview', 'small', 3, { x: 0, y: 3, w: 4, h: 3 }],
+        ['dashboard_stock_sales_value', 'Toplam Stok Satış Değeri', 'Merkez depo stoklarının satış fiyatı üzerinden potansiyel değeri.', 'kpi', 'overview', 'small', 4, { x: 4, y: 3, w: 4, h: 3 }],
+        ['dashboard_stock_cost_value', 'Toplam Stok Maliyeti', 'Merkez depo stoklarının alış maliyeti toplamı.', 'kpi', 'overview', 'small', 5, { x: 8, y: 3, w: 4, h: 3 }],
+        ['dashboard_stock_est_gross_profit', 'Tahmini Brüt Kâr', 'Mevcut stoktan beklenen potansiyel brüt kâr.', 'kpi', 'overview', 'small', 6, { x: 0, y: 6, w: 4, h: 3 }],
+        ['dashboard_avg_profit_margin', 'Ortalama Kâr Marjı', 'Mevcut stokların satış değerine göre ortalama kâr marjı.', 'kpi', 'overview', 'small', 7, { x: 4, y: 6, w: 4, h: 3 }],
+      ];
+
+      for (const [key, title, description, type, module, size, position, grid] of widgets as any[]) {
+        try {
+          insertWidget.run(
+            key,
+            title,
+            description,
+            type,
+            module,
+            size,
+            position,
+            JSON.stringify({ grid }),
+            key,
+          );
+        } catch (_) {}
+      }
+    },
+  },
+  {
+    version: 26,
+    name: "index_dashboard_widgets_by_user",
+    up(db) {
+      try {
+        db.exec("CREATE INDEX IF NOT EXISTS idx_dashboard_widgets_user ON dashboard_widgets(user_id, position)");
+      } catch (_) {}
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

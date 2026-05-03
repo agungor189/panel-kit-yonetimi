@@ -1,4 +1,6 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "react-grid-layout/css/styles.css";
+@import "react-resizable/css/styles.css";
 @import "tailwindcss";
 
 @theme {
@@ -46,3 +48,13 @@
   scrollbar-width: none;
 }
 
+.dashboard-grid .react-grid-item.react-grid-placeholder {
+  background: #2563eb;
+  border-radius: 16px;
+  opacity: 0.14;
+}
+
+.dashboard-grid .react-grid-item > .react-resizable-handle::after {
+  border-right-color: #2563eb;
+  border-bottom-color: #2563eb;
+}

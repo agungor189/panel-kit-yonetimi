@@ -51,6 +51,8 @@ import Sales from './components/sales/Sales';
 import ApiKeys from './components/integrations/ApiKeys';
 import PanelApiKeys from './components/integrations/PanelApiKeys';
 
+const APP_VERSION = 'v2.5.5';
+
 export const AuthContext = createContext<{ role: UserRole, isReadOnly: boolean }>({ role: 'admin', isReadOnly: false });
 export const useAuth = () => useContext(AuthContext);
 
@@ -185,7 +187,7 @@ export default function App() {
   };
 
   const navItems = [
-    { id: 'dashboard', label: 'Panel', icon: LayoutDashboard },
+    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'products', label: 'Ürünler', icon: Package },
     { id: 'sales', label: 'Satışlar', icon: ShoppingCart },
     { id: 'b2b', label: 'B2B', icon: Briefcase },
@@ -236,11 +238,16 @@ export default function App() {
         <div className="flex h-16 items-center px-4 border-b border-white/10 shrink-0">
           {(isSidebarOpen || isMobileMenuOpen) ? (
             <div className="flex items-center justify-between w-full">
-              <div className="flex items-center gap-3 overflow-hidden">
+              <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
                 <img src="/logo.svg" alt="DSDST Logo" className="w-8 h-8 shrink-0" />
-                <h1 className="text-xl font-extrabold tracking-wider text-white truncate">
-                  {settings?.company_name || 'DSDST Panel'}
-                </h1>
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <h1 className="min-w-0 truncate whitespace-nowrap text-[18px] font-black leading-none tracking-tight text-white">
+                    {settings?.company_name || 'DSDST Panel'}
+                  </h1>
+                  <span className="shrink-0 rounded-full border border-white/15 bg-white/10 px-2 py-0.5 text-[10px] font-black tracking-wide text-cyan-200">
+                    {APP_VERSION}
+                  </span>
+                </div>
               </div>
               <button
                 onClick={() => setIsMobileMenuOpen(false)}

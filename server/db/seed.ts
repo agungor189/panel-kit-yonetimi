@@ -3,6 +3,14 @@ import bcrypt from "bcrypt";
 import { v4 as uuidv4 } from "uuid";
 
 const DEFAULT_WIDGETS = [
+  { key: "dashboard_month_revenue",          title: "Bu Ay Toplam Ciro",         description: "Aktif satışlardan bu ay oluşan net ciro.",                         type: "kpi", module: "overview", size: "small",  grid: { x: 0, y: 0, w: 4, h: 3 } },
+  { key: "dashboard_total_expenses",         title: "Toplam Giderler",           description: "Bu ay gerçekleşen giderler ve bekleyen periyodik ödemeler.",       type: "kpi", module: "overview", size: "small",  grid: { x: 4, y: 0, w: 4, h: 3 } },
+  { key: "dashboard_est_net_profit",         title: "Tahmini Net Kar",           description: "Bu ay toplam ciro eksi toplam gider tahmini.",                    type: "kpi", module: "overview", size: "small",  grid: { x: 8, y: 0, w: 4, h: 3 } },
+  { key: "dashboard_low_stock",              title: "Kritik Stok",               description: "Merkez depo stoğu kritik seviyede olan ürün sayısı.",             type: "kpi", module: "overview", size: "small",  grid: { x: 0, y: 3, w: 4, h: 3 } },
+  { key: "dashboard_stock_sales_value",      title: "Toplam Stok Satış Değeri",  description: "Merkez depo stoklarının satış fiyatı üzerinden potansiyel değeri.", type: "kpi", module: "overview", size: "small",  grid: { x: 4, y: 3, w: 4, h: 3 } },
+  { key: "dashboard_stock_cost_value",       title: "Toplam Stok Maliyeti",      description: "Merkez depo stoklarının alış maliyeti toplamı.",                  type: "kpi", module: "overview", size: "small",  grid: { x: 8, y: 3, w: 4, h: 3 } },
+  { key: "dashboard_stock_est_gross_profit", title: "Tahmini Brüt Kâr",          description: "Mevcut stoktan beklenen potansiyel brüt kâr.",                    type: "kpi", module: "overview", size: "small",  grid: { x: 0, y: 6, w: 4, h: 3 } },
+  { key: "dashboard_avg_profit_margin",      title: "Ortalama Kâr Marjı",        description: "Mevcut stokların satış değerine göre ortalama kâr marjı.",        type: "kpi", module: "overview", size: "small",  grid: { x: 4, y: 6, w: 4, h: 3 } },
   { key: "payment_month_pending_count",  title: "Bu Ay Bekleyen İşlem",    type: "kpi",  module: "payments",  size: "small"  },
   { key: "payment_month_pending_amount", title: "Bu Ay Bekleyen Tutar",    type: "kpi",  module: "payments",  size: "small"  },
   { key: "payment_overdue_count",        title: "Geciken Ödeme",           type: "kpi",  module: "payments",  size: "small"  },
@@ -34,13 +42,26 @@ export function applySeed(db: Database.Database): void {
   // Default dashboard widgets (only if table is empty).
   const { count: widgetCount } = db.prepare("SELECT COUNT(*) as count FROM dashboard_widgets").get() as any;
   if (widgetCount === 0) {
+    const adminUser = db.prepare("SELECT id FROM users WHERE username = 'admin' ORDER BY created_at ASC LIMIT 1").get() as any;
+    const dashboardOwnerId = adminUser?.id || "admin";
     const insertWidget = db.prepare(`
       INSERT INTO dashboard_widgets
         (id, user_id, widget_key, title, description, widget_type, source_module, size, position, is_visible, settings_json)
-      VALUES (?, 'admin', ?, ?, '', ?, ?, ?, ?, 1, '{}')
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
     `);
     DEFAULT_WIDGETS.forEach((w, i) => {
-      insertWidget.run(uuidv4(), w.key, w.title, w.type, w.module, w.size, i);
+      insertWidget.run(
+        uuidv4(),
+        dashboardOwnerId,
+        w.key,
+        w.title,
+        "description" in w ? w.description : "",
+        w.type,
+        w.module,
+        w.size,
+        i,
+        "grid" in w ? JSON.stringify({ grid: w.grid }) : "{}",
+      );
     });
   }
 

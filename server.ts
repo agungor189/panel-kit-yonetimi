@@ -177,12 +177,24 @@ export const AppLogger = {
   }
 };
 
+function resolveActivityUsername(userId?: string): string | null {
+  if (!userId) return null;
+  if (userId === 'legacy-api-key') return 'legacy-api-key';
+  try {
+    const row = db.prepare("SELECT username FROM users WHERE id = ?").get(userId) as any;
+    return row?.username || null;
+  } catch (_) {
+    return null;
+  }
+}
+
 function logActivity(action: string, entity_type: string, entity_id: string, details?: any, userId?: string) {
   try {
+    const actorUsername = resolveActivityUsername(userId);
     db.prepare(`
-      INSERT INTO activity_logs (id, action, entity_type, entity_id, details, user_id)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(uuidv4(), action, entity_type, entity_id, details ? JSON.stringify(details) : null, userId ?? null);
+      INSERT INTO activity_logs (id, action, entity_type, entity_id, details, user_id, actor_username)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(uuidv4(), action, entity_type, entity_id, details ? JSON.stringify(details) : null, userId ?? null, actorUsername);
   } catch (err) {
     AppLogger.error('DATABASE_ERROR', 'Activity logging failed', err);
   }
@@ -529,6 +541,76 @@ async function startServer() {
     };
   };
 
+  const validUserRoles = new Set(['admin', 'user', 'readonly']);
+  const hasOwn = (obj: unknown, key: string) => Object.prototype.hasOwnProperty.call(obj || {}, key);
+
+  const toBit = (value: unknown, defaultValue: number) => {
+    if (value === undefined || value === null || value === '') return defaultValue;
+    if (value === true || value === 1 || value === '1' || value === 'true') return 1;
+    if (value === false || value === 0 || value === '0' || value === 'false') return 0;
+    return defaultValue;
+  };
+
+  const sanitizeUserRow = (row: any) => {
+    if (!row) return null;
+    return {
+      id: row.id,
+      username: row.username,
+      role: row.role,
+      is_active: Number(row.is_active) === 1,
+      must_change_password: Number(row.must_change_password) === 1,
+      permissions: parseUserPermissions(row.permissions),
+      notes: row.notes || '',
+      last_login_at: row.last_login_at || null,
+      created_at: row.created_at || null,
+      updated_at: row.updated_at || null,
+    };
+  };
+
+  const getManageableUser = (id: string) => sanitizeUserRow(db.prepare(`
+    SELECT id, username, role, is_active, must_change_password, permissions, notes,
+           last_login_at, created_at, updated_at
+    FROM users
+    WHERE id = ?
+  `).get(id) as any);
+
+  const ensureUserManagementSafe = (actorId: string | undefined, targetUser: any, nextRole: string, nextIsActive: number) => {
+    if (!targetUser) {
+      const err = new Error("Kullanıcı bulunamadı.") as any;
+      err.statusCode = 404;
+      throw err;
+    }
+
+    if (targetUser.id === actorId && (nextRole !== 'admin' || nextIsActive !== 1)) {
+      const err = new Error("Kendi admin yetkinizi kaldıramaz veya hesabınızı pasifleştiremezsiniz.") as any;
+      err.statusCode = 400;
+      err.code = "SELF_LOCKOUT";
+      throw err;
+    }
+
+    const demotesActiveAdmin =
+      targetUser.role === 'admin' &&
+      Number(targetUser.is_active) === 1 &&
+      (nextRole !== 'admin' || nextIsActive !== 1);
+
+    if (demotesActiveAdmin) {
+      const otherAdmins = db.prepare(`
+        SELECT COUNT(*) as count
+        FROM users
+        WHERE id != ?
+          AND role = 'admin'
+          AND COALESCE(is_active, 1) = 1
+      `).get(targetUser.id) as any;
+
+      if ((otherAdmins?.count || 0) < 1) {
+        const err = new Error("Sistemde en az bir aktif admin kalmalıdır.") as any;
+        err.statusCode = 400;
+        err.code = "LAST_ADMIN";
+        throw err;
+      }
+    }
+  };
+
   const authRouter = express.Router();
   authRouter.post('/login', (req, res) => {
     try {
@@ -760,18 +842,177 @@ async function startServer() {
       const offset = Number(req.query.offset) || 0;
       const { entity_type, action, user_id } = req.query;
 
-      let sql = "SELECT * FROM activity_logs WHERE 1=1";
+      let sql = `
+        SELECT l.*, u.username as user_username
+        FROM activity_logs l
+        LEFT JOIN users u ON u.id = l.user_id
+        WHERE 1=1
+      `;
       const params: any[] = [];
       if (entity_type) { sql += " AND entity_type = ?"; params.push(entity_type); }
       if (action)      { sql += " AND action = ?";      params.push(action); }
-      if (user_id)     { sql += " AND user_id = ?";     params.push(user_id); }
-      sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+      if (user_id)     { sql += " AND l.user_id = ?";   params.push(user_id); }
+      sql += " ORDER BY l.created_at DESC LIMIT ? OFFSET ?";
       params.push(limit, offset);
 
-      const logs = db.prepare(sql).all(...params);
+      const logs = (db.prepare(sql).all(...params) as any[]).map((log) => {
+        let detailsUsername: string | null = null;
+        try {
+          const details = log.details ? JSON.parse(log.details) : null;
+          if (details?.username && typeof details.username === 'string') detailsUsername = details.username;
+          if (details?.restoredBy && typeof details.restoredBy === 'string') detailsUsername = details.restoredBy;
+        } catch (_) {}
+
+        const username =
+          log.actor_username ||
+          log.user_username ||
+          detailsUsername ||
+          (log.user_id === 'legacy-api-key' ? 'legacy-api-key' : null) ||
+          (log.user_id ? 'Bilinmeyen Kullanıcı' : 'Sistem');
+
+        return { ...log, username };
+      });
       res.json(logs);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin-only user management
+  app.get("/api/users", requireAdmin, (req, res) => {
+    try {
+      const users = (db.prepare(`
+        SELECT id, username, role, is_active, must_change_password, permissions, notes,
+               last_login_at, created_at, updated_at
+        FROM users
+        ORDER BY datetime(COALESCE(created_at, '1970-01-01')) DESC, username ASC
+      `).all() as any[]).map(sanitizeUserRow);
+
+      res.json(users);
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: { code: 'USER_LIST_FAILED', message: err.message } });
+    }
+  });
+
+  app.post("/api/users", requireAdmin, (req, res) => {
+    try {
+      const username = cleanText(req.body?.username);
+      const password = typeof req.body?.password === 'string' ? req.body.password : '';
+      const role = cleanText(req.body?.role || 'user');
+      const isActive = toBit(req.body?.is_active, 1);
+      const mustChangePassword = toBit(req.body?.must_change_password, 1);
+      const notes = cleanText(req.body?.notes);
+
+      if (username.length < 3) {
+        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Kullanıcı adı en az 3 karakter olmalıdır.' } });
+      }
+      if (password.length < 8) {
+        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Şifre en az 8 karakter olmalıdır.' } });
+      }
+      if (!validUserRoles.has(role)) {
+        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Geçersiz rol.' } });
+      }
+
+      const duplicate = db.prepare("SELECT id FROM users WHERE username = ?").get(username) as any;
+      if (duplicate) {
+        return res.status(409).json({ success: false, error: { code: 'USERNAME_EXISTS', message: 'Bu kullanıcı adı zaten kullanılıyor.' } });
+      }
+
+      const id = uuidv4();
+      db.prepare(`
+        INSERT INTO users (id, username, password_hash, role, is_active, must_change_password, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(id, username, bcrypt.hashSync(password, 10), role, isActive, mustChangePassword, notes || null);
+
+      const created = getManageableUser(id);
+      logActivity('USER_CREATED', 'user', id, { after: created }, req.user?.id);
+      res.status(201).json(created);
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: { code: 'USER_CREATE_FAILED', message: err.message } });
+    }
+  });
+
+  app.put("/api/users/:id", requireAdmin, (req, res) => {
+    try {
+      const before = getManageableUser(req.params.id) as any;
+      if (!before) {
+        return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Kullanıcı bulunamadı.' } });
+      }
+
+      const username = hasOwn(req.body, 'username') ? cleanText(req.body.username) : before.username;
+      const role = hasOwn(req.body, 'role') ? cleanText(req.body.role) : before.role;
+      const isActive = hasOwn(req.body, 'is_active') ? toBit(req.body.is_active, before.is_active ? 1 : 0) : (before.is_active ? 1 : 0);
+      const mustChangePassword = hasOwn(req.body, 'must_change_password')
+        ? toBit(req.body.must_change_password, before.must_change_password ? 1 : 0)
+        : (before.must_change_password ? 1 : 0);
+      const notes = hasOwn(req.body, 'notes') ? cleanText(req.body.notes) : before.notes;
+
+      if (username.length < 3) {
+        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Kullanıcı adı en az 3 karakter olmalıdır.' } });
+      }
+      if (!validUserRoles.has(role)) {
+        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Geçersiz rol.' } });
+      }
+
+      const duplicate = db.prepare("SELECT id FROM users WHERE username = ? AND id != ?").get(username, req.params.id) as any;
+      if (duplicate) {
+        return res.status(409).json({ success: false, error: { code: 'USERNAME_EXISTS', message: 'Bu kullanıcı adı zaten kullanılıyor.' } });
+      }
+
+      ensureUserManagementSafe(req.user?.id, before, role, isActive);
+
+      db.prepare(`
+        UPDATE users
+        SET username = ?,
+            role = ?,
+            is_active = ?,
+            must_change_password = ?,
+            notes = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(username, role, isActive, mustChangePassword, notes || null, req.params.id);
+
+      const after = getManageableUser(req.params.id);
+      logActivity('USER_UPDATED', 'user', req.params.id, { before, after }, req.user?.id);
+      res.json(after);
+    } catch (err: any) {
+      res.status(err.statusCode || 500).json({
+        success: false,
+        error: { code: err.code || 'USER_UPDATE_FAILED', message: err.message },
+      });
+    }
+  });
+
+  app.post("/api/users/:id/reset-password", requireAdmin, (req, res) => {
+    try {
+      const password = typeof req.body?.password === 'string' ? req.body.password : '';
+      const mustChangePassword = toBit(req.body?.must_change_password, 1);
+
+      if (password.length < 8) {
+        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Şifre en az 8 karakter olmalıdır.' } });
+      }
+
+      const before = getManageableUser(req.params.id) as any;
+      if (!before) {
+        return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Kullanıcı bulunamadı.' } });
+      }
+
+      db.prepare(`
+        UPDATE users
+        SET password_hash = ?,
+            must_change_password = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(bcrypt.hashSync(password, 10), mustChangePassword, req.params.id);
+
+      const after = getManageableUser(req.params.id);
+      logActivity('USER_PASSWORD_RESET', 'user', req.params.id, {
+        before: { id: before.id, username: before.username, must_change_password: before.must_change_password },
+        after: { id: after?.id, username: after?.username, must_change_password: after?.must_change_password },
+      }, req.user?.id);
+      res.json({ success: true, user: after });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: { code: 'PASSWORD_RESET_FAILED', message: err.message } });
     }
   });
 
@@ -849,12 +1090,89 @@ async function startServer() {
     }
   });
 
+  const DEFAULT_DASHBOARD_WIDGET_TEMPLATES = [
+    { widget_key: 'dashboard_month_revenue', title: 'Bu Ay Toplam Ciro', description: 'Aktif satışlardan bu ay oluşan net ciro.', widget_type: 'kpi', source_module: 'overview', size: 'small', position: 0, settings_json: { grid: { x: 0, y: 0, w: 4, h: 3 } } },
+    { widget_key: 'dashboard_total_expenses', title: 'Toplam Giderler', description: 'Bu ay gerçekleşen giderler ve bekleyen periyodik ödemeler.', widget_type: 'kpi', source_module: 'overview', size: 'small', position: 1, settings_json: { grid: { x: 4, y: 0, w: 4, h: 3 } } },
+    { widget_key: 'dashboard_est_net_profit', title: 'Tahmini Net Kar', description: 'Bu ay toplam ciro eksi toplam gider tahmini.', widget_type: 'kpi', source_module: 'overview', size: 'small', position: 2, settings_json: { grid: { x: 8, y: 0, w: 4, h: 3 } } },
+    { widget_key: 'dashboard_low_stock', title: 'Kritik Stok', description: 'Merkez depo stoğu kritik seviyede olan ürün sayısı.', widget_type: 'kpi', source_module: 'overview', size: 'small', position: 3, settings_json: { grid: { x: 0, y: 3, w: 4, h: 3 } } },
+    { widget_key: 'dashboard_stock_sales_value', title: 'Toplam Stok Satış Değeri', description: 'Merkez depo stoklarının satış fiyatı üzerinden potansiyel değeri.', widget_type: 'kpi', source_module: 'overview', size: 'small', position: 4, settings_json: { grid: { x: 4, y: 3, w: 4, h: 3 } } },
+    { widget_key: 'dashboard_stock_cost_value', title: 'Toplam Stok Maliyeti', description: 'Merkez depo stoklarının alış maliyeti toplamı.', widget_type: 'kpi', source_module: 'overview', size: 'small', position: 5, settings_json: { grid: { x: 8, y: 3, w: 4, h: 3 } } },
+    { widget_key: 'dashboard_stock_est_gross_profit', title: 'Tahmini Brüt Kâr', description: 'Mevcut stoktan beklenen potansiyel brüt kâr.', widget_type: 'kpi', source_module: 'overview', size: 'small', position: 6, settings_json: { grid: { x: 0, y: 6, w: 4, h: 3 } } },
+    { widget_key: 'dashboard_avg_profit_margin', title: 'Ortalama Kâr Marjı', description: 'Mevcut stokların satış değerine göre ortalama kâr marjı.', widget_type: 'kpi', source_module: 'overview', size: 'small', position: 7, settings_json: { grid: { x: 4, y: 6, w: 4, h: 3 } } },
+    { widget_key: 'payment_month_pending_count', title: 'Bu Ay Bekleyen İşlem', description: '', widget_type: 'kpi', source_module: 'payments', size: 'small', position: 8, settings_json: {} },
+    { widget_key: 'payment_month_pending_amount', title: 'Bu Ay Bekleyen Tutar', description: '', widget_type: 'kpi', source_module: 'payments', size: 'small', position: 9, settings_json: {} },
+    { widget_key: 'payment_overdue_count', title: 'Geciken Ödeme', description: '', widget_type: 'kpi', source_module: 'payments', size: 'small', position: 10, settings_json: {} },
+    { widget_key: 'product_total_sold', title: 'Toplam Satılan Adet', description: '', widget_type: 'kpi', source_module: 'products', size: 'small', position: 11, settings_json: {} },
+    { widget_key: 'product_total_revenue', title: 'Toplam Satış Geliri', description: '', widget_type: 'kpi', source_module: 'products', size: 'small', position: 12, settings_json: {} },
+    { widget_key: 'product_top_material', title: 'En Çok Satan Materyal', description: '', widget_type: 'kpi', source_module: 'products', size: 'small', position: 13, settings_json: {} },
+    { widget_key: 'product_material_pie', title: 'Materyal Satış Dağılımı', description: '', widget_type: 'pie', source_module: 'products', size: 'medium', position: 14, settings_json: {} },
+    { widget_key: 'sales_revenue_trend', title: 'Satış Trend Grafiği', description: '', widget_type: 'line', source_module: 'products', size: 'large', position: 15, settings_json: {} },
+    { widget_key: 'product_reorder_summary', title: 'Akıllı Sipariş Önerisi', description: '', widget_type: 'kpi', source_module: 'products', size: 'medium', position: 16, settings_json: {} },
+    { widget_key: 'payment_upcoming_list', title: 'Yaklaşan Ödemeler', description: '', widget_type: 'list', source_module: 'payments', size: 'medium', position: 17, settings_json: {} },
+  ];
+
+  const parseWidgetSettings = (settings: unknown) => {
+    if (!settings) return {};
+    if (typeof settings === 'object') return settings;
+    try {
+      const parsed = JSON.parse(String(settings));
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (_) {
+      return {};
+    }
+  };
+
+  const ensureDashboardWidgetsForUser = (userId: string) => {
+    const existing = db.prepare("SELECT COUNT(*) as count FROM dashboard_widgets WHERE user_id = ?").get(userId) as any;
+    if ((existing?.count || 0) > 0) return;
+
+    const legacyTemplates = db.prepare(`
+      SELECT widget_key, title, description, widget_type, source_module, size, position, is_visible, settings_json
+      FROM dashboard_widgets
+      WHERE user_id = 'admin'
+      ORDER BY position ASC
+    `).all() as any[];
+
+    const templates = legacyTemplates.length > 0
+      ? legacyTemplates
+      : DEFAULT_DASHBOARD_WIDGET_TEMPLATES.map((widget) => ({ ...widget, is_visible: 1 }));
+
+    const insert = db.prepare(`
+      INSERT INTO dashboard_widgets
+        (id, user_id, widget_key, title, description, widget_type, source_module, size, position, is_visible, settings_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const seedUserWidgets = db.transaction(() => {
+      templates.forEach((widget: any, index: number) => {
+        insert.run(
+          uuidv4(),
+          userId,
+          widget.widget_key,
+          widget.title || widget.widget_key,
+          widget.description || '',
+          widget.widget_type || 'kpi',
+          widget.source_module || 'overview',
+          widget.size || 'small',
+          Number.isFinite(Number(widget.position)) ? Number(widget.position) : index,
+          widget.is_visible === undefined ? 1 : (widget.is_visible ? 1 : 0),
+          JSON.stringify(parseWidgetSettings(widget.settings_json)),
+        );
+      });
+    });
+
+    seedUserWidgets();
+  };
+
+  const getDashboardUserId = (req: express.Request) => req.user?.id || 'legacy-api-key';
+
   // Dashboard Widgets Endpoints
   app.get("/api/dashboard/widgets", (req, res) => {
     try {
-      const user_id = req.query.user_id || 'admin';
-      const widgets = db.prepare("SELECT * FROM dashboard_widgets WHERE user_id = ? ORDER BY position ASC").all(user_id) as any[];
-      const parsedWidgets = widgets.map(w => ({...w, settings_json: JSON.parse(w.settings_json || '{}')}));
+      const userId = getDashboardUserId(req);
+      ensureDashboardWidgetsForUser(userId);
+      const widgets = db.prepare("SELECT * FROM dashboard_widgets WHERE user_id = ? ORDER BY position ASC").all(userId) as any[];
+      const parsedWidgets = widgets.map(w => ({...w, settings_json: parseWidgetSettings(w.settings_json)}));
       res.json(parsedWidgets);
     } catch(e: any) {
       res.status(500).json({ error: e.message });
@@ -863,12 +1181,28 @@ async function startServer() {
 
   app.put("/api/dashboard/widgets", (req, res) => {
     try {
+      const userId = getDashboardUserId(req);
+      ensureDashboardWidgetsForUser(userId);
       // Expects array of updates
       const widgets = Array.isArray(req.body) ? req.body : [req.body];
-      const stmt = db.prepare("UPDATE dashboard_widgets SET title = ?, description = ?, size = ?, position = ?, is_visible = ?, settings_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+      const stmt = db.prepare(`
+        UPDATE dashboard_widgets
+        SET title = ?, description = ?, size = ?, position = ?, is_visible = ?, settings_json = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND user_id = ?
+      `);
       const transaction = db.transaction((updates) => {
         for (const w of updates) {
-          stmt.run(w.title, w.description, w.size, w.position, w.is_visible, JSON.stringify(w.settings_json || {}), w.id);
+          if (!w.id) continue;
+          stmt.run(
+            w.title,
+            w.description || '',
+            w.size || 'small',
+            Number.isFinite(Number(w.position)) ? Number(w.position) : 0,
+            w.is_visible ? 1 : 0,
+            JSON.stringify(parseWidgetSettings(w.settings_json)),
+            w.id,
+            userId,
+          );
         }
       });
       transaction(widgets);
@@ -880,10 +1214,47 @@ async function startServer() {
 
   app.post("/api/dashboard/widgets", (req, res) => {
     try {
+      const userId = getDashboardUserId(req);
+      ensureDashboardWidgetsForUser(userId);
       const w = req.body;
-      const id = w.id || uuidv4();
+      const existing = db.prepare("SELECT id FROM dashboard_widgets WHERE user_id = ? AND widget_key = ? ORDER BY created_at ASC LIMIT 1")
+        .get(userId, w.widget_key) as any;
+
+      if (existing?.id) {
+        db.prepare(`
+          UPDATE dashboard_widgets
+          SET title = ?, description = ?, widget_type = ?, source_module = ?, size = ?, position = ?, is_visible = ?, settings_json = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND user_id = ?
+        `).run(
+          w.title || w.widget_key,
+          w.description || '',
+          w.widget_type || 'kpi',
+          w.source_module || 'overview',
+          w.size || 'small',
+          Number.isFinite(Number(w.position)) ? Number(w.position) : 0,
+          w.is_visible === undefined ? 1 : (w.is_visible ? 1 : 0),
+          JSON.stringify(parseWidgetSettings(w.settings_json)),
+          existing.id,
+          userId,
+        );
+        return res.json({ id: existing.id });
+      }
+
+      const id = uuidv4();
       const insert = db.prepare("INSERT INTO dashboard_widgets (id, user_id, widget_key, title, description, widget_type, source_module, size, position, is_visible, settings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-      insert.run(id, w.user_id || 'admin', w.widget_key, w.title || '', w.description || '', w.widget_type, w.source_module, w.size || 'small', w.position || 0, w.is_visible !== undefined ? w.is_visible : 1, JSON.stringify(w.settings_json || {}));
+      insert.run(
+        id,
+        userId,
+        w.widget_key,
+        w.title || w.widget_key,
+        w.description || '',
+        w.widget_type || 'kpi',
+        w.source_module || 'overview',
+        w.size || 'small',
+        Number.isFinite(Number(w.position)) ? Number(w.position) : 0,
+        w.is_visible === undefined ? 1 : (w.is_visible ? 1 : 0),
+        JSON.stringify(parseWidgetSettings(w.settings_json)),
+      );
       res.json({ id });
     } catch(e: any) {
       res.status(500).json({ error: e.message });
@@ -892,7 +1263,8 @@ async function startServer() {
 
   app.delete("/api/dashboard/widgets/:id", (req, res) => {
     try {
-      db.prepare("DELETE FROM dashboard_widgets WHERE id = ?").run(req.params.id);
+      const userId = getDashboardUserId(req);
+      db.prepare("DELETE FROM dashboard_widgets WHERE id = ? AND user_id = ?").run(req.params.id, userId);
       res.json({ success: true });
     } catch(e: any) {
       res.status(500).json({ error: e.message });
@@ -906,13 +1278,19 @@ async function startServer() {
       const year = now.getFullYear();
       const month = (now.getMonth() + 1).toString().padStart(2, '0');
       const firstDayOfMonth = `${year}-${month}-01T00:00:00Z`;
+      const previousMonthDate = new Date(year, now.getMonth() - 1, 1);
+      const previousYear = previousMonthDate.getFullYear();
+      const previousMonth = (previousMonthDate.getMonth() + 1).toString().padStart(2, '0');
+      const firstDayOfPreviousMonth = `${previousYear}-${previousMonth}-01T00:00:00Z`;
       const lastDayOfMonthStr = `${year}-${month}-${new Date(year, now.getMonth() + 1, 0).getDate().toString().padStart(2, '0')}`;
       const currentMonthStr = `${year}-${month}`;
 
       // Metrics (Exclude Cancelled Sales)
       const revenueResult = db.prepare("SELECT SUM(net_total) as total FROM sales WHERE created_at >= ? AND status NOT IN ('İptal Edildi', 'İade Edildi')").get(firstDayOfMonth) as any;
+      const previousRevenueResult = db.prepare("SELECT SUM(net_total) as total FROM sales WHERE created_at >= ? AND created_at < ? AND status NOT IN ('İptal Edildi', 'İade Edildi')").get(firstDayOfPreviousMonth, firstDayOfMonth) as any;
       const salesProfitResult = db.prepare("SELECT SUM(net_profit) as total, SUM(gross_profit) as gross FROM sales WHERE created_at >= ? AND status NOT IN ('İptal Edildi', 'İade Edildi')").get(firstDayOfMonth) as any;
       const realizedExpensesResult = db.prepare("SELECT SUM(amount) as total FROM transactions WHERE type = 'Expense' AND date >= ? AND COALESCE(is_deleted, 0) = 0").get(firstDayOfMonth) as any;
+      const previousExpensesResult = db.prepare("SELECT SUM(amount) as total FROM transactions WHERE type = 'Expense' AND date >= ? AND date < ? AND COALESCE(is_deleted, 0) = 0").get(firstDayOfPreviousMonth, firstDayOfMonth) as any;
 
       // Cash Metrics
       // 1. Total Cash Balance
@@ -950,9 +1328,11 @@ async function startServer() {
       let pendingRecurringTotal = pendingOccurrences?.total || 0;
 
       const totalRevenue = revenueResult?.total || 0;
+      const previousRevenue = previousRevenueResult?.total || 0;
       const salesNetProfit = salesProfitResult?.total || 0;
       const salesGrossProfit = salesProfitResult?.gross || 0;
       const totalExpenses = (realizedExpensesResult?.total || 0) + pendingRecurringTotal;
+      const previousExpenses = previousExpensesResult?.total || 0;
 
       const lowStockProductsQuery = db.prepare(`
         SELECT p.*,
@@ -984,15 +1364,22 @@ async function startServer() {
 
       const metrics = {
         totalRevenue,
+        previousRevenue,
+        revenueChangePct: previousRevenue > 0 ? ((totalRevenue - previousRevenue) / previousRevenue) * 100 : 0,
         totalExpenses,
+        previousExpenses,
+        expensesChangePct: previousExpenses > 0 ? ((totalExpenses - previousExpenses) / previousExpenses) * 100 : 0,
         grossProfit: salesGrossProfit,
         netProfit: salesNetProfit - totalExpenses,
         netProfitMargin: totalRevenue > 0 ? ((salesNetProfit - totalExpenses) / totalRevenue) * 100 : 0,
+        estimatedNetProfit: totalRevenue - totalExpenses,
+        estimatedNetProfitMargin: totalRevenue > 0 ? ((totalRevenue - totalExpenses) / totalRevenue) * 100 : 0,
         lowStockCount: lowStockProductsQuery.length,
         totalStockSalesValue: totalSaleValue,
         totalStockCostValue: totalCostValue,
         totalBufferedCostValue: totalBufferedCostValue,
         stockEstProfit: totalSaleValue - totalCostValue,
+        stockAvgProfitMargin: totalSaleValue > 0 ? ((totalSaleValue - totalCostValue) / totalSaleValue) * 100 : 0,
         lowStockProducts: lowStockProductsQuery,
         cashTotal: cashAccountsTotal?.total || 0,
         pendingPlatform: pendingPlatformTotal?.total || 0,
@@ -1044,15 +1431,16 @@ async function startServer() {
 
       // Charts: Platform Revenue
       const platformRevenue = db.prepare(`
-        SELECT platform, SUM(total_amount) as total
+        SELECT platform, SUM(net_total) as total
         FROM sales
+        WHERE status NOT IN ('İptal Edildi', 'İade Edildi')
         GROUP BY platform
       `).all();
 
       const charts = { monthlyData, platformRevenue };
 
       // Recent Transactions
-      const recentTransactions = db.prepare("SELECT * FROM transactions ORDER BY date DESC LIMIT 10").all();
+      const recentTransactions = db.prepare("SELECT * FROM transactions WHERE COALESCE(is_deleted, 0) = 0 ORDER BY date DESC LIMIT 10").all();
 
       res.json({ metrics, charts, recentTransactions });
     } catch (err: any) {
@@ -1198,7 +1586,7 @@ async function startServer() {
           insertImg.run(uuidv4(), id, img.path || img, idx);
         });
       }
-      logActivity('CREATE', 'product', id, { name, title, sku });
+      logActivity('CREATE', 'product', id, { name, title, sku }, req.user?.id);
     })();
 
     res.json({ id });
@@ -1276,6 +1664,14 @@ async function startServer() {
         }
       })();
 
+      logActivity('BULK_PRICING_UPDATED', 'product', 'bulk-pricing', {
+        updatedCount,
+        skippedLockedCount,
+        skippedMissingCount,
+        exchangeRate,
+        bufferPercentage,
+        profitPercentage,
+      }, req.user?.id);
       res.json({ success: true, updatedCount, skippedLockedCount, skippedMissingCount });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1380,7 +1776,7 @@ async function startServer() {
           afterState.imageChanged = true;
         }
       }
-      logActivity('UPDATE', 'product', req.params.id, { before: beforeState, after: afterState });
+      logActivity('UPDATE', 'product', req.params.id, { before: beforeState, after: afterState }, req.user?.id);
     })();
 
     res.json({ success: true });
@@ -1400,7 +1796,7 @@ async function startServer() {
   app.delete("/api/products/:id", (req, res) => {
     const beforeState = db.prepare("SELECT * FROM products WHERE id = ?").get(req.params.id);
     db.prepare("DELETE FROM products WHERE id = ?").run(req.params.id);
-    logActivity('DELETE', 'product', req.params.id, { before: beforeState });
+    logActivity('DELETE', 'product', req.params.id, { before: beforeState }, req.user?.id);
     res.json({ success: true });
   });
 
@@ -1464,7 +1860,7 @@ async function startServer() {
           reason,
           before: { central_stock: beforeStock },
           after: { central_stock: nextStock },
-        });
+        }, req.user?.id);
       })();
 
       res.json({ success: true });
@@ -1550,7 +1946,7 @@ async function startServer() {
           currency || 'TRY', amount_try || (currency === 'USD' ? amount * activeRate : amount), payer_person_id, will_be_refunded || 0, refund_status, is_invoice || 0, invoice_name, is_stock_related || 0, distribute_to_product_cost || 0
         );
         
-        logActivity('CREATE', 'expense', txId, { after: req.body });
+        logActivity('CREATE', 'expense', txId, { after: req.body }, req.user?.id);
       })();
       res.json({ id: txId, success: true });
     } catch (err: any) {
@@ -1831,6 +2227,9 @@ async function startServer() {
         id, name, currency, type, opening_balance, credit_limit, statement_day, due_day, is_liability,
         statement_day, due_day, bank_name, card_last_four, current_debt, available_limit
       );
+      logActivity('CREATE', 'cash_account', id, {
+        after: { name, currency, type, opening_balance, credit_limit, is_liability },
+      }, req.user?.id);
       res.json({ success: true, id });
     } catch (err: any) {
       if (err.message && err.message.includes('has no column')) {
@@ -1844,7 +2243,10 @@ async function startServer() {
   app.put("/api/cash-accounts/:id", (req, res) => {
     try {
       const { is_active } = req.body;
+      const beforeState = db.prepare("SELECT * FROM cash_accounts WHERE id = ?").get(req.params.id);
       db.prepare("UPDATE cash_accounts SET is_active = ? WHERE id = ?").run(is_active ? 1 : 0, req.params.id);
+      const afterState = db.prepare("SELECT * FROM cash_accounts WHERE id = ?").get(req.params.id);
+      logActivity('UPDATE', 'cash_account', req.params.id, { before: beforeState, after: afterState }, req.user?.id);
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1883,7 +2285,7 @@ async function startServer() {
         VALUES (?, ?, 'IN', ?, ?, ?, ?, ?)
       `).run(txId, account_id, amountNum, account.currency, 1, source_type || 'deposit', desc);
       
-      logActivity('CREATE', 'cash_deposit', txId, { after: { account_id, amount, source_type } });
+      logActivity('CREATE', 'cash_deposit', txId, { after: { account_id, amount, source_type } }, req.user?.id);
       res.json({ success: true, id: txId });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1934,7 +2336,7 @@ async function startServer() {
           VALUES (?, ?, 'IN', ?, ?, ?, 'transfer', ?, ?)
         `).run(targetTxId, to_account_id, targetAmount, targetCurrency, parseFloat(rate) || activeRate, sourceTxId, desc);
         
-        logActivity('CREATE', 'cash_transfer', sourceTxId, { after: { from_account_id, to_account_id, amount, rate } });
+        logActivity('CREATE', 'cash_transfer', sourceTxId, { after: { from_account_id, to_account_id, amount, rate } }, req.user?.id);
       })();
 
       res.json({ success: true });
@@ -2005,7 +2407,7 @@ async function startServer() {
           logActivity('CREATE', 'transaction', txId, { 
             before: {}, 
             after: { date: date || new Date().toISOString(), type, category, platform, amount, product_id, note, reference_number, cash_account_id }
-          });
+          }, req.user?.id);
        })();
        res.json({ success: true, id: txId });
     } catch (err: any) {
@@ -2097,7 +2499,7 @@ async function startServer() {
          stmt.run(key, newValue);
          afterState[key] = newValue;
       }
-      logActivity('UPDATE', 'settings', 'global', { before: beforeState, after: afterState });
+      logActivity('UPDATE', 'settings', 'global', { before: beforeState, after: afterState }, req.user?.id);
     })();
     
     res.json({ success: true });
@@ -2673,7 +3075,7 @@ async function startServer() {
          before: null, 
          after: { service_name, display_name, status: 'active' },
          userIp: req.ip
-      });
+      }, req.user?.id);
 
       res.json({ id });
     } catch (err: any) {
@@ -2719,7 +3121,7 @@ async function startServer() {
          before: { display_name: current.display_name, service_name: current.service_name }, 
          after: { display_name, update: "Keys / metadata updated" },
          userIp: req.ip
-      });
+      }, req.user?.id);
 
       res.json({ success: true });
     } catch (err: any) {
@@ -2736,7 +3138,7 @@ async function startServer() {
          before: {}, 
          after: { status },
          userIp: req.ip
-      });
+      }, req.user?.id);
 
       res.json({ success: true });
     } catch (err: any) {
@@ -2810,7 +3212,7 @@ async function startServer() {
       logActivity("API_KEY_TESTED", "integration", id, { 
          after: { result: status, message },
          userIp: req.ip
-      });
+      }, req.user?.id);
 
       res.json({ status, message });
     } catch (err: any) {
@@ -2833,7 +3235,7 @@ async function startServer() {
          before: { display_name: current.display_name, service_name: current.service_name }, 
          after: null,
          userIp: req.ip
-      });
+      }, req.user?.id);
 
       res.json({ success: true });
     } catch (err: any) {
@@ -2885,7 +3287,7 @@ async function startServer() {
       logActivity("PANEL_API_KEY_CREATED", "integration", id, { 
          after: { name, environment, status: 'active' },
          userIp: req.ip
-      });
+      }, req.user?.id);
 
       // ONLY RETURN newApiKey HERE! IT SHOULD NOT BE RETURNED AGAIN.
       res.json({ id, apiKey: newApiKey }); 
@@ -2913,7 +3315,7 @@ async function startServer() {
       logActivity("PANEL_API_KEY_UPDATED", "integration", id, { 
          after: { name, update: "Panel API Key updated" },
          userIp: req.ip
-      });
+      }, req.user?.id);
 
       res.json({ success: true });
     } catch (err: any) {
@@ -2933,7 +3335,7 @@ async function startServer() {
       logActivity(action, "integration", req.params.id, { 
          after: { status },
          userIp: req.ip
-      });
+      }, req.user?.id);
 
       res.json({ success: true });
     } catch (err: any) {
@@ -2949,7 +3351,7 @@ async function startServer() {
       logActivity("PANEL_API_KEY_REVOKED", "integration", id, { 
          after: { status: 'revoked' },
          userIp: req.ip
-      });
+      }, req.user?.id);
 
       res.json({ success: true });
     } catch (err: any) {
@@ -2981,7 +3383,7 @@ async function startServer() {
       logActivity("PANEL_API_KEY_ROTATED", "integration", id, { 
          after: { newKeyId: newId },
          userIp: req.ip
-      });
+      }, req.user?.id);
 
       res.json({ id: newId, apiKey: newApiKey });
     } catch (err: any) {
@@ -3013,7 +3415,7 @@ async function startServer() {
       logActivity("PANEL_API_KEY_TESTED", "integration", id, { 
          after: { result: status, message },
          userIp: req.ip
-      });
+      }, req.user?.id);
 
       res.json({ status, message });
     } catch (err: any) {
@@ -3033,7 +3435,7 @@ async function startServer() {
       logActivity("PANEL_API_KEY_DELETED", "integration", id, { 
          before: { name: current.name },
          userIp: req.ip
-      });
+      }, req.user?.id);
 
       res.json({ success: true });
     } catch (err: any) {
@@ -3291,6 +3693,7 @@ async function startServer() {
 
       })();
 
+      logActivity('PRICING_REPAIR_RUN', 'system', 'fix-pricing', { ip: req.ip }, req.user?.id);
       res.json({ success: true, message: "Fiyat verileri ve geçmiş satışlar onarıldı." });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

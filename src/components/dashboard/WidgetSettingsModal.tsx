@@ -1,35 +1,13 @@
 import React from 'react';
-import { X, GripVertical, Check, Plus, AlertCircle } from 'lucide-react';
+import { Check, X } from 'lucide-react';
+import { DASHBOARD_WIDGET_CATALOG } from './dashboardCatalog';
 
-interface WidgetDef {
-  key: string;
-  title: string;
-  type: string;
-  module: string;
-  size: "small" | "medium" | "large" | "full";
-}
-
-const WIDGET_CATALOG: WidgetDef[] = [
-  // Payments
-  { key: 'payment_month_pending_count', title: 'Bu Ay Bekleyen İşlem', type: 'kpi', module: 'payments', size: 'small' },
-  { key: 'payment_month_pending_amount', title: 'Bu Ay Bekleyen Tutar', type: 'kpi', module: 'payments', size: 'small' },
-  { key: 'payment_auto_process_count', title: 'Otomatik İşlenecek', type: 'kpi', module: 'payments', size: 'small' },
-  { key: 'payment_overdue_count', title: 'Geciken Ödeme', type: 'kpi', module: 'payments', size: 'small' },
-  { key: 'payment_processed_count', title: 'İşlenen Ödeme', type: 'kpi', module: 'payments', size: 'small' },
-  { key: 'payment_upcoming_list', title: 'Yaklaşan Ödemeler', type: 'list', module: 'payments', size: 'medium' },
-  { key: 'payment_status_share', title: 'Ödeme Durum Dağılımı', type: 'pie', module: 'payments', size: 'medium' },
-  { key: 'payment_category_share', title: 'Ödeme Kategori Dağılımı', type: 'pie', module: 'payments', size: 'medium' },
-  { key: 'payment_monthly_amounts', title: 'Aylık Ödeme Tutarı', type: 'bar', module: 'payments', size: 'large' },
-  // Products
-  { key: 'product_total_sold', title: 'Toplam Satılan Adet', type: 'kpi', module: 'products', size: 'small' },
-  { key: 'product_total_revenue', title: 'Toplam Satış Geliri', type: 'kpi', module: 'products', size: 'small' },
-  { key: 'product_top_material', title: 'En Çok Satan Materyal', type: 'kpi', module: 'products', size: 'small' },
-  { key: 'product_top_model', title: 'En Çok Satan Model', type: 'kpi', module: 'products', size: 'small' },
-  { key: 'product_material_pie', title: 'Materyal Satış Dağılımı', type: 'pie', module: 'products', size: 'medium' },
-  { key: 'product_model_pie', title: 'Model Satış Dağılımı', type: 'pie', module: 'products', size: 'medium' },
-  { key: 'sales_revenue_trend', title: 'Satış Trend Grafiği', type: 'line', module: 'products', size: 'large' },
-  { key: 'product_reorder_summary', title: 'Akıllı Sipariş Önerisi', type: 'kpi', module: 'products', size: 'medium' },
-];
+const moduleLabels: Record<string, string> = {
+  overview: 'İşletme Özeti',
+  payments: 'Ödemeler',
+  products: 'Ürün Analizi',
+  finance: 'Finans',
+};
 
 export function WidgetSettingsModal({ onClose, activeWidgets, onSave }: any) {
   const [widgets, setWidgets] = React.useState<any[]>([]);
@@ -38,13 +16,14 @@ export function WidgetSettingsModal({ onClose, activeWidgets, onSave }: any) {
     // Merge active with catalog
     let merged = [...activeWidgets];
 
-    WIDGET_CATALOG.forEach(catWidget => {
+    DASHBOARD_WIDGET_CATALOG.forEach(catWidget => {
       if (!merged.find(w => w.widget_key === catWidget.key)) {
         merged.push({
-          id: `new_${catWidget.key}_${Date.now()}`,
+          id: `new_${catWidget.key}`,
           is_visible: 0,
           widget_key: catWidget.key,
           title: catWidget.title,
+          description: catWidget.description,
           widget_type: catWidget.type,
           source_module: catWidget.module,
           size: catWidget.size,
@@ -128,7 +107,10 @@ export function WidgetSettingsModal({ onClose, activeWidgets, onSave }: any) {
 
                 <div className="flex-1">
                   <h4 className="font-bold text-gray-900 text-sm">{w.title}</h4>
-                  <p className="text-xs text-gray-500 font-medium">{w.source_module === 'payments' ? 'Ödemeler' : 'Ürün Analizi'} • {w.widget_type}</p>
+                  <p className="text-xs text-gray-500 font-medium">
+                    {moduleLabels[w.source_module] || w.source_module || 'Dashboard'} • {w.widget_type}
+                  </p>
+                  {w.description && <p className="text-[11px] text-gray-400 font-medium mt-1">{w.description}</p>}
                 </div>
 
                 <div className="flex items-center gap-2">

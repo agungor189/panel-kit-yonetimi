@@ -78,6 +78,14 @@ export function createProductAnalyticsRouter(db: Database.Database) {
     ) ss ON ss.product_id = p.id
   `;
 
+  const modelDisplayExpr = `
+    CASE
+      WHEN TRIM(COALESCE(p.normalized_model, '')) NOT IN ('', 'Bilinmiyor', 'Standart') THEN TRIM(p.normalized_model)
+      WHEN TRIM(COALESCE(p.model, '')) NOT IN ('', 'Bilinmiyor', 'Standart') THEN TRIM(p.model)
+      ELSE COALESCE(NULLIF(TRIM(p.title), ''), NULLIF(TRIM(p.name), ''), 'Model Belirtilmemiş')
+    END
+  `;
+
   // 0. Filter Options
   router.get("/products/filter-options", (req, res) => {
     try {
@@ -123,11 +131,11 @@ export function createProductAnalyticsRouter(db: Database.Database) {
       `).get(...queryParams) as any;
 
       const topMaterial = getTop("IFNULL(p.normalized_material, 'Bilinmiyor')");
-      const topModel = getTop("IFNULL(p.normalized_model, 'Bilinmiyor')");
+      const topModel = getTop(modelDisplayExpr);
       const topSize = getTop("COALESCE(p.normalized_pipe_size, p.normalized_size, 'Bilinmiyor')");
       const topType = getTop("IFNULL(p.normalized_tube_type, 'Bilinmiyor')");
       const bottomMaterial = getBottom("IFNULL(p.normalized_material, 'Bilinmiyor')");
-      const bottomModel = getBottom("IFNULL(p.normalized_model, 'Bilinmiyor')");
+      const bottomModel = getBottom(modelDisplayExpr);
 
       res.json({
         totalSku: summary?.totalSku || 0,
@@ -156,7 +164,7 @@ export function createProductAnalyticsRouter(db: Database.Database) {
       const query = `
         SELECT 
           IFNULL(p.normalized_material, 'Bilinmiyor') as material,
-          IFNULL(p.normalized_model, 'Bilinmiyor') as model,
+          ${modelDisplayExpr} as model,
           COALESCE(p.normalized_pipe_size, p.normalized_size, 'Bilinmiyor') as size,
           IFNULL(p.normalized_tube_type, 'Bilinmiyor') as tubeType,
           COUNT(DISTINCT p.id) as skuCount,
@@ -168,7 +176,7 @@ export function createProductAnalyticsRouter(db: Database.Database) {
         WHERE ${productWhere}
         GROUP BY
           IFNULL(p.normalized_material, 'Bilinmiyor'),
-          IFNULL(p.normalized_model, 'Bilinmiyor'),
+          ${modelDisplayExpr},
           COALESCE(p.normalized_pipe_size, p.normalized_size, 'Bilinmiyor'),
           IFNULL(p.normalized_tube_type, 'Bilinmiyor')
         ORDER BY soldQty DESC
@@ -191,7 +199,7 @@ export function createProductAnalyticsRouter(db: Database.Database) {
           p.sku,
           p.title as name,
           IFNULL(p.normalized_material, 'Bilinmiyor') as material,
-          IFNULL(p.normalized_model, 'Bilinmiyor') as model,
+          ${modelDisplayExpr} as model,
           COALESCE(p.normalized_pipe_size, p.normalized_size, 'Bilinmiyor') as size,
           IFNULL(p.normalized_tube_type, 'Bilinmiyor') as tubeType,
           IFNULL(p.central_stock, 0) as currentStock,
@@ -234,7 +242,7 @@ export function createProductAnalyticsRouter(db: Database.Database) {
 
       res.json({
         material: getStats("IFNULL(p.normalized_material, 'Bilinmiyor')"),
-        model: getStats("IFNULL(p.normalized_model, 'Bilinmiyor')"),
+        model: getStats(modelDisplayExpr),
         size: getStats("COALESCE(p.normalized_pipe_size, p.normalized_size, 'Bilinmiyor')")
       });
     } catch (error) {
@@ -271,7 +279,7 @@ export function createProductAnalyticsRouter(db: Database.Database) {
 
       res.json({
         materialShare: getDistribution("IFNULL(p.normalized_material, 'Bilinmiyor')"),
-        modelShare: getDistribution("IFNULL(p.normalized_model, 'Bilinmiyor')", 15),
+        modelShare: getDistribution(modelDisplayExpr, 15),
         pipeTypeShare: getDistribution("IFNULL(p.normalized_tube_type, 'Bilinmiyor')"),
         sizeShare: getDistribution("COALESCE(p.normalized_pipe_size, p.normalized_size, 'Bilinmiyor')", 15),
         trend: getSalesTrend()

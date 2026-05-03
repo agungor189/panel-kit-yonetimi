@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../lib/api';
-import { Activity, Clock, FileText, X, ArrowRight } from 'lucide-react';
+import { Activity, Clock, FileText, X, ArrowRight, UserRound, Info, PlusCircle, Trash2 } from 'lucide-react';
 
 const getActionColor = (action: string) => {
   switch(action) {
@@ -24,98 +24,190 @@ const getActionText = (action: string) => {
   }
 };
 
-const getDiffs = (details: any) => {
-  let diffs: any[] = [];
+type DiffEntry = {
+  key: string;
+  label: string;
+  old?: any;
+  new?: any;
+  isSpecialToken?: 'image_update';
+};
+
+const HIDDEN_DETAIL_KEYS = new Set(['updated_at', 'imageChanged']);
+const DETAIL_WRAPPER_KEYS = new Set(['before', 'after']);
+
+const FIELD_LABELS: Record<string, string> = {
+  title: 'Başlık',
+  name: 'Ad',
+  username: 'Kullanıcı Adı',
+  category: 'Kategori',
+  payment_type: 'Ödeme Tipi',
+  amount: 'Tutar',
+  amount_try: 'Tutar (TRY)',
+  currency: 'Para Birimi',
+  due_day: 'Vade Günü',
+  due_date: 'Vade Tarihi',
+  frequency: 'Sıklık',
+  auto_process: 'Otomatik İşleme',
+  document_required: 'Belge Zorunlu',
+  is_active: 'Aktiflik',
+  start_date: 'Başlangıç Tarihi',
+  end_date: 'Bitiş Tarihi',
+  description: 'Açıklama',
+  notes: 'Notlar',
+  role: 'Rol',
+  must_change_password: 'Şifre Değiştirme Zorunlu',
+  central_stock: 'Merkez Depo Stoğu',
+  sale_price: 'Satış Fiyatı',
+  purchase_cost: 'Alış Maliyeti',
+  purchase_price_usd: 'Alış Fiyatı (USD)',
+  sku: 'SKU',
+  model: 'Model',
+  material: 'Materyal',
+  size: 'Ölçü',
+  tube_type: 'Boru Tipi',
+  connection_type: 'Bağlantı Tipi',
+  status: 'Durum',
+  platform: 'Platform',
+  platforms: 'Platform Bilgileri',
+  images: 'Görseller',
+  before: 'Eski',
+  after: 'Yeni',
+  ip: 'IP',
+  reason: 'Sebep',
+};
+
+const humanizeKey = (key: string) => FIELD_LABELS[key] || key
+  .replace(/_/g, ' ')
+  .replace(/\b\w/g, (char) => char.toLocaleUpperCase('tr-TR'));
+
+const isDateLikeKey = (key: string) => /(^|_)(date|at)$/.test(key) || key.endsWith('_at');
+const isMoneyLikeKey = (key: string) => /(amount|price|cost|profit|revenue|total|maliyet|ciro|tutar)/i.test(key)
+  && !/(stock|count|quantity|rate|percentage|margin|day)/i.test(key);
+
+const formatDateValue = (value: string) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('tr-TR', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
+const formatLogValue = (key: string, value: any): string => {
+  if (value === null || value === undefined || value === '') return 'Boş';
+  if (typeof value === 'boolean') return value ? 'Evet' : 'Hayır';
+  if (value === 1 && (key.startsWith('is_') || key.includes('required') || key.includes('active'))) return 'Evet';
+  if (value === 0 && (key.startsWith('is_') || key.includes('required') || key.includes('active'))) return 'Hayır';
+  if (typeof value === 'number') {
+    if (isMoneyLikeKey(key)) {
+      return new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY' }).format(value);
+    }
+    if (/(rate|percentage|margin)/i.test(key)) return `%${new Intl.NumberFormat('tr-TR', { maximumFractionDigits: 2 }).format(value)}`;
+    return new Intl.NumberFormat('tr-TR').format(value);
+  }
+  if (typeof value === 'string') {
+    if (isDateLikeKey(key)) return formatDateValue(value);
+    return value;
+  }
+  if (Array.isArray(value)) {
+    if (key === 'platforms') {
+      return value.map((platform: any) => {
+        const parts = [
+          platform.platform_name || platform.name || 'Platform',
+          platform.price !== undefined ? `Fiyat: ${formatLogValue('price', Number(platform.price))}` : null,
+          platform.is_listed !== undefined ? `Durum: ${platform.is_listed ? 'Yayında' : 'Yayında Değil'}` : null,
+        ].filter(Boolean);
+        return parts.join(' / ');
+      }).join('\n');
+    }
+    if (key === 'images') return `${value.length} görsel`;
+    return value.map((item) => typeof item === 'object' ? JSON.stringify(item) : String(item)).join('\n');
+  }
+  if (typeof value === 'object') {
+    if (value.username) return String(value.username);
+    if (value.title) return String(value.title);
+    if (value.name) return String(value.name);
+    return JSON.stringify(value, null, 2);
+  }
+  return String(value);
+};
+
+const getDisplayEntries = (obj: any) => Object.entries(obj || {})
+  .filter(([key]) => !DETAIL_WRAPPER_KEYS.has(key) && !HIDDEN_DETAIL_KEYS.has(key));
+
+const getDiffs = (details: any): DiffEntry[] => {
+  const diffs: DiffEntry[] = [];
   if (!details || typeof details !== 'object' || !details.before || !details.after) {
-    // If it's a CREATE or DELETE with only before or after, count keys
     if (details && typeof details === 'object') {
       const targetObj = details.after || details.before;
-      if (targetObj) {
-         return Object.keys(targetObj).map(k => ({ key: k }));
-      }
-      // For fallback
-      const extraDetails = { ...details };
-      delete extraDetails.before;
-      delete extraDetails.after;
-      if (Object.keys(extraDetails).length > 0) {
-        return Object.keys(extraDetails).map(k => ({ key: k }));
-      }
+      if (targetObj) return getDisplayEntries(targetObj).map(([key]) => ({ key, label: humanizeKey(key) }));
+      return getDisplayEntries(details).map(([key]) => ({ key, label: humanizeKey(key) }));
     }
     return diffs;
   }
-  
+
   if (details.after.imageChanged) {
-    diffs.push({ key: 'Görseller', isSpecialToken: 'image_update' });
+    diffs.push({ key: 'images', label: 'Görseller', isSpecialToken: 'image_update' });
   }
+
   const beforeObj = details.before || {};
   const afterObj = details.after || {};
   const allKeys = new Set([...Object.keys(beforeObj), ...Object.keys(afterObj)]);
-  
+
   for (const key of allKeys) {
+    if (HIDDEN_DETAIL_KEYS.has(key)) continue;
     const bStr = JSON.stringify(beforeObj[key]);
     const aStr = JSON.stringify(afterObj[key]);
-    if (bStr !== aStr && key !== 'updated_at' && key !== 'imageChanged') {
-      if (key === 'central_stock') {
-        diffs.push({ key: 'Merkez Depo Stoğu', old: beforeObj[key] || 0, new: afterObj[key] || 0 });
-      } else if (key === 'platforms' && Array.isArray(beforeObj[key]) && Array.isArray(afterObj[key])) {
-        const oldP = beforeObj[key];
-        const newP = afterObj[key];
-        
-        const stockChangedAny = newP.some((nP: any) => {
-           const oP = oldP.find((p: any) => p.platform_name === nP.platform_name);
-           return !oP || oP.stock !== nP.stock;
-        });
-        
-        if (stockChangedAny && newP.length > 0) {
-           const oldStock = oldP.length > 0 ? oldP[0].stock : 0;
-           diffs.push({ key: 'Stok', old: oldStock, new: newP[0].stock });
-        }
-        
-        const isPriceSameOld = oldP.length > 0 && oldP.every((p: any) => p.price === oldP[0]?.price);
-        const isPriceSameNew = newP.length > 0 && newP.every((p: any) => p.price === newP[0]?.price);
-        const priceChangedAny = newP.some((nP: any) => {
-           const oP = oldP.find((p: any) => p.platform_name === nP.platform_name);
-           return !oP || oP.price !== nP.price;
-        });
-        
-        if (isPriceSameNew && priceChangedAny) {
-           diffs.push({ key: 'Tüm Platformlar Fiyat', old: isPriceSameOld ? oldP[0]?.price : '(Farklı Değerler)', new: newP[0]?.price });
-        }
-        
-        const isListedSameOld = oldP.length > 0 && oldP.every((p: any) => p.is_listed === oldP[0]?.is_listed);
-        const isListedSameNew = newP.length > 0 && newP.every((p: any) => p.is_listed === newP[0]?.is_listed);
-        const listedChangedAny = newP.some((nP: any) => {
-           const oP = oldP.find((p: any) => p.platform_name === nP.platform_name);
-           return !oP || oP.is_listed !== nP.is_listed;
-        });
-        
-        if (isListedSameNew && listedChangedAny) {
-           diffs.push({ key: 'Tüm Platformlar Durumu', old: isListedSameOld ? (oldP[0]?.is_listed ? 'Yayında' : 'Yayında Değil') : '(Farklı Değerler)', new: newP[0]?.is_listed ? 'Yayında' : 'Yayında Değil' });
-        }
-        
-        newP.forEach((nP: any) => {
-          const oP = oldP.find((p: any) => p.platform_name === nP.platform_name);
-          if (oP) {
-            if (!(isPriceSameNew && priceChangedAny) && oP.price !== nP.price) {
-              diffs.push({ key: `${nP.platform_name} Fiyat`, old: oP.price, new: nP.price });
-            }
-            if (!(isListedSameNew && listedChangedAny) && oP.is_listed !== nP.is_listed) {
-              diffs.push({ key: `${nP.platform_name} Durum`, old: oP.is_listed ? 'Yayında' : 'Yayında Değil', new: nP.is_listed ? 'Yayında' : 'Yayında Değil' });
-            }
+    if (bStr === aStr) continue;
+
+    if (key === 'platforms' && Array.isArray(beforeObj[key]) && Array.isArray(afterObj[key])) {
+      const oldP = beforeObj[key];
+      const newP = afterObj[key];
+      const platforms = new Set([
+        ...oldP.map((p: any) => p.platform_name),
+        ...newP.map((p: any) => p.platform_name),
+      ]);
+
+      platforms.forEach((platformName) => {
+        const previous = oldP.find((p: any) => p.platform_name === platformName) || {};
+        const current = newP.find((p: any) => p.platform_name === platformName) || {};
+        ['price', 'is_listed', 'sku', 'barcode'].forEach((platformKey) => {
+          if (JSON.stringify(previous[platformKey]) !== JSON.stringify(current[platformKey])) {
+            diffs.push({
+              key: `${platformName}_${platformKey}`,
+              label: `${platformName} ${humanizeKey(platformKey)}`,
+              old: previous[platformKey],
+              new: current[platformKey],
+            });
           }
         });
-      } else if (key === 'images' && Array.isArray(beforeObj[key]) && Array.isArray(afterObj[key])) {
-        const oldPaths = beforeObj[key].map((img: any) => img.path).join(', ');
-        const newPaths = afterObj[key].map((img: any) => img.path).join(', ');
-        if (oldPaths !== newPaths) {
-          diffs.push({ key: 'Görseller', isSpecialToken: 'image_update' });
-        }
-      } else {
-        diffs.push({ key, old: beforeObj[key], new: afterObj[key] });
-      }
+      });
+      continue;
     }
+
+    if (key === 'images' && Array.isArray(beforeObj[key]) && Array.isArray(afterObj[key])) {
+      const oldPaths = beforeObj[key].map((img: any) => img.path).join(', ');
+      const newPaths = afterObj[key].map((img: any) => img.path).join(', ');
+      if (oldPaths !== newPaths) {
+        diffs.push({ key, label: 'Görseller', isSpecialToken: 'image_update' });
+      }
+      continue;
+    }
+
+    diffs.push({ key, label: humanizeKey(key), old: beforeObj[key], new: afterObj[key] });
   }
+
   return diffs;
+};
+
+const getDetailSubject = (details: any) => {
+  const source = details?.after || details?.before || details || {};
+  const primary = source.name || source.title || source.username || details?.name || details?.title || details?.username;
+  const secondary = source.sku || source.category || source.role || details?.sku || details?.category;
+  return { primary, secondary };
 };
 
 const LogDetails = ({ detailsStr }: { detailsStr: string }) => {
@@ -134,16 +226,108 @@ const LogDetails = ({ detailsStr }: { detailsStr: string }) => {
      return <span>{String(details)}</span>;
   }
 
-  // Calculate deep diff if before and after exist
   const diffs = getDiffs(details);
+  const subject = getDetailSubject(details);
 
-  const renderSection = (title: string, obj: any) => (
-     <div className="mt-4 bg-gray-50 border border-gray-200 p-4 rounded-xl text-sm">
-       <span className="font-bold text-gray-800 block mb-2">{title}:</span>
-       <pre className="text-xs overflow-x-auto text-gray-700 whitespace-pre-wrap font-mono bg-white p-3 rounded-lg border border-gray-100">
-         {JSON.stringify(obj, null, 2)}
-       </pre>
-     </div>
+  const renderValueBox = (fieldKey: string, label: string, value: any, tone: 'old' | 'new') => (
+    <div className={`relative flex-1 rounded-xl border px-4 py-3 ${tone === 'old' ? 'border-red-100 bg-red-50 text-red-800' : 'border-emerald-100 bg-emerald-50 text-emerald-800'}`}>
+      <div className={`mb-1 text-[10px] font-black uppercase tracking-wider ${tone === 'old' ? 'text-red-500' : 'text-emerald-600'}`}>
+        {label}
+      </div>
+      <div className="whitespace-pre-wrap break-words text-sm font-bold leading-relaxed">
+        {formatLogValue(fieldKey, value)}
+      </div>
+    </div>
+  );
+
+  const renderKeyValueSection = (title: string, obj: any, tone: 'neutral' | 'old' | 'new', icon?: React.ReactNode) => {
+    const entries = getDisplayEntries(obj);
+    if (entries.length === 0) return null;
+
+    const toneClass = tone === 'old'
+      ? 'border-red-100 bg-red-50/40'
+      : tone === 'new'
+        ? 'border-emerald-100 bg-emerald-50/40'
+        : 'border-slate-200 bg-slate-50';
+
+    return (
+      <div className={`rounded-2xl border p-4 ${toneClass}`}>
+        <div className="mb-3 flex items-center gap-2 text-sm font-black text-slate-900">
+          {icon}
+          {title}
+        </div>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {entries.map(([key, value]) => (
+            <div key={key} className="rounded-xl border border-white/70 bg-white px-3 py-2 shadow-sm">
+              <div className="mb-1 text-[10px] font-black uppercase tracking-wider text-slate-400">{humanizeKey(key)}</div>
+              <div className="whitespace-pre-wrap break-words text-sm font-bold text-slate-800">{formatLogValue(key, value)}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const extraDetails = { ...details };
+  delete extraDetails.before;
+  delete extraDetails.after;
+  const hasExtraDetails = getDisplayEntries(extraDetails).length > 0;
+
+  const renderContent = () => (
+    <div className="space-y-5 text-left">
+      {(subject.primary || subject.secondary) && (
+        <div className="rounded-2xl border border-primary/20 bg-primary/5 p-4">
+          <div className="text-xs font-black uppercase tracking-wider text-primary">Kayıt</div>
+          {subject.primary && <div className="mt-1 text-lg font-black text-slate-900">{String(subject.primary)}</div>}
+          {subject.secondary && <div className="mt-1 text-sm font-bold text-slate-500">{String(subject.secondary)}</div>}
+        </div>
+      )}
+
+      {details.before && details.after && (
+        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+          <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50 px-5 py-4">
+            <div>
+              <div className="text-sm font-black text-slate-900">Değişen Alanlar</div>
+              <div className="text-xs font-semibold text-slate-500">Eski değer ve yeni değer karşılaştırması</div>
+            </div>
+            <span className="rounded-full bg-primary/10 px-3 py-1 text-xs font-black text-primary">{diffs.length} değişiklik</span>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {diffs.length > 0 ? (
+              diffs.map((diff, index) => (
+                <div key={`${diff.key}-${index}`} className="p-5">
+                  {diff.isSpecialToken === 'image_update' ? (
+                    <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm font-bold text-blue-700">
+                      Görseller güncellendi
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[180px,1fr]">
+                      <div className="text-sm font-black text-slate-700">{diff.label}</div>
+                      <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr,32px,1fr] md:items-stretch">
+                        {renderValueBox(diff.key, 'Eski', diff.old, 'old')}
+                        <div className="hidden items-center justify-center md:flex">
+                          <ArrowRight className="h-4 w-4 text-slate-400" />
+                        </div>
+                        {renderValueBox(diff.key, 'Yeni', diff.new, 'new')}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))
+            ) : (
+              <div className="p-6 text-center text-sm font-semibold text-slate-500">
+                Görünen alanlarda değişiklik bulunamadı. Sadece sistem alanları güncellenmiş olabilir.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {!details.before && details.after && renderKeyValueSection('Yeni Kayıt', details.after, 'new', <PlusCircle className="h-4 w-4 text-emerald-600" />)}
+      {details.before && !details.after && renderKeyValueSection('Silinmeden Önce', details.before, 'old', <Trash2 className="h-4 w-4 text-red-600" />)}
+      {!details.before && !details.after && renderKeyValueSection('Kayıt Bilgileri', details, 'neutral', <Info className="h-4 w-4 text-primary" />)}
+      {hasExtraDetails && (details.before || details.after) && renderKeyValueSection('Ek Bilgiler', extraDetails, 'neutral', <Info className="h-4 w-4 text-primary" />)}
+    </div>
   );
 
   return (
@@ -160,12 +344,15 @@ const LogDetails = ({ detailsStr }: { detailsStr: string }) => {
       
       {expanded && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200" onClick={() => setExpanded(false)}>
-          <div className="bg-white rounded-3xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-2xl relative" onClick={e => e.stopPropagation()}>
+          <div className="bg-white rounded-3xl w-full max-w-5xl max-h-[88vh] flex flex-col shadow-2xl relative" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-6 py-5 border-b border-border-color">
-              <h3 className="text-xl font-black text-text-main flex items-center">
-                <Activity className="w-5 h-5 text-primary mr-2" />
-                İşlem Detayları
-              </h3>
+              <div>
+                <h3 className="text-xl font-black text-text-main flex items-center">
+                  <Activity className="w-5 h-5 text-primary mr-2" />
+                  İşlem Detayları
+                </h3>
+                <p className="mt-1 text-sm font-semibold text-slate-500">Eski ve yeni değerler okunabilir şekilde karşılaştırılır.</p>
+              </div>
               <button 
                 onClick={() => setExpanded(false)}
                 className="p-2 hover:bg-gray-100 rounded-full text-gray-500 transition-colors"
@@ -176,78 +363,7 @@ const LogDetails = ({ detailsStr }: { detailsStr: string }) => {
             </div>
             
             <div className="p-6 overflow-y-auto">
-                <div className="text-left grid grid-cols-1 gap-4">
-                  {(details.name || details.after?.name || details.before?.name) && (
-                    <div className="bg-primary/5 border border-primary/20 p-4 rounded-xl flex flex-col sm:flex-row gap-4 mb-2">
-                       <div>
-                         <div className="text-xs text-primary font-bold uppercase mb-1">Ürün İsmi</div>
-                         <div className="text-sm font-bold text-gray-800">{String(details.name || details.after?.name || details.before?.name)}</div>
-                       </div>
-                       {(details.sku || details.after?.sku || details.before?.sku) && (
-                         <div>
-                           <div className="text-xs text-primary font-bold uppercase mb-1">Stok Kodu (SKU)</div>
-                           <div className="text-sm font-bold text-gray-800">{String(details.sku || details.after?.sku || details.before?.sku)}</div>
-                         </div>
-                       )}
-                    </div>
-                  )}
-
-                  {details.before && details.after ? (
-                     <div className="bg-white border text-sm border-gray-200 rounded-xl overflow-hidden mb-4">
-                       <div className="bg-gray-50 px-4 py-3 border-b border-gray-200 font-bold text-gray-800">Değişiklikler</div>
-                       <div className="divide-y divide-gray-100">
-                         {diffs.length > 0 ? (
-                           diffs.map(diff => {
-                             if (diff.isSpecialToken === 'image_update') {
-                               return (
-                                 <div key={diff.key} className="p-4 flex items-center justify-center bg-blue-50/50">
-                                   <div className="text-blue-700 font-bold text-sm bg-blue-100 px-4 py-2 rounded-lg inline-block">
-                                     🖼️ Görseller güncellendi
-                                   </div>
-                                 </div>
-                               );
-                             }
-                             return (
-                             <div key={diff.key} className="p-4 flex flex-col sm:flex-row sm:items-start gap-2">
-                               <div className="font-mono text-xs font-bold text-gray-500 w-32 shrink-0 pt-1">{diff.key}</div>
-                               <div className="flex-1 flex flex-col sm:flex-row sm:items-center gap-3">
-                                 <div className="bg-red-50 text-red-700 px-3 py-2 rounded-lg text-xs font-mono break-all flex-1 border border-red-100 relative min-h-[36px]">
-                                    <span className="text-[10px] uppercase font-bold text-red-500/80 absolute -top-2 left-2 bg-red-50 px-1">Önceki</span>
-                                    <div className="mt-1 whitespace-pre-wrap">{diff.old === null || diff.old === undefined ? 'null' : (typeof diff.old === 'object' ? JSON.stringify(diff.old, null, 2) : String(diff.old))}</div>
-                                 </div>
-                                 <ArrowRight className="w-4 h-4 text-gray-400 hidden sm:block shrink-0" />
-                                 <div className="bg-green-50 text-green-700 px-3 py-2 rounded-lg text-xs font-mono break-all flex-1 border border-green-100 relative min-h-[36px]">
-                                    <span className="text-[10px] uppercase font-bold text-green-500/80 absolute -top-2 left-2 bg-green-50 px-1">Sonraki</span>
-                                    <div className="mt-1 whitespace-pre-wrap">{diff.new === null || diff.new === undefined ? 'null' : (typeof diff.new === 'object' ? JSON.stringify(diff.new, null, 2) : String(diff.new))}</div>
-                                 </div>
-                               </div>
-                             </div>
-                             );
-                           })
-                         ) : (
-                           <div className="p-4 text-center text-gray-500 text-sm">
-                             Kayıtlı veride bir değişiklik bulunamadı (sadece güncellenme tarihi değişmiş olabilir).
-                           </div>
-                         )}
-                       </div>
-                     </div>
-                  ) : (
-                    <>
-                      {details.before && renderSection("Düzenlenmeden Önce (Old)", details.before)}
-                      {details.after && renderSection("Düzenlendikten Sonra (New)", details.after)}
-                    </>
-                  )}
-                  
-                  {(() => {
-                    const extraDetails = { ...details };
-                    delete extraDetails.before;
-                    delete extraDetails.after;
-                    if (Object.keys(extraDetails).length > 0) {
-                      return renderSection("Ek Bilgiler", extraDetails);
-                    }
-                    return null;
-                  })()}
-                </div>
+              {renderContent()}
             </div>
             
             <div className="px-6 py-4 border-t border-border-color flex justify-end">
@@ -305,10 +421,11 @@ export default function ActivityLogs() {
           <div className="text-center py-16 text-text-muted font-bold text-lg">Kayıt bulunamadı.</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse min-w-[800px]">
+            <table className="w-full text-left border-collapse min-w-[950px]">
               <thead>
                 <tr className="border-b-2 border-border-color">
                   <th className="pb-4 pt-2 px-4 font-black text-xs text-text-muted uppercase tracking-wider">Tarih</th>
+                  <th className="pb-4 pt-2 px-4 font-black text-xs text-text-muted uppercase tracking-wider">Kullanıcı</th>
                   <th className="pb-4 pt-2 px-4 font-black text-xs text-text-muted uppercase tracking-wider">İşlem</th>
                   <th className="pb-4 pt-2 px-4 font-black text-xs text-text-muted uppercase tracking-wider">Tür</th>
                   <th className="pb-4 pt-2 px-4 font-black text-xs text-text-muted uppercase tracking-wider">Değişiklik</th>
@@ -335,7 +452,7 @@ export default function ActivityLogs() {
                       <React.Fragment key={log.id}>
                         {isNewDate && (
                           <tr className="bg-gray-100/50">
-                            <td colSpan={5} className="py-2 px-4 font-bold text-gray-600 text-xs text-center border-y border-gray-200">
+                            <td colSpan={6} className="py-2 px-4 font-bold text-gray-600 text-xs text-center border-y border-gray-200">
                               {logDate}
                             </td>
                           </tr>
@@ -345,6 +462,12 @@ export default function ActivityLogs() {
                             <div className="flex items-center space-x-2">
                               <Clock className="w-3 h-3" />
                               <span>{new Date(log.created_at).toLocaleTimeString('tr-TR')}</span>
+                            </div>
+                          </td>
+                          <td className="py-4 px-4 whitespace-nowrap">
+                            <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-bg-main border border-border-color rounded-full text-xs font-black text-text-main">
+                              <UserRound className="w-3 h-3 text-primary" />
+                              <span>{log.username || 'Sistem'}</span>
                             </div>
                           </td>
                           <td className="py-4 px-4">

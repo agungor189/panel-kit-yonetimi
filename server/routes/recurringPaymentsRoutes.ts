@@ -8,6 +8,24 @@ import { v4 as uuidv4 } from "uuid";
 export function createRecurringPaymentsRouter(db: any) {
   const router = express.Router();
 
+  const insertActivity = (req: express.Request | undefined, action: string, entityType: string, entityId: string, details?: any) => {
+    const actor = (req as any)?.user;
+    try {
+      db.prepare(`
+        INSERT INTO activity_logs (id, action, entity_type, entity_id, details, user_id, actor_username)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        uuidv4(),
+        action,
+        entityType,
+        entityId,
+        details ? JSON.stringify(details) : null,
+        actor?.id || null,
+        actor?.username || null,
+      );
+    } catch (_) {}
+  };
+
   // Helper to get active exchange rate
   const getExchangeRate = () => {
     try {
@@ -66,12 +84,7 @@ export function createRecurringPaymentsRouter(db: any) {
         p.related_party || null, p.document_required ? 1 : 0, p.notes || ''
       );
 
-      // Log activity
-      try {
-        db.prepare(`INSERT INTO activity_logs (id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)`).run(
-          uuidv4(), 'CREATE', 'recurring_payment_plan', id, JSON.stringify(p)
-        );
-      } catch (e) {}
+      insertActivity(req, 'CREATE', 'recurring_payment_plan', id, p);
 
       res.status(201).json({ success: true, id });
     } catch (error: any) {
@@ -85,11 +98,7 @@ export function createRecurringPaymentsRouter(db: any) {
       db.prepare("DELETE FROM recurring_payment_plans WHERE id = ?").run(req.params.id);
       db.prepare("DELETE FROM recurring_payment_occurrences WHERE recurring_payment_id = ?").run(req.params.id);
       
-      try {
-        db.prepare(`INSERT INTO activity_logs (id, action, entity_type, entity_id) VALUES (?, ?, ?, ?)`).run(
-          uuidv4(), 'DELETE', 'recurring_payment_plan', req.params.id
-        );
-      } catch (e) {}
+      insertActivity(req, 'DELETE', 'recurring_payment_plan', req.params.id);
 
       res.json({ success: true });
     } catch (error: any) {
@@ -244,7 +253,7 @@ export function createRecurringPaymentsRouter(db: any) {
       let count = 0;
       db.transaction(() => {
         for (const o of dueOccurrences) {
-          processSingleOccurrence(o);
+          processSingleOccurrence(o, req);
           count++;
         }
       })();
@@ -255,7 +264,7 @@ export function createRecurringPaymentsRouter(db: any) {
     }
   });
 
-  const processSingleOccurrence = (occ: any) => {
+  const processSingleOccurrence = (occ: any, req?: express.Request) => {
     // 1. Create expense
     const expenseId = uuidv4();
     const activeRate = getExchangeRate();
@@ -288,12 +297,7 @@ export function createRecurringPaymentsRouter(db: any) {
       WHERE id = ?
     `).run(expenseId, occ.id);
 
-    // Log internally
-    try {
-      db.prepare(`INSERT INTO activity_logs (id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)`).run(
-        uuidv4(), 'PROCESS', 'recurring_occurrence', occ.id, JSON.stringify({ expense_id: expenseId })
-      );
-    } catch(e) {}
+    insertActivity(req, 'PROCESS', 'recurring_occurrence', occ.id, { expense_id: expenseId });
   };
 
   // POST process single
@@ -309,7 +313,7 @@ export function createRecurringPaymentsRouter(db: any) {
       if (!occ || occ.status === 'processed') return res.status(400).json({ error: 'Cannot process this occurrence' });
 
       db.transaction(() => {
-        processSingleOccurrence(occ);
+        processSingleOccurrence(occ, req);
       })();
       res.json({ success: true });
     } catch(error: any) {
@@ -321,6 +325,7 @@ export function createRecurringPaymentsRouter(db: any) {
   router.post("/occurrences/:id/skip", (req, res) => {
     try {
       db.prepare("UPDATE recurring_payment_occurrences SET status = 'skipped' WHERE id = ?").run(req.params.id);
+      insertActivity(req, 'SKIP', 'recurring_occurrence', req.params.id);
       res.json({ success: true });
     } catch(error: any) {
       res.status(500).json({ error: error.message });
@@ -331,6 +336,7 @@ export function createRecurringPaymentsRouter(db: any) {
   router.post("/occurrences/:id/cancel", (req, res) => {
     try {
       db.prepare("UPDATE recurring_payment_occurrences SET status = 'cancelled' WHERE id = ?").run(req.params.id);
+      insertActivity(req, 'CANCEL', 'recurring_occurrence', req.params.id);
       res.json({ success: true });
     } catch(error: any) {
       res.status(500).json({ error: error.message });

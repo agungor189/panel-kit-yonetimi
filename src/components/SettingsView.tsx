@@ -9,11 +9,17 @@ import {
   CheckCircle2,
   Plus,
   Trash2,
-  ListFilter
+  ListFilter,
+  Users,
+  UserPlus,
+  RotateCcw,
+  ShieldCheck,
+  Power
 } from 'lucide-react';
 import { useCurrency } from '../CurrencyContext';
 import { api } from '../lib/api';
-import { Settings } from '../types';
+import { useAuth } from '../App';
+import { Settings, type ManagedUser, type UserRole } from '../types';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -26,6 +32,7 @@ interface SettingsViewProps {
 }
 
 export default function SettingsView({ onUpdate }: SettingsViewProps) {
+  const { role } = useAuth();
   const { refreshRate, activeRate } = useCurrency();
   const [exchangeRateInfo, setExchangeRateInfo] = useState<any>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -36,15 +43,28 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
   const [restoreProgress, setRestoreProgress] = useState<{ percentage: number; text: string } | null>(null);
   const [confirmRestoreFile, setConfirmRestoreFile] = useState<File | null>(null);
   const [confirmInputText, setConfirmInputText] = useState("");
+  const [users, setUsers] = useState<ManagedUser[]>([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [newUser, setNewUser] = useState<{ username: string; password: string; role: UserRole }>({
+    username: '',
+    password: '',
+    role: 'user',
+  });
+  const [resetPasswords, setResetPasswords] = useState<Record<string, string>>({});
+
+  const isAdmin = role === 'admin';
 
   useEffect(() => {
     loadSettings();
     loadExchangeRate();
   }, []);
 
+  useEffect(() => {
+    if (isAdmin) loadUsers();
+  }, [isAdmin]);
+
   const loadExchangeRate = async () => {
     try {
-      const data = await api.get('/api/exchange-rate'); // actually the base is already /api, so api.get('/exchange-rate')
       setExchangeRateInfo(await api.get('/exchange-rate'));
     } catch(e) {}
   };
@@ -68,6 +88,18 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
       setSettings(data);
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const loadUsers = async () => {
+    try {
+      setUsersLoading(true);
+      const data = await api.get('/users');
+      setUsers(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setUsersLoading(false);
     }
   };
 
@@ -111,6 +143,64 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
       ...settings,
       [key]: currentList.filter(c => c !== value)
     });
+  };
+
+  const handleCreateUser = async () => {
+    const username = newUser.username.trim();
+    if (username.length < 3 || newUser.password.length < 8) {
+      alert("Kullanıcı adı en az 3, şifre en az 8 karakter olmalıdır.");
+      return;
+    }
+
+    try {
+      await api.post('/users', {
+        username,
+        password: newUser.password,
+        role: newUser.role,
+        is_active: 1,
+        must_change_password: 1,
+      });
+      setNewUser({ username: '', password: '', role: 'user' });
+      await loadUsers();
+    } catch (err: any) {
+      alert(err.message || "Kullanıcı oluşturulamadı.");
+    }
+  };
+
+  const updateUser = async (user: ManagedUser, patch: Partial<ManagedUser>) => {
+    try {
+      await api.put(`/users/${user.id}`, {
+        username: user.username,
+        role: patch.role ?? user.role,
+        is_active: patch.is_active ?? user.is_active,
+        must_change_password: patch.must_change_password ?? user.must_change_password,
+        notes: patch.notes ?? user.notes ?? '',
+      });
+      await loadUsers();
+    } catch (err: any) {
+      alert(err.message || "Kullanıcı güncellenemedi.");
+      await loadUsers();
+    }
+  };
+
+  const resetUserPassword = async (user: ManagedUser) => {
+    const password = resetPasswords[user.id] || '';
+    if (password.length < 8) {
+      alert("Yeni şifre en az 8 karakter olmalıdır.");
+      return;
+    }
+
+    try {
+      await api.post(`/users/${user.id}/reset-password`, {
+        password,
+        must_change_password: 1,
+      });
+      setResetPasswords(prev => ({ ...prev, [user.id]: '' }));
+      await loadUsers();
+      alert(`${user.username} için şifre sıfırlandı.`);
+    } catch (err: any) {
+      alert(err.message || "Şifre sıfırlanamadı.");
+    }
   };
 
   if (!settings) return null;
@@ -307,6 +397,155 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
             </div>
          </div>
       </div>
+
+      {isAdmin && (
+        <div className="card overflow-hidden mt-8">
+          <div className="p-6 lg:p-8 border-b border-border-color">
+            <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4">
+              <div>
+                <h3 className="text-xs font-bold text-text-muted uppercase tracking-widest flex items-center">
+                  <Users className="w-4 h-4 mr-3 text-primary" />
+                  Kullanıcı Yönetimi
+                </h3>
+                <p className="text-xs text-text-muted mt-2">Kullanıcı hesabı, rol, aktiflik ve zorunlu şifre değiştirme durumlarını yönetin.</p>
+              </div>
+              <button
+                onClick={loadUsers}
+                disabled={usersLoading}
+                className="px-4 py-2 bg-bg-main border border-border-color text-text-main rounded-xl text-[11px] font-bold uppercase tracking-widest hover:bg-primary/5 transition-all"
+              >
+                {usersLoading ? 'Yükleniyor...' : 'Listeyi Yenile'}
+              </button>
+            </div>
+          </div>
+
+          <div className="p-6 lg:p-8 border-b border-border-color bg-bg-main/50">
+            <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_160px_auto] gap-3">
+              <input
+                type="text"
+                value={newUser.username}
+                onChange={(e) => setNewUser({ ...newUser, username: e.target.value })}
+                className="form-input text-sm font-bold"
+                placeholder="Kullanıcı adı"
+              />
+              <input
+                type="password"
+                value={newUser.password}
+                onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
+                className="form-input text-sm font-bold"
+                placeholder="Geçici şifre"
+              />
+              <select
+                value={newUser.role}
+                onChange={(e) => setNewUser({ ...newUser, role: e.target.value as UserRole })}
+                className="form-input text-sm font-bold"
+              >
+                <option value="user">user</option>
+                <option value="readonly">readonly</option>
+                <option value="admin">admin</option>
+              </select>
+              <button
+                onClick={handleCreateUser}
+                className="btn-primary h-11 px-5 flex items-center justify-center"
+              >
+                <UserPlus className="w-4 h-4 mr-2" />
+                Ekle
+              </button>
+            </div>
+            <p className="text-[10px] text-text-muted mt-3 font-bold uppercase tracking-tight">Yeni kullanıcı ilk girişte şifresini değiştirmek zorunda kalır.</p>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px] text-left">
+              <thead>
+                <tr className="border-b border-border-color bg-white">
+                  <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">Kullanıcı adı</th>
+                  <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">Rol</th>
+                  <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">Durum</th>
+                  <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">Şifre Zorunluluğu</th>
+                  <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">Oluşturulma</th>
+                  <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">Şifre Sıfırla</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border-color">
+                {users.map((user) => (
+                  <tr key={user.id} className="hover:bg-bg-main/60 transition-colors">
+                    <td className="px-6 py-4">
+                      <div className="font-black text-text-main">{user.username}</div>
+                      <div className="text-[10px] text-text-muted font-bold uppercase tracking-tight">{user.id.slice(0, 8)}</div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <select
+                        value={user.role}
+                        onChange={(e) => updateUser(user, { role: e.target.value as UserRole })}
+                        className="form-input text-xs font-bold py-2"
+                      >
+                        <option value="admin">admin</option>
+                        <option value="user">user</option>
+                        <option value="readonly">readonly</option>
+                      </select>
+                    </td>
+                    <td className="px-6 py-4">
+                      <button
+                        onClick={() => updateUser(user, { is_active: !user.is_active })}
+                        className={cn(
+                          "inline-flex items-center gap-2 px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest border transition-all",
+                          user.is_active
+                            ? "bg-green-50 text-green-700 border-green-100 hover:bg-green-100"
+                            : "bg-red-50 text-red-700 border-red-100 hover:bg-red-100"
+                        )}
+                      >
+                        <Power className="w-3 h-3" />
+                        {user.is_active ? 'Aktif' : 'Pasif'}
+                      </button>
+                    </td>
+                    <td className="px-6 py-4">
+                      <button
+                        onClick={() => updateUser(user, { must_change_password: !user.must_change_password })}
+                        className={cn(
+                          "inline-flex items-center gap-2 px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest border transition-all",
+                          user.must_change_password
+                            ? "bg-amber-50 text-amber-700 border-amber-100 hover:bg-amber-100"
+                            : "bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100"
+                        )}
+                      >
+                        <ShieldCheck className="w-3 h-3" />
+                        {user.must_change_password ? 'Zorunlu' : 'Normal'}
+                      </button>
+                    </td>
+                    <td className="px-6 py-4 text-xs font-bold text-text-muted whitespace-nowrap">
+                      {user.created_at ? new Date(user.created_at).toLocaleDateString('tr-TR') : '-'}
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="password"
+                          value={resetPasswords[user.id] || ''}
+                          onChange={(e) => setResetPasswords(prev => ({ ...prev, [user.id]: e.target.value }))}
+                          className="form-input text-xs py-2 min-w-[150px]"
+                          placeholder="Yeni şifre"
+                        />
+                        <button
+                          onClick={() => resetUserPassword(user)}
+                          className="p-2 bg-primary/10 text-primary hover:bg-primary/20 rounded-xl transition-colors"
+                          title="Şifreyi sıfırla"
+                        >
+                          <RotateCcw className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {!usersLoading && users.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="px-6 py-10 text-center text-sm font-bold text-text-muted">Kullanıcı bulunamadı.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <div className="card overflow-hidden divide-y divide-border-color mt-8 space-y-0">
           <div className="p-6 bg-red-50/50 border border-red-100 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">

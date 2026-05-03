@@ -1,5 +1,17 @@
 export type UserRole = 'admin' | 'user' | 'readonly';
 
+export interface ManagedUser {
+  id: string;
+  username: string;
+  role: UserRole;
+  is_active: boolean;
+  must_change_password: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+  last_login_at?: string | null;
+  notes?: string;
+}
+
 export interface Product {
   id: string;
   name: string;

@@ -14,7 +14,10 @@ const buildQuery = (params?: any) => {
 
 export const dashboardApi = {
   getWidgets: () => api.get('/dashboard/widgets'),
+  getSummary: () => api.get('/dashboard-summary'),
+  createWidget: (widget: any) => api.post('/dashboard/widgets', widget),
   updateWidgets: (widgets: any[]) => api.put('/dashboard/widgets', widgets),
+  deleteWidget: (id: string) => api.delete(`/dashboard/widgets/${id}`),
   
   // Payment Widgets
   getPaymentSummary: (params?: any) => api.get(`/dashboard/widgets/payments/summary${buildQuery(params)}`),
@@ -30,4 +33,3 @@ export const dashboardApi = {
   getProductSalesTrend: (params?: any) => api.get(`/dashboard/widgets/product-analysis/sales-trend${buildQuery(params)}`),
   getProductReorderSummary: (params?: any) => api.get(`/dashboard/widgets/product-analysis/reorder-summary${buildQuery(params)}`),
 };
-
