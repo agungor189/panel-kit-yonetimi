@@ -247,6 +247,31 @@ export function applySchema(db: Database.Database): void {
       FOREIGN KEY(sale_id) REFERENCES sales(id) ON DELETE SET NULL
     );
 
+    CREATE TABLE IF NOT EXISTS marketplace_order_lines (
+      id                       TEXT PRIMARY KEY,
+      marketplace_order_id     TEXT NOT NULL,
+      platform                 TEXT NOT NULL,
+      environment              TEXT NOT NULL DEFAULT 'stage',
+      external_line_id          TEXT NOT NULL,
+      product_name             TEXT,
+      barcode                  TEXT,
+      stock_code               TEXT,
+      merchant_sku             TEXT,
+      quantity                 INTEGER DEFAULT 0,
+      unit_price               REAL DEFAULT 0,
+      line_total               REAL DEFAULT 0,
+      status                   TEXT,
+      raw_json                 TEXT NOT NULL,
+      matched_product_id       TEXT,
+      match_method             TEXT,
+      match_confidence         REAL DEFAULT 0,
+      created_at               DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at               DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(marketplace_order_id, external_line_id),
+      FOREIGN KEY(marketplace_order_id) REFERENCES marketplace_orders(id) ON DELETE CASCADE,
+      FOREIGN KEY(matched_product_id) REFERENCES products(id) ON DELETE SET NULL
+    );
+
     CREATE TABLE IF NOT EXISTS panel_api_keys (
       id           TEXT PRIMARY KEY,
       name         TEXT NOT NULL,
@@ -491,6 +516,14 @@ export function applySchema(db: Database.Database): void {
       ON marketplace_orders(platform, environment, external_order_id);
     CREATE INDEX IF NOT EXISTS idx_marketplace_orders_sale
       ON marketplace_orders(sale_id);
+    CREATE INDEX IF NOT EXISTS idx_marketplace_order_lines_order
+      ON marketplace_order_lines(marketplace_order_id);
+    CREATE INDEX IF NOT EXISTS idx_marketplace_order_lines_match
+      ON marketplace_order_lines(matched_product_id);
+    CREATE INDEX IF NOT EXISTS idx_marketplace_order_lines_barcode
+      ON marketplace_order_lines(platform, environment, barcode);
+    CREATE INDEX IF NOT EXISTS idx_marketplace_order_lines_stock_code
+      ON marketplace_order_lines(platform, environment, stock_code);
 
     CREATE INDEX IF NOT EXISTS idx_transactions_type_date   ON transactions(type, date);
     CREATE INDEX IF NOT EXISTS idx_transactions_platform    ON transactions(platform);

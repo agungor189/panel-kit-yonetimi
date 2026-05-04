@@ -4099,6 +4099,49 @@ async function startServer() {
     ''
   ).trim();
 
+  const cleanMarketplaceIdentifier = (value: unknown) => String(value || '').trim();
+
+  const pickFirstText = (...values: unknown[]) => {
+    for (const value of values) {
+      const text = cleanMarketplaceIdentifier(value);
+      if (text) return text;
+    }
+    return '';
+  };
+
+  const pickFirstNumber = (...values: unknown[]) => {
+    for (const value of values) {
+      const numberValue = Number(value);
+      if (Number.isFinite(numberValue) && numberValue > 0) return numberValue;
+    }
+    return 0;
+  };
+
+  const findMatchingProductForMarketplaceLine = (line: { barcode: string; stock_code: string; merchant_sku: string }) => {
+    const candidates = [
+      { method: 'barcode', value: line.barcode, sql: "SELECT id FROM products WHERE barcode = ? COLLATE NOCASE LIMIT 1" },
+      { method: 'sku_stock_code', value: line.stock_code, sql: "SELECT id FROM products WHERE sku = ? COLLATE NOCASE LIMIT 1" },
+      { method: 'sku_merchant_sku', value: line.merchant_sku, sql: "SELECT id FROM products WHERE sku = ? COLLATE NOCASE LIMIT 1" },
+    ];
+
+    for (const candidate of candidates) {
+      if (!candidate.value) continue;
+      const product = db.prepare(candidate.sql).get(candidate.value) as any;
+      if (product) {
+        return { matched_product_id: product.id, match_method: candidate.method, match_confidence: 1 };
+      }
+    }
+
+    return { matched_product_id: null, match_method: null, match_confidence: 0 };
+  };
+
+  const getTrendyolPackageLines = (pkg: any) => {
+    if (Array.isArray(pkg.lines)) return pkg.lines;
+    if (Array.isArray(pkg.items)) return pkg.items;
+    if (Array.isArray(pkg.orderLines)) return pkg.orderLines;
+    return [];
+  };
+
   const normalizeTrendyolPackage = (pkg: any, environment: TrendyolEnvironment) => {
     const shipmentPackageId = getTrendyolPackageId(pkg);
     const externalOrderId = getTrendyolOrderNumber(pkg);
@@ -4127,6 +4170,49 @@ async function startServer() {
       package_created_at: parseTrendyolDate(pkg.orderDate || pkg.createdDate || pkg.packageCreatedDate),
       package_last_modified_at: parseTrendyolDate(pkg.lastModifiedDate || pkg.packageLastModifiedDate || pkg.modifiedDate),
       raw_json: JSON.stringify(pkg),
+    };
+  };
+
+  const normalizeTrendyolLine = (line: any, order: ReturnType<typeof normalizeTrendyolPackage>, index: number) => {
+    const barcode = pickFirstText(line.barcode, line.productBarcode);
+    const stockCode = pickFirstText(line.stockCode, line.stock_code, line.sellerStockCode, line.productCode);
+    const merchantSku = pickFirstText(line.merchantSku, line.merchant_sku, line.sku, line.productCode, stockCode);
+    const quantity = Math.max(1, Math.round(pickFirstNumber(line.quantity, line.amount, line.productQuantity, 1)));
+    const unitPrice = pickFirstNumber(
+      line.lineItemPrice,
+      line.discountedPrice,
+      line.price,
+      line.unitPrice,
+      line.salePrice,
+      line.lineGrossAmount,
+    );
+    const lineTotal = pickFirstNumber(line.lineTotalPrice, line.totalPrice, line.amountPrice, unitPrice * quantity);
+    const externalLineId = pickFirstText(
+      line.lineId,
+      line.id,
+      line.orderLineItemId,
+      line.orderLineId,
+      `${order.shipment_package_id}:${index}:${barcode || stockCode || merchantSku || 'line'}`,
+    );
+    const status = pickFirstText(line.status, line.packageItemStatus, order.status);
+    const match = findMatchingProductForMarketplaceLine({ barcode, stock_code: stockCode, merchant_sku: merchantSku });
+
+    return {
+      id: uuidv4(),
+      marketplace_order_id: '',
+      platform: order.platform,
+      environment: order.environment,
+      external_line_id: externalLineId,
+      product_name: pickFirstText(line.productName, line.name, line.productTitle, line.title),
+      barcode,
+      stock_code: stockCode,
+      merchant_sku: merchantSku,
+      quantity,
+      unit_price: unitPrice,
+      line_total: lineTotal,
+      status,
+      raw_json: JSON.stringify(line),
+      ...match,
     };
   };
 
@@ -4167,7 +4253,7 @@ async function startServer() {
         order.raw_json,
         existing.id,
       );
-      return existing.raw_json === order.raw_json ? 'unchanged' : 'updated';
+      return { id: existing.id as string, state: existing.raw_json === order.raw_json ? 'unchanged' : 'updated' };
     }
 
     db.prepare(`
@@ -4193,7 +4279,107 @@ async function startServer() {
       order.package_last_modified_at,
       order.raw_json,
     );
-    return 'created';
+    return { id: order.id, state: 'created' };
+  };
+
+  const upsertMarketplaceOrderLines = (
+    marketplaceOrderId: string,
+    pkg: any,
+    order: ReturnType<typeof normalizeTrendyolPackage>,
+  ) => {
+    const lines = getTrendyolPackageLines(pkg);
+    const summary = { total: 0, matched: 0, unmatched: 0 };
+    const seenLineIds: string[] = [];
+
+    for (const [index, sourceLine] of lines.entries()) {
+      const line = normalizeTrendyolLine(sourceLine, order, index);
+      if (!line.external_line_id) continue;
+      line.marketplace_order_id = marketplaceOrderId;
+      summary.total++;
+      if (line.matched_product_id) summary.matched++;
+      else summary.unmatched++;
+      seenLineIds.push(line.external_line_id);
+
+      const existing = db.prepare(`
+        SELECT id, matched_product_id, match_method
+        FROM marketplace_order_lines
+        WHERE marketplace_order_id = ? AND external_line_id = ?
+      `).get(marketplaceOrderId, line.external_line_id) as any;
+
+      if (existing) {
+        const keepManualMatch = existing.match_method === 'manual' && existing.matched_product_id;
+        db.prepare(`
+          UPDATE marketplace_order_lines
+          SET product_name = ?,
+              barcode = ?,
+              stock_code = ?,
+              merchant_sku = ?,
+              quantity = ?,
+              unit_price = ?,
+              line_total = ?,
+              status = ?,
+              raw_json = ?,
+              matched_product_id = ?,
+              match_method = ?,
+              match_confidence = ?,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(
+          line.product_name,
+          line.barcode,
+          line.stock_code,
+          line.merchant_sku,
+          line.quantity,
+          line.unit_price,
+          line.line_total,
+          line.status,
+          line.raw_json,
+          keepManualMatch ? existing.matched_product_id : line.matched_product_id,
+          keepManualMatch ? 'manual' : line.match_method,
+          keepManualMatch ? 1 : line.match_confidence,
+          existing.id,
+        );
+      } else {
+        db.prepare(`
+          INSERT INTO marketplace_order_lines (
+            id, marketplace_order_id, platform, environment, external_line_id, product_name, barcode,
+            stock_code, merchant_sku, quantity, unit_price, line_total, status, raw_json,
+            matched_product_id, match_method, match_confidence
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          line.id,
+          line.marketplace_order_id,
+          line.platform,
+          line.environment,
+          line.external_line_id,
+          line.product_name,
+          line.barcode,
+          line.stock_code,
+          line.merchant_sku,
+          line.quantity,
+          line.unit_price,
+          line.line_total,
+          line.status,
+          line.raw_json,
+          line.matched_product_id,
+          line.match_method,
+          line.match_confidence,
+        );
+      }
+    }
+
+    if (seenLineIds.length > 0) {
+      const placeholders = seenLineIds.map(() => '?').join(',');
+      db.prepare(`
+        DELETE FROM marketplace_order_lines
+        WHERE marketplace_order_id = ?
+          AND external_line_id NOT IN (${placeholders})
+          AND COALESCE(match_method, '') != 'manual'
+      `).run(marketplaceOrderId, ...seenLineIds);
+    }
+
+    return summary;
   };
 
   const syncTrendyolShipmentPackages = async (config = getTrendyolConfig()) => {
@@ -4204,7 +4390,16 @@ async function startServer() {
     const windowDays = Math.min(Math.max(Number(config.sync_window_days || 14), 1), 14);
     const endDate = Date.now();
     const startDate = endDate - windowDays * 24 * 60 * 60 * 1000;
-    const summary = { fetched: 0, created: 0, updated: 0, unchanged: 0, environment };
+    const summary = {
+      fetched: 0,
+      created: 0,
+      updated: 0,
+      unchanged: 0,
+      lines: 0,
+      matched_lines: 0,
+      unmatched_lines: 0,
+      environment,
+    };
     let nextCursor = "";
 
     do {
@@ -4230,10 +4425,14 @@ async function startServer() {
         const normalized = normalizeTrendyolPackage(pkg, environment);
         if (!normalized.shipment_package_id || !normalized.external_order_id) continue;
         const result = upsertMarketplaceOrder(normalized);
+        const lineSummary = upsertMarketplaceOrderLines(result.id, pkg, normalized);
         summary.fetched++;
-        if (result === 'created') summary.created++;
-        if (result === 'updated') summary.updated++;
-        if (result === 'unchanged') summary.unchanged++;
+        summary.lines += lineSummary.total;
+        summary.matched_lines += lineSummary.matched;
+        summary.unmatched_lines += lineSummary.unmatched;
+        if (result.state === 'created') summary.created++;
+        if (result.state === 'updated') summary.updated++;
+        if (result.state === 'unchanged') summary.unchanged++;
       }
 
       nextCursor = response?.hasMore ? String(response.nextCursor || '') : '';
@@ -4261,7 +4460,10 @@ async function startServer() {
           SUM(CASE WHEN environment = 'stage' THEN 1 ELSE 0 END) as stage_count,
           SUM(CASE WHEN environment = 'prod' THEN 1 ELSE 0 END) as prod_count,
           MAX(package_last_modified_at) as last_package_at,
-          MAX(updated_at) as last_local_update_at
+          MAX(updated_at) as last_local_update_at,
+          (SELECT COUNT(*) FROM marketplace_order_lines WHERE platform = 'Trendyol') as line_count,
+          (SELECT COUNT(*) FROM marketplace_order_lines WHERE platform = 'Trendyol' AND matched_product_id IS NOT NULL) as matched_line_count,
+          (SELECT COUNT(*) FROM marketplace_order_lines WHERE platform = 'Trendyol' AND matched_product_id IS NULL) as unmatched_line_count
         FROM marketplace_orders
         WHERE platform = 'Trendyol'
       `).get() as any;
@@ -4357,13 +4559,26 @@ async function startServer() {
       const orders = db.prepare(`
         SELECT id, platform, environment, external_order_id, shipment_package_id, status, panel_status,
                customer_name, customer_phone, total_amount, currency, package_created_at,
-               package_last_modified_at, sale_id, imported_at, sync_status, sync_error, created_at, updated_at
+               package_last_modified_at, sale_id, imported_at, sync_status, sync_error, created_at, updated_at,
+               (SELECT COUNT(*) FROM marketplace_order_lines WHERE marketplace_order_id = marketplace_orders.id) as line_count,
+               (SELECT COUNT(*) FROM marketplace_order_lines WHERE marketplace_order_id = marketplace_orders.id AND matched_product_id IS NOT NULL) as matched_line_count,
+               (SELECT COUNT(*) FROM marketplace_order_lines WHERE marketplace_order_id = marketplace_orders.id AND matched_product_id IS NULL) as unmatched_line_count
         FROM marketplace_orders
         WHERE platform = 'Trendyol' AND environment = ?
         ORDER BY datetime(COALESCE(package_last_modified_at, updated_at, created_at)) DESC
         LIMIT ?
       `).all(environment, limit);
-      res.json(orders);
+      const getLines = db.prepare(`
+        SELECT mol.id, mol.external_line_id, mol.product_name, mol.barcode, mol.stock_code, mol.merchant_sku,
+               mol.quantity, mol.unit_price, mol.line_total, mol.status, mol.matched_product_id,
+               mol.match_method, mol.match_confidence, p.title as matched_product_title, p.sku as matched_product_sku,
+               p.barcode as matched_product_barcode
+        FROM marketplace_order_lines mol
+        LEFT JOIN products p ON p.id = mol.matched_product_id
+        WHERE mol.marketplace_order_id = ?
+        ORDER BY mol.created_at ASC, mol.external_line_id ASC
+      `);
+      res.json(orders.map((order: any) => ({ ...order, lines: getLines.all(order.id) })));
     } catch (err: any) {
       res.status(500).json({ success: false, error: { code: 'TRENDYOL_ORDERS_FAILED', message: err.message } });
     }

@@ -129,7 +129,7 @@ Not: R2 erişim anahtarlarını DB içinde saklama; sadece sunucudaki `.env` dos
 
 Trendyol bağlantısı **Entegrasyonlar → API Anahtarları** altında `Trendyol` servisi olarak eklenen şifreli API Key/Secret kaydıyla çalışır. Trendyol ekranında bu anahtar seçilir, ortam `Test / Stage` ya da `Canlı / Production` olarak ayarlanır.
 
-İlk aşamada sistem Trendyol sipariş paketlerini `marketplace_orders` ara tablosuna senkronlar. Bu veri otomatik olarak satışa yazılmaz; barkod/SKU eşleşmesi doğrulandıktan sonra satışa aktarma adımı açılmalıdır.
+İlk aşamada sistem Trendyol sipariş paketlerini `marketplace_orders`, paket ürün satırlarını ise `marketplace_order_lines` ara tablolarına senkronlar. Ürün satırları barkod ve SKU/stockCode üzerinden panel ürünleriyle otomatik eşleştirilmeye çalışılır. Bu veri otomatik olarak satışa yazılmaz; eşleşme ve stok etkisi doğrulandıktan sonra satışa aktarma adımı açılmalıdır.
 
 Test ortamı notları:
 

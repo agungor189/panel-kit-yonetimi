@@ -115,7 +115,7 @@ export default function TrendyolIntegration() {
       const summary = res.summary;
       setMessage({
         type: 'success',
-        text: `Senkron tamamlandı. Çekilen: ${summary.fetched}, yeni: ${summary.created}, güncellenen: ${summary.updated}.`,
+        text: `Senkron tamamlandı. Paket: ${summary.fetched}, satır: ${summary.lines || 0}, eşleşen: ${summary.matched_lines || 0}, eşleşmeyen: ${summary.unmatched_lines || 0}.`,
       });
       await loadStatus();
     } catch (err: any) {
@@ -133,8 +133,6 @@ export default function TrendyolIntegration() {
       </div>
     );
   }
-
-  const selectedKey = status?.keys.find((key) => key.id === config.api_key_id);
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
@@ -190,17 +188,19 @@ export default function TrendyolIntegration() {
         <div className="rounded-2xl border border-border-color bg-white p-5 shadow-sm">
           <div className="text-xs font-black uppercase tracking-wider text-text-muted">Toplam Paket</div>
           <div className="mt-2 text-2xl font-black text-text-main">{Number(status?.stats?.total || 0)}</div>
-          <div className="mt-1 text-xs font-bold text-text-muted">Ara tabloda saklanan Trendyol paketi.</div>
+          <div className="mt-1 text-xs font-bold text-text-muted">{Number(status?.stats?.line_count || 0)} satır kaydı.</div>
+        </div>
+        <div className="rounded-2xl border border-border-color bg-white p-5 shadow-sm">
+          <div className="text-xs font-black uppercase tracking-wider text-text-muted">Ürün Eşleşmesi</div>
+          <div className="mt-2 text-2xl font-black text-text-main">
+            {Number(status?.stats?.matched_line_count || 0)} / {Number(status?.stats?.line_count || 0)}
+          </div>
+          <div className="mt-1 text-xs font-bold text-text-muted">{Number(status?.stats?.unmatched_line_count || 0)} satır eşleşme bekliyor.</div>
         </div>
         <div className="rounded-2xl border border-border-color bg-white p-5 shadow-sm">
           <div className="text-xs font-black uppercase tracking-wider text-text-muted">Son Sync</div>
           <div className="mt-2 text-sm font-black text-text-main">{formatDateTime(status?.last_sync_at)}</div>
           <div className="mt-1 text-xs font-bold text-text-muted">Son paket: {formatDateTime(status?.stats?.last_package_at)}</div>
-        </div>
-        <div className="rounded-2xl border border-border-color bg-white p-5 shadow-sm">
-          <div className="text-xs font-black uppercase tracking-wider text-text-muted">Seçili Anahtar</div>
-          <div className="mt-2 truncate text-sm font-black text-text-main">{selectedKey?.display_name || 'Seçilmedi'}</div>
-          <div className="mt-1 text-xs font-bold text-text-muted">{selectedKey?.seller_id || selectedKey?.merchant_id || 'Seller ID yok'}</div>
         </div>
       </div>
 
@@ -296,11 +296,13 @@ export default function TrendyolIntegration() {
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[900px] text-left text-sm">
+            <table className="w-full min-w-[1180px] text-left text-sm">
               <thead className="bg-slate-50 text-[11px] font-black uppercase tracking-wider text-text-muted">
                 <tr>
                   <th className="px-5 py-4">Sipariş / Paket</th>
                   <th className="px-5 py-4">Müşteri</th>
+                  <th className="px-5 py-4">Ürün Satırları</th>
+                  <th className="px-5 py-4">Eşleşme</th>
                   <th className="px-5 py-4">Tutar</th>
                   <th className="px-5 py-4">Durum</th>
                   <th className="px-5 py-4">Tarih</th>
@@ -317,6 +319,38 @@ export default function TrendyolIntegration() {
                     <td className="px-5 py-4">
                       <div className="font-black text-slate-900">{order.customer_name || '-'}</div>
                       <div className="mt-1 text-xs font-semibold text-slate-500">{order.customer_phone || '-'}</div>
+                    </td>
+                    <td className="px-5 py-4">
+                      <div className="space-y-2">
+                        {(order.lines || []).slice(0, 2).map((line) => (
+                          <div key={line.id} className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                            <div className="line-clamp-1 text-xs font-black text-slate-900" title={line.product_name}>
+                              {line.product_name || 'Ürün adı yok'}
+                            </div>
+                            <div className="mt-1 flex flex-wrap gap-2 text-[11px] font-bold text-slate-500">
+                              <span>{line.quantity || 0} adet</span>
+                              {line.barcode && <span>Barkod: {line.barcode}</span>}
+                              {line.stock_code && <span>Stok: {line.stock_code}</span>}
+                            </div>
+                          </div>
+                        ))}
+                        {(order.lines?.length || 0) > 2 && (
+                          <div className="text-xs font-black text-primary">+{(order.lines?.length || 0) - 2} satır daha</div>
+                        )}
+                        {(order.lines?.length || 0) === 0 && <span className="text-xs font-bold text-slate-400">Satır yok</span>}
+                      </div>
+                    </td>
+                    <td className="px-5 py-4">
+                      <div className="text-sm font-black text-slate-900">
+                        {Number(order.matched_line_count || 0)} / {Number(order.line_count || 0)}
+                      </div>
+                      {Number(order.unmatched_line_count || 0) > 0 ? (
+                        <span className="mt-2 inline-flex rounded-full bg-amber-50 px-3 py-1 text-[11px] font-black text-amber-700">Eşleşme Bekliyor</span>
+                      ) : Number(order.line_count || 0) > 0 ? (
+                        <span className="mt-2 inline-flex rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-black text-emerald-700">Hazır</span>
+                      ) : (
+                        <span className="mt-2 inline-flex rounded-full bg-slate-100 px-3 py-1 text-[11px] font-black text-slate-600">Satır Yok</span>
+                      )}
                     </td>
                     <td className="px-5 py-4 font-black text-slate-900">{formatAmount(order.total_amount, order.currency)}</td>
                     <td className="px-5 py-4">
@@ -340,7 +374,7 @@ export default function TrendyolIntegration() {
                 ))}
                 {orders.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="px-5 py-16 text-center text-text-muted">
+                    <td colSpan={8} className="px-5 py-16 text-center text-text-muted">
                       <ShoppingBag className="mx-auto mb-3 h-10 w-10 text-slate-300" />
                       <div className="font-black">Henüz Trendyol paketi senkronlanmadı.</div>
                       <div className="mt-1 text-sm font-semibold">Bağlantıyı test edip “Siparişleri Senkronla” ile başlayın.</div>

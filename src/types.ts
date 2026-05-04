@@ -227,8 +227,31 @@ export interface TrendyolMarketplaceOrder {
   imported_at?: string | null;
   sync_status?: string;
   sync_error?: string | null;
+  line_count?: number;
+  matched_line_count?: number;
+  unmatched_line_count?: number;
+  lines?: TrendyolMarketplaceOrderLine[];
   created_at?: string;
   updated_at?: string;
+}
+
+export interface TrendyolMarketplaceOrderLine {
+  id: string;
+  external_line_id: string;
+  product_name?: string;
+  barcode?: string;
+  stock_code?: string;
+  merchant_sku?: string;
+  quantity?: number;
+  unit_price?: number;
+  line_total?: number;
+  status?: string;
+  matched_product_id?: string | null;
+  match_method?: string | null;
+  match_confidence?: number;
+  matched_product_title?: string | null;
+  matched_product_sku?: string | null;
+  matched_product_barcode?: string | null;
 }
 
 export interface TrendyolStatus {
@@ -240,6 +263,9 @@ export interface TrendyolStatus {
     prod_count?: number;
     last_package_at?: string | null;
     last_local_update_at?: string | null;
+    line_count?: number;
+    matched_line_count?: number;
+    unmatched_line_count?: number;
   };
   last_sync_at?: string | null;
   last_sync_summary?: {
@@ -247,6 +273,9 @@ export interface TrendyolStatus {
     created: number;
     updated: number;
     unchanged: number;
+    lines?: number;
+    matched_lines?: number;
+    unmatched_lines?: number;
     environment: 'stage' | 'prod';
   } | null;
 }
