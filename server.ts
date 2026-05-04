@@ -1052,8 +1052,40 @@ function buildExpenseCashDescription(expense: any): string {
   return detail ? `Gider: ${category} - ${detail}` : `Gider: ${category}`;
 }
 
+function normalizeFormValue(value: any): any {
+  if (value === undefined || value === '') return null;
+  if (value instanceof Date) return value.toISOString();
+  if (value && typeof value === 'object' && !Buffer.isBuffer(value)) {
+    return value.id ?? value.value ?? value.key ?? value.name ?? value.label ?? null;
+  }
+  return value;
+}
+
+function toDbText(value: any, fallback: string | null = null): string | null {
+  const normalized = normalizeFormValue(value);
+  if (normalized === null || normalized === undefined || normalized === '') return fallback;
+  return String(normalized);
+}
+
+function toDbNumber(value: any, fallback = 0): number {
+  const normalized = normalizeFormValue(value);
+  if (normalized === null || normalized === undefined || normalized === '') return fallback;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function toDbFlag(value: any): number {
+  const normalized = normalizeFormValue(value);
+  if (typeof normalized === 'string') {
+    const lower = normalized.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on', 'evet'].includes(lower)) return 1;
+    if (['0', 'false', 'no', 'off', 'hayır', 'hayir'].includes(lower)) return 0;
+  }
+  return normalized ? 1 : 0;
+}
+
 function getExpensePaymentAccountId(expense: any): string | null {
-  return expense?.payer_person_id || expense?.cash_account_id || null;
+  return toDbText(expense?.payer_person_id) || toDbText(expense?.cash_account_id) || null;
 }
 
 function ensureActiveCashAccount(accountId: string): any {
@@ -2117,6 +2149,23 @@ async function startServer() {
         `).get(...params) as any;
         return Number(row?.total || 0);
       };
+      const sumActiveSaleCashForRange = (start?: Date | null, end?: Date | null) => {
+        const clauses = [
+          "ct.type = 'IN'",
+          "ct.source_type = 'sale'",
+          "COALESCE(ct.is_deleted, 0) = 0",
+          "s.status NOT IN ('İptal Edildi', 'İade Edildi')",
+        ];
+        const params: string[] = [];
+        addDateRange(clauses, params, "COALESCE(ct.transaction_date, ct.created_at)", start, end);
+        const row = db.prepare(`
+          SELECT SUM(ct.amount) as total
+          FROM cash_transactions ct
+          JOIN sales s ON s.id = ct.source_id
+          WHERE ${clauses.join(" AND ")}
+        `).get(...params) as any;
+        return Number(row?.total || 0);
+      };
 
       const now = new Date();
       const year = now.getFullYear();
@@ -2163,7 +2212,7 @@ async function startServer() {
          WHERE a.type = 'platform'
       `).get() as any;
 
-      const monthlyCashIn = sumCashForRange("IN", "sale", periodStart, periodEnd);
+      const monthlyCashIn = sumActiveSaleCashForRange(periodStart, periodEnd);
       const monthlyCashOut = sumCashForRange("OUT", "expense", periodStart, periodEnd);
 
       const chartPendingOccurrences = db.prepare(`
@@ -2242,7 +2291,7 @@ async function startServer() {
       };
 
       // Charts: 6 Month History
-      const monthlyExpenseClauses = ["type = 'Expense'"];
+      const monthlyExpenseClauses = ["type = 'Expense'", "COALESCE(is_deleted, 0) = 0"];
       const monthlyExpenseParams: string[] = [];
       addDateRange(monthlyExpenseClauses, monthlyExpenseParams, "COALESCE(date, created_at)", periodStart, periodEnd);
       const monthlySalesClauses = ["status NOT IN ('İptal Edildi', 'İade Edildi')"];
@@ -2774,30 +2823,49 @@ async function startServer() {
     
     try {
       db.transaction(() => {
-        const activeRate = exchange_rate || getActiveExchangeRate();
+        const expenseDate = toDbText(date, new Date().toISOString())!;
+        const expenseCategory = toDbText(category);
+        const expenseCurrency = (toDbText(currency, 'TRY') || 'TRY').toUpperCase();
+        const expenseAmount = toDbNumber(amount, NaN);
+        const activeRate = toDbNumber(exchange_rate, getActiveExchangeRate());
         if (!activeRate || activeRate <= 0) throw new Error("Döviz kuru geçerli değil.");
         
-        const actualAccountId = payer_person_id || cash_account_id;
+        const actualAccountId = toDbText(payer_person_id) || toDbText(cash_account_id);
         if (!actualAccountId) throw new Error("Gider eklerken ödeme hesabı veya ödeyen kişi seçimi zorunludur.");
         const account = db.prepare("SELECT * FROM cash_accounts WHERE id = ?").get(actualAccountId) as any;
         if (!account) throw new Error("Geçersiz hesap.");
         if (account.is_active === 0) throw new Error("Seçili hesap pasif.");
-        if (amount <= 0) throw new Error("Tutar 0'dan büyük olmalıdır.");
+        if (!Number.isFinite(expenseAmount) || expenseAmount <= 0) throw new Error("Tutar 0'dan büyük olmalıdır.");
 
-        insertExpenseCashTransaction({
+        const expensePayload = {
           id: txId,
-          date: date || new Date().toISOString(),
-          category,
-          title,
-          note,
-          description,
-          reference_number,
-          amount,
-          currency: currency || 'TRY',
+          date: expenseDate,
+          category: expenseCategory,
+          platform: toDbText(platform),
+          amount: expenseAmount,
+          note: toDbText(note),
+          reference_number: toDbText(reference_number),
+          title: toDbText(title),
+          description: toDbText(description),
+          payment_method: toDbText(payment_method),
+          supplier: toDbText(supplier),
+          invoice_number: toDbText(invoice_number),
+          cash_account_id: toDbText(cash_account_id),
+          currency: expenseCurrency,
           exchange_rate_at_transaction: activeRate,
-          payer_person_id,
-          cash_account_id,
-        });
+          amount_try: amount_try !== undefined && amount_try !== null && amount_try !== ''
+            ? toDbNumber(amount_try, expenseCurrency === 'USD' ? expenseAmount * activeRate : expenseAmount)
+            : (expenseCurrency === 'USD' ? expenseAmount * activeRate : expenseAmount),
+          payer_person_id: toDbText(payer_person_id),
+          will_be_refunded: toDbFlag(will_be_refunded),
+          refund_status: toDbText(refund_status),
+          is_invoice: toDbFlag(is_invoice),
+          invoice_name: toDbText(invoice_name),
+          is_stock_related: toDbFlag(is_stock_related),
+          distribute_to_product_cost: toDbFlag(distribute_to_product_cost),
+        };
+
+        insertExpenseCashTransaction(expensePayload);
 
         db.prepare(`
           INSERT INTO transactions (
@@ -2806,11 +2874,11 @@ async function startServer() {
           )
           VALUES (?, ?, 'Expense', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
-          txId, date || new Date().toISOString(), category, platform, amount, note, reference_number, title, description, payment_method, supplier, invoice_number, cash_account_id, activeRate,
-          currency || 'TRY', amount_try || (currency === 'USD' ? amount * activeRate : amount), payer_person_id, will_be_refunded || 0, refund_status, is_invoice || 0, invoice_name, is_stock_related || 0, distribute_to_product_cost || 0
+          txId, expensePayload.date, expensePayload.category, expensePayload.platform, expensePayload.amount, expensePayload.note, expensePayload.reference_number, expensePayload.title, expensePayload.description, expensePayload.payment_method, expensePayload.supplier, expensePayload.invoice_number, expensePayload.cash_account_id, expensePayload.exchange_rate_at_transaction,
+          expensePayload.currency, expensePayload.amount_try, expensePayload.payer_person_id, expensePayload.will_be_refunded, expensePayload.refund_status, expensePayload.is_invoice, expensePayload.invoice_name, expensePayload.is_stock_related, expensePayload.distribute_to_product_cost
         );
         
-        logActivity('CREATE', 'expense', txId, { after: req.body }, req.user?.id);
+        logActivity('CREATE', 'expense', txId, { after: expensePayload }, req.user?.id);
       })();
       res.json({ id: txId, success: true });
     } catch (err: any) {
@@ -2841,41 +2909,45 @@ async function startServer() {
           throw err;
         }
 
-        const nextAmount = amount !== undefined ? Number(amount) : Number(beforeState.amount);
+        const nextAmount = amount !== undefined ? toDbNumber(amount, NaN) : Number(beforeState.amount);
         if (!Number.isFinite(nextAmount) || nextAmount <= 0) throw new Error("Tutar 0'dan büyük olmalıdır.");
 
         const hasField = (name: string) => Object.prototype.hasOwnProperty.call(req.body, name);
-        const nextCurrency = hasField('currency') ? (currency || 'TRY') : (beforeState.currency || 'TRY');
-        const activeRate = Number(exchange_rate || beforeState.exchange_rate_at_transaction || getActiveExchangeRate());
+        const nextCurrency = hasField('currency')
+          ? ((toDbText(currency, 'TRY') || 'TRY').toUpperCase())
+          : (beforeState.currency || 'TRY');
+        const activeRate = hasField('exchange_rate')
+          ? toDbNumber(exchange_rate, Number(beforeState.exchange_rate_at_transaction || getActiveExchangeRate()))
+          : Number(beforeState.exchange_rate_at_transaction || getActiveExchangeRate());
         if (!Number.isFinite(activeRate) || activeRate <= 0) throw new Error("Döviz kuru geçerli değil.");
 
         const nextExpense = {
           ...beforeState,
           id: req.params.id,
-          date: hasField('date') ? (date || new Date().toISOString()) : (beforeState.date || new Date().toISOString()),
-          category: hasField('category') ? category : beforeState.category,
-          platform: hasField('platform') ? platform : beforeState.platform,
+          date: hasField('date') ? (toDbText(date, new Date().toISOString()) || new Date().toISOString()) : (beforeState.date || new Date().toISOString()),
+          category: hasField('category') ? toDbText(category) : beforeState.category,
+          platform: hasField('platform') ? toDbText(platform) : beforeState.platform,
           amount: nextAmount,
-          note: hasField('note') ? note : beforeState.note,
-          reference_number: hasField('reference_number') ? reference_number : beforeState.reference_number,
-          title: hasField('title') ? title : beforeState.title,
-          description: hasField('description') ? description : beforeState.description,
-          payment_method: hasField('payment_method') ? payment_method : beforeState.payment_method,
-          supplier: hasField('supplier') ? supplier : beforeState.supplier,
-          invoice_number: hasField('invoice_number') ? invoice_number : beforeState.invoice_number,
+          note: hasField('note') ? toDbText(note) : beforeState.note,
+          reference_number: hasField('reference_number') ? toDbText(reference_number) : beforeState.reference_number,
+          title: hasField('title') ? toDbText(title) : beforeState.title,
+          description: hasField('description') ? toDbText(description) : beforeState.description,
+          payment_method: hasField('payment_method') ? toDbText(payment_method) : beforeState.payment_method,
+          supplier: hasField('supplier') ? toDbText(supplier) : beforeState.supplier,
+          invoice_number: hasField('invoice_number') ? toDbText(invoice_number) : beforeState.invoice_number,
           currency: nextCurrency,
           exchange_rate_at_transaction: activeRate,
           amount_try: amount_try !== undefined && amount_try !== null && amount_try !== ''
-            ? Number(amount_try)
+            ? toDbNumber(amount_try, nextCurrency === 'USD' ? nextAmount * activeRate : nextAmount)
             : (nextCurrency === 'USD' ? nextAmount * activeRate : nextAmount),
-          payer_person_id: hasField('payer_person_id') ? payer_person_id : beforeState.payer_person_id,
-          will_be_refunded: hasField('will_be_refunded') ? (will_be_refunded || 0) : (beforeState.will_be_refunded ?? 0),
-          refund_status: hasField('refund_status') ? refund_status : beforeState.refund_status,
-          is_invoice: hasField('is_invoice') ? (is_invoice || 0) : (beforeState.is_invoice ?? 0),
-          invoice_name: hasField('invoice_name') ? invoice_name : beforeState.invoice_name,
-          is_stock_related: hasField('is_stock_related') ? (is_stock_related || 0) : (beforeState.is_stock_related ?? 0),
-          distribute_to_product_cost: hasField('distribute_to_product_cost') ? (distribute_to_product_cost || 0) : (beforeState.distribute_to_product_cost ?? 0),
-          cash_account_id: hasField('cash_account_id') ? cash_account_id : beforeState.cash_account_id,
+          payer_person_id: hasField('payer_person_id') ? toDbText(payer_person_id) : beforeState.payer_person_id,
+          will_be_refunded: hasField('will_be_refunded') ? toDbFlag(will_be_refunded) : (beforeState.will_be_refunded ?? 0),
+          refund_status: hasField('refund_status') ? toDbText(refund_status) : beforeState.refund_status,
+          is_invoice: hasField('is_invoice') ? toDbFlag(is_invoice) : (beforeState.is_invoice ?? 0),
+          invoice_name: hasField('invoice_name') ? toDbText(invoice_name) : beforeState.invoice_name,
+          is_stock_related: hasField('is_stock_related') ? toDbFlag(is_stock_related) : (beforeState.is_stock_related ?? 0),
+          distribute_to_product_cost: hasField('distribute_to_product_cost') ? toDbFlag(distribute_to_product_cost) : (beforeState.distribute_to_product_cost ?? 0),
+          cash_account_id: hasField('cash_account_id') ? toDbText(cash_account_id) : beforeState.cash_account_id,
         };
 
         if (!Number.isFinite(Number(nextExpense.amount_try))) throw new Error("TRY tutarı geçerli değil.");
@@ -2978,9 +3050,9 @@ async function startServer() {
 
       // 2. Satış Geliri
       const salesRes = db.prepare(`
-        SELECT SUM(si.quantity * si.unit_price) as total_sales
-        FROM sale_items si
-        JOIN sales s ON si.sale_id = s.id
+        SELECT SUM(COALESCE(net_total, total_amount, 0)) as total_sales
+        FROM sales
+        WHERE status NOT IN ('İptal Edildi', 'İade Edildi')
       `).get() as any;
       const salesRevenue = salesRes?.total_sales || 0;
 
@@ -3032,6 +3104,7 @@ async function startServer() {
         SELECT SUM(si.quantity * si.purchase_cost) as total_cogs
         FROM sale_items si
         JOIN sales s ON si.sale_id = s.id
+        WHERE s.status NOT IN ('İptal Edildi', 'İade Edildi')
       `).get() as any;
       const totalCogs = cogsRes?.total_cogs || 0;
 

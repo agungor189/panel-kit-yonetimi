@@ -13,6 +13,7 @@ export default function Transactions({ initialType, settings }: { initialType?: 
   const [sales, setSales] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [filterQuery, setFilterQuery] = useState('');
+  const finalStatuses = new Set(['İptal Edildi', 'İade Edildi']);
 
   useEffect(() => {
     loadData();
@@ -30,9 +31,10 @@ export default function Transactions({ initialType, settings }: { initialType?: 
     }
   };
 
-  const totalIncome = sales.reduce((sum, s) => sum + (s.total_amount || 0), 0);
+  const activeSales = sales.filter((sale) => !finalStatuses.has(sale.status));
+  const totalIncome = activeSales.reduce((sum, s) => sum + (s.net_total || s.total_amount || 0), 0);
 
-  const filteredSales = sales.filter(s => 
+  const filteredSales = activeSales.filter(s =>
     s.customer_name?.toLowerCase().includes(filterQuery.toLowerCase()) || 
     s.platform?.toLowerCase().includes(filterQuery.toLowerCase())
   );
@@ -53,8 +55,9 @@ export default function Transactions({ initialType, settings }: { initialType?: 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="bg-white rounded-2xl p-6 border border-[#E2E8F0] flex items-center justify-between shadow-[0_2px_10px_-4px_rgba(0,0,0,0.05)]">
           <div>
-            <div className="text-xs lg:text-sm font-bold text-[#64748B] mb-1">Toplam Brüt Ciro</div>
+            <div className="text-xs lg:text-sm font-bold text-[#64748B] mb-1">Toplam Net Ciro</div>
             <div className="text-2xl lg:text-3xl font-black text-[#10B981]"><FormatAmount amount={totalIncome} /></div>
+            <div className="mt-1 text-[11px] font-bold text-gray-400">İptal ve iade satışlar hariç</div>
           </div>
           <div className="w-12 h-12 rounded-2xl bg-green-50 flex items-center justify-center">
             <TrendingUp className="w-6 h-6 text-[#10B981]" />
@@ -63,7 +66,7 @@ export default function Transactions({ initialType, settings }: { initialType?: 
         <div className="bg-white rounded-2xl p-6 border border-[#E2E8F0] flex items-center justify-between shadow-[0_2px_10px_-4px_rgba(0,0,0,0.05)]">
            <div>
             <div className="text-xs lg:text-sm font-bold text-[#64748B] mb-1">Toplam Satış Adedi</div>
-            <div className="text-2xl lg:text-3xl font-black text-primary">{sales.length}</div>
+            <div className="text-2xl lg:text-3xl font-black text-primary">{activeSales.length}</div>
           </div>
           <div className="w-12 h-12 rounded-2xl bg-primary/10 flex items-center justify-center">
             <Package className="w-6 h-6 text-primary" />
@@ -117,7 +120,7 @@ export default function Transactions({ initialType, settings }: { initialType?: 
                      {sale.total_quantity}
                    </td>
                    <td className="px-6 py-4 text-right font-black text-[#10B981]">
-                     <FormatAmount align="right" amount={sale.total_amount} exchangeRateAtTransaction={sale.exchange_rate_at_transaction} />
+                     <FormatAmount align="right" amount={sale.net_total || sale.total_amount} exchangeRateAtTransaction={sale.exchange_rate_at_transaction} />
                    </td>
                 </tr>
               ))}
