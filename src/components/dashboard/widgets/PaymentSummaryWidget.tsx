@@ -2,19 +2,19 @@ import React, { useEffect, useState } from 'react';
 import { dashboardApi } from '../dashboardApi';
 import { useCurrency } from '../../../CurrencyContext';
 
-export function PaymentSummaryWidget({ widgetKey, refreshKey }: any) {
+export function PaymentSummaryWidget({ widgetKey, refreshKey, periodParams }: any) {
   const { FormatAmount } = useCurrency();
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     loadData();
-  }, [refreshKey, widgetKey]);
+  }, [refreshKey, widgetKey, periodParams?.dateFrom, periodParams?.dateTo]);
 
   const loadData = async () => {
     setLoading(true);
     try {
-      const res = await dashboardApi.getPaymentSummary();
+      const res = await dashboardApi.getPaymentSummary(periodParams);
       setData(res);
     } catch (e) {
     } finally {

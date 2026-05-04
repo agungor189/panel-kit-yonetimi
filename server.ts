@@ -2036,23 +2036,108 @@ async function startServer() {
   // Dashboard Summary Endpoint
   app.get("/api/dashboard-summary", (req, res) => {
     try {
+      const allowedDashboardPeriods = new Set(["last_1_month", "last_3_months", "last_6_months", "all_time"]);
+      const requestedPeriod = String(req.query.period || req.query.expense_period || "");
+      const dashboardPeriodKey = allowedDashboardPeriods.has(requestedPeriod)
+        ? requestedPeriod
+        : "last_1_month";
+      const dashboardPeriodLabels: Record<string, string> = {
+        last_1_month: "Son 1 ay",
+        last_3_months: "Son 3 ay",
+        last_6_months: "Son 6 ay",
+        all_time: "Tüm zaman",
+      };
+      const periodMonths: Record<string, number> = {
+        last_1_month: 1,
+        last_3_months: 3,
+        last_6_months: 6,
+      };
+      const addDateRange = (clauses: string[], params: string[], column: string, start?: Date | null, end?: Date | null) => {
+        if (start) {
+          clauses.push(`datetime(${column}) >= datetime(?)`);
+          params.push(start.toISOString());
+        }
+        if (end) {
+          clauses.push(`datetime(${column}) < datetime(?)`);
+          params.push(end.toISOString());
+        }
+      };
+      const sumExpensesForRange = (start?: Date | null, end?: Date | null) => {
+        const clauses = ["type = 'Expense'", "COALESCE(is_deleted, 0) = 0"];
+        const params: string[] = [];
+        addDateRange(clauses, params, "COALESCE(date, created_at)", start, end);
+        const row = db.prepare(`
+          SELECT SUM(amount) as total
+          FROM transactions
+          WHERE ${clauses.join(" AND ")}
+        `).get(...params) as any;
+        return Number(row?.total || 0);
+      };
+      const sumPendingRecurringForRange = (start?: Date | null, end?: Date | null) => {
+        const clauses = ["status IN ('pending', 'due', 'overdue')"];
+        const params: string[] = [];
+        if (start) {
+          clauses.push("date(due_date) >= date(?)");
+          params.push(start.toISOString());
+        }
+        if (end) {
+          clauses.push("date(due_date) <= date(?)");
+          params.push(end.toISOString());
+        }
+        const row = db.prepare(`
+          SELECT SUM(amount_try) as total
+          FROM recurring_payment_occurrences
+          WHERE ${clauses.join(" AND ")}
+        `).get(...params) as any;
+        return Number(row?.total || 0);
+      };
+      const sumSalesForRange = (start?: Date | null, end?: Date | null) => {
+        const clauses = ["status NOT IN ('İptal Edildi', 'İade Edildi')"];
+        const params: string[] = [];
+        addDateRange(clauses, params, "created_at", start, end);
+        const row = db.prepare(`
+          SELECT SUM(net_total) as total, SUM(net_profit) as net_profit, SUM(gross_profit) as gross_profit
+          FROM sales
+          WHERE ${clauses.join(" AND ")}
+        `).get(...params) as any;
+        return {
+          total: Number(row?.total || 0),
+          netProfit: Number(row?.net_profit || 0),
+          grossProfit: Number(row?.gross_profit || 0),
+        };
+      };
+      const sumCashForRange = (type: "IN" | "OUT", sourceType: string, start?: Date | null, end?: Date | null) => {
+        const clauses = ["type = ?", "source_type = ?", "COALESCE(is_deleted, 0) = 0"];
+        const params: string[] = [type, sourceType];
+        addDateRange(clauses, params, "COALESCE(transaction_date, created_at)", start, end);
+        const row = db.prepare(`
+          SELECT SUM(amount) as total
+          FROM cash_transactions
+          WHERE ${clauses.join(" AND ")}
+        `).get(...params) as any;
+        return Number(row?.total || 0);
+      };
+
       const now = new Date();
       const year = now.getFullYear();
       const month = (now.getMonth() + 1).toString().padStart(2, '0');
-      const firstDayOfMonth = `${year}-${month}-01T00:00:00Z`;
-      const previousMonthDate = new Date(year, now.getMonth() - 1, 1);
-      const previousYear = previousMonthDate.getFullYear();
-      const previousMonth = (previousMonthDate.getMonth() + 1).toString().padStart(2, '0');
-      const firstDayOfPreviousMonth = `${previousYear}-${previousMonth}-01T00:00:00Z`;
       const lastDayOfMonthStr = `${year}-${month}-${new Date(year, now.getMonth() + 1, 0).getDate().toString().padStart(2, '0')}`;
       const currentMonthStr = `${year}-${month}`;
+      const periodMonthCount = periodMonths[dashboardPeriodKey] || 0;
+      const periodEnd = dashboardPeriodKey === "all_time" ? null : now;
+      const periodStart = dashboardPeriodKey === "all_time"
+        ? null
+        : new Date(now.getFullYear(), now.getMonth() - periodMonthCount, now.getDate(), now.getHours(), now.getMinutes(), now.getSeconds(), now.getMilliseconds());
+      const previousPeriodEnd = periodStart ? new Date(periodStart) : null;
+      const previousPeriodStart = periodStart && periodMonthCount
+        ? new Date(periodStart.getFullYear(), periodStart.getMonth() - periodMonthCount, periodStart.getDate(), periodStart.getHours(), periodStart.getMinutes(), periodStart.getSeconds(), periodStart.getMilliseconds())
+        : null;
 
       // Metrics (Exclude Cancelled Sales)
-      const revenueResult = db.prepare("SELECT SUM(net_total) as total FROM sales WHERE created_at >= ? AND status NOT IN ('İptal Edildi', 'İade Edildi')").get(firstDayOfMonth) as any;
-      const previousRevenueResult = db.prepare("SELECT SUM(net_total) as total FROM sales WHERE created_at >= ? AND created_at < ? AND status NOT IN ('İptal Edildi', 'İade Edildi')").get(firstDayOfPreviousMonth, firstDayOfMonth) as any;
-      const salesProfitResult = db.prepare("SELECT SUM(net_profit) as total, SUM(gross_profit) as gross FROM sales WHERE created_at >= ? AND status NOT IN ('İptal Edildi', 'İade Edildi')").get(firstDayOfMonth) as any;
-      const realizedExpensesResult = db.prepare("SELECT SUM(amount) as total FROM transactions WHERE type = 'Expense' AND date >= ? AND COALESCE(is_deleted, 0) = 0").get(firstDayOfMonth) as any;
-      const previousExpensesResult = db.prepare("SELECT SUM(amount) as total FROM transactions WHERE type = 'Expense' AND date >= ? AND date < ? AND COALESCE(is_deleted, 0) = 0").get(firstDayOfPreviousMonth, firstDayOfMonth) as any;
+      const salesPeriod = sumSalesForRange(periodStart, periodEnd);
+      const previousSalesPeriod = dashboardPeriodKey === "all_time" ? { total: 0, netProfit: 0, grossProfit: 0 } : sumSalesForRange(previousPeriodStart, previousPeriodEnd);
+      const periodExpenses = sumExpensesForRange(periodStart, periodEnd) + sumPendingRecurringForRange(periodStart, periodEnd);
+      const previousPeriodExpenses = dashboardPeriodKey === "all_time" ? 0 : sumExpensesForRange(previousPeriodStart, previousPeriodEnd) + sumPendingRecurringForRange(previousPeriodStart, previousPeriodEnd);
 
       // Cash Metrics
       // 1. Total Cash Balance
@@ -2078,23 +2163,23 @@ async function startServer() {
          WHERE a.type = 'platform'
       `).get() as any;
 
-      const monthlyCashIn = db.prepare("SELECT SUM(amount) as total FROM cash_transactions WHERE type='IN' AND COALESCE(transaction_date, created_at) >= ? AND source_type='sale' AND COALESCE(is_deleted, 0) = 0").get(firstDayOfMonth) as any;
-      const monthlyCashOut = db.prepare("SELECT SUM(amount) as total FROM cash_transactions WHERE type='OUT' AND COALESCE(transaction_date, created_at) >= ? AND source_type='expense' AND COALESCE(is_deleted, 0) = 0").get(firstDayOfMonth) as any;
+      const monthlyCashIn = sumCashForRange("IN", "sale", periodStart, periodEnd);
+      const monthlyCashOut = sumCashForRange("OUT", "expense", periodStart, periodEnd);
 
-      const pendingOccurrences = db.prepare(`
+      const chartPendingOccurrences = db.prepare(`
         SELECT SUM(amount_try) as total 
         FROM recurring_payment_occurrences 
         WHERE status IN ('pending', 'due', 'overdue')
           AND due_date >= ? AND due_date <= ?
       `).get(`${year}-${month}-01`, lastDayOfMonthStr) as any;
-      let pendingRecurringTotal = pendingOccurrences?.total || 0;
+      let chartPendingRecurringTotal = chartPendingOccurrences?.total || 0;
 
-      const totalRevenue = revenueResult?.total || 0;
-      const previousRevenue = previousRevenueResult?.total || 0;
-      const salesNetProfit = salesProfitResult?.total || 0;
-      const salesGrossProfit = salesProfitResult?.gross || 0;
-      const totalExpenses = (realizedExpensesResult?.total || 0) + pendingRecurringTotal;
-      const previousExpenses = previousExpensesResult?.total || 0;
+      const totalRevenue = salesPeriod.total;
+      const previousRevenue = previousSalesPeriod.total;
+      const salesNetProfit = salesPeriod.netProfit;
+      const salesGrossProfit = salesPeriod.grossProfit;
+      const totalExpenses = periodExpenses;
+      const previousExpenses = previousPeriodExpenses;
 
       const lowStockProductsQuery = db.prepare(`
         SELECT p.*,
@@ -2131,6 +2216,13 @@ async function startServer() {
         totalExpenses,
         previousExpenses,
         expensesChangePct: previousExpenses > 0 ? ((totalExpenses - previousExpenses) / previousExpenses) * 100 : 0,
+        periodExpenses,
+        previousPeriodExpenses,
+        periodExpensesChangePct: previousPeriodExpenses > 0 ? ((periodExpenses - previousPeriodExpenses) / previousPeriodExpenses) * 100 : 0,
+        dashboardPeriodKey,
+        dashboardPeriodLabel: dashboardPeriodLabels[dashboardPeriodKey],
+        expensePeriodKey: dashboardPeriodKey,
+        expensePeriodLabel: dashboardPeriodLabels[dashboardPeriodKey],
         grossProfit: salesGrossProfit,
         netProfit: salesNetProfit - totalExpenses,
         netProfitMargin: totalRevenue > 0 ? ((salesNetProfit - totalExpenses) / totalRevenue) * 100 : 0,
@@ -2145,19 +2237,26 @@ async function startServer() {
         lowStockProducts: lowStockProductsQuery,
         cashTotal: cashAccountsTotal?.total || 0,
         pendingPlatform: pendingPlatformTotal?.total || 0,
-        monthlyCashIn: monthlyCashIn?.total || 0,
-        monthlyCashOut: monthlyCashOut?.total || 0
+        monthlyCashIn,
+        monthlyCashOut
       };
 
       // Charts: 6 Month History
+      const monthlyExpenseClauses = ["type = 'Expense'"];
+      const monthlyExpenseParams: string[] = [];
+      addDateRange(monthlyExpenseClauses, monthlyExpenseParams, "COALESCE(date, created_at)", periodStart, periodEnd);
+      const monthlySalesClauses = ["status NOT IN ('İptal Edildi', 'İade Edildi')"];
+      const monthlySalesParams: string[] = [];
+      addDateRange(monthlySalesClauses, monthlySalesParams, "created_at", periodStart, periodEnd);
+
       const monthlyExpenses = db.prepare(`
         SELECT strftime('%Y-%m', date) as month, SUM(amount) as expense
-        FROM transactions WHERE type = 'Expense' GROUP BY month
-      `).all() as any[];
+        FROM transactions WHERE ${monthlyExpenseClauses.join(" AND ")} GROUP BY month
+      `).all(...monthlyExpenseParams) as any[];
       const monthlySales = db.prepare(`
         SELECT strftime('%Y-%m', created_at) as month, SUM(net_total) as income, SUM(net_profit) as profit
-        FROM sales WHERE status NOT IN ('İptal Edildi', 'İade Edildi') GROUP BY month
-      `).all() as any[];
+        FROM sales WHERE ${monthlySalesClauses.join(" AND ")} GROUP BY month
+      `).all(...monthlySalesParams) as any[];
 
       const monthMap: Record<string, { income: number, expense: number, profit: number }> = {};
       monthlySales.forEach(row => {
@@ -2180,24 +2279,27 @@ async function startServer() {
       monthlyData = monthlyData.map(d => {
         if (d.month === currentMonthStr) {
           foundCurrent = true;
-          return { ...d, expense: d.expense + pendingRecurringTotal };
+          return { ...d, expense: d.expense + chartPendingRecurringTotal };
         }
         return d;
       });
 
-      if (!foundCurrent && pendingRecurringTotal > 0) {
-        monthlyData.unshift({ month: currentMonthStr, income: 0, profit: 0, expense: pendingRecurringTotal });
+      if (!foundCurrent && chartPendingRecurringTotal > 0) {
+        monthlyData.unshift({ month: currentMonthStr, income: 0, profit: 0, expense: chartPendingRecurringTotal });
         if (monthlyData.length > 6) monthlyData.pop();
       }
       monthlyData.reverse();
 
       // Charts: Platform Revenue
+      const platformRevenueClauses = ["status NOT IN ('İptal Edildi', 'İade Edildi')"];
+      const platformRevenueParams: string[] = [];
+      addDateRange(platformRevenueClauses, platformRevenueParams, "created_at", periodStart, periodEnd);
       const platformRevenue = db.prepare(`
         SELECT platform, SUM(net_total) as total
         FROM sales
-        WHERE status NOT IN ('İptal Edildi', 'İade Edildi')
+        WHERE ${platformRevenueClauses.join(" AND ")}
         GROUP BY platform
-      `).all();
+      `).all(...platformRevenueParams);
 
       const charts = { monthlyData, platformRevenue };
 

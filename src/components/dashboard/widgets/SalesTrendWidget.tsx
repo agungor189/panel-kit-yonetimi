@@ -2,26 +2,18 @@ import React, { useEffect, useState } from 'react';
 import { dashboardApi } from '../dashboardApi';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
-export function SalesTrendWidget({ refreshKey }: any) {
+export function SalesTrendWidget({ refreshKey, periodParams }: any) {
   const [data, setData] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     loadData();
-  }, [refreshKey]);
+  }, [refreshKey, periodParams?.dateFrom, periodParams?.dateTo]);
 
   const loadData = async () => {
     setLoading(true);
     try {
-      // Last 30 days default
-      const end = new Date();
-      const start = new Date();
-      start.setDate(start.getDate() - 30);
-      
-      const startStr = start.toISOString().split('T')[0];
-      const endStr = end.toISOString().split('T')[0];
-      
-      const res = await dashboardApi.getProductSalesTrend({ dateFrom: startStr, dateTo: endStr });
+      const res = await dashboardApi.getProductSalesTrend(periodParams);
       
       // format dates
       const formatted = (res||[]).map((d: any) => ({

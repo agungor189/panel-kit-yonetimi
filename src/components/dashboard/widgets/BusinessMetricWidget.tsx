@@ -17,6 +17,13 @@ type Summary = {
 };
 
 const pct = (value: number) => `%${Math.abs(value || 0).toLocaleString('tr-TR', { maximumFractionDigits: 1 })}`;
+const periodSensitiveKeys = new Set([
+  'dashboard_month_revenue',
+  'dashboard_total_expenses',
+  'dashboard_est_net_profit',
+  'dashboard_month_cash_in',
+  'dashboard_month_cash_out',
+]);
 
 function MetricIcon({ tone, icon: Icon }: { tone: string; icon: any }) {
   return (
@@ -26,9 +33,18 @@ function MetricIcon({ tone, icon: Icon }: { tone: string; icon: any }) {
   );
 }
 
-export function BusinessMetricWidget({ widgetKey, title, summary }: { widgetKey: string; title: string; summary: Summary | null }) {
+export function BusinessMetricWidget({
+  widgetKey,
+  title,
+  summary,
+}: {
+  widgetKey: string;
+  title: string;
+  summary: Summary | null;
+}) {
   const { FormatAmount } = useCurrency();
   const metrics = summary?.metrics || {};
+  const periodLabel = metrics.dashboardPeriodLabel || 'Seçili dönem';
   const estimatedNetProfit = Number(metrics.estimatedNetProfit ?? ((metrics.totalRevenue || 0) - (metrics.totalExpenses || 0)));
   const stockEstProfit = Number(metrics.stockEstProfit ?? ((metrics.totalStockSalesValue || 0) - (metrics.totalStockCostValue || 0)));
   const avgProfitMargin = Number(metrics.stockAvgProfitMargin ?? (
@@ -41,24 +57,28 @@ export function BusinessMetricWidget({ widgetKey, title, summary }: { widgetKey:
       tone: 'bg-emerald-50 text-emerald-600',
       value: <FormatAmount amount={metrics.totalRevenue || 0} />,
       note: metrics.revenueChangePct
-        ? `${metrics.revenueChangePct >= 0 ? '↑' : '↓'} ${pct(metrics.revenueChangePct)} Geçen aya göre`
-        : 'Bu ay gerçekleşen ciro',
+        ? `${metrics.revenueChangePct >= 0 ? '↑' : '↓'} ${pct(metrics.revenueChangePct)} Önceki döneme göre`
+        : `${periodLabel} gerçekleşen ciro`,
       noteClass: metrics.revenueChangePct < 0 ? 'text-red-500' : 'text-emerald-600',
     },
     dashboard_total_expenses: {
       icon: TrendingDown,
       tone: 'bg-red-50 text-red-500',
       value: <FormatAmount amount={metrics.totalExpenses || 0} />,
-      note: metrics.expensesChangePct
-        ? `${metrics.expensesChangePct >= 0 ? '↑' : '↓'} ${pct(metrics.expensesChangePct)} Geçen aya göre`
-        : 'Bu ay gerçekleşen ve bekleyen gider',
-      noteClass: metrics.expensesChangePct > 0 ? 'text-red-500' : 'text-emerald-600',
+      note: metrics.dashboardPeriodKey === 'all_time'
+        ? 'Tüm zaman gerçekleşen ve bekleyen gider'
+        : metrics.expensesChangePct
+          ? `${metrics.expensesChangePct >= 0 ? '↑' : '↓'} ${pct(metrics.expensesChangePct)} Önceki döneme göre`
+          : `${periodLabel} toplam gider`,
+      noteClass: metrics.dashboardPeriodKey === 'all_time'
+        ? 'text-slate-500'
+        : metrics.expensesChangePct > 0 ? 'text-red-500' : 'text-emerald-600',
     },
     dashboard_est_net_profit: {
       icon: DollarSign,
       tone: 'bg-blue-50 text-blue-600',
       value: <FormatAmount amount={estimatedNetProfit} />,
-      note: `Marj: %${Number(metrics.estimatedNetProfitMargin || 0).toLocaleString('tr-TR', { maximumFractionDigits: 1 })}`,
+      note: `${periodLabel} marj: %${Number(metrics.estimatedNetProfitMargin || 0).toLocaleString('tr-TR', { maximumFractionDigits: 1 })}`,
       noteClass: estimatedNetProfit >= 0 ? 'text-emerald-600' : 'text-red-500',
     },
     dashboard_low_stock: {
@@ -115,32 +135,37 @@ export function BusinessMetricWidget({ widgetKey, title, summary }: { widgetKey:
       icon: ArrowUpRight,
       tone: 'bg-emerald-50 text-emerald-600',
       value: <FormatAmount amount={metrics.monthlyCashIn || 0} />,
-      note: 'Bu ay satış kaynaklı nakit girişi',
+      note: `${periodLabel} satış kaynaklı nakit girişi`,
       noteClass: 'text-emerald-600',
     },
     dashboard_month_cash_out: {
       icon: ArrowDownRight,
       tone: 'bg-red-50 text-red-500',
       value: <FormatAmount amount={metrics.monthlyCashOut || 0} />,
-      note: 'Bu ay gider kaynaklı nakit çıkışı',
+      note: `${periodLabel} gider kaynaklı nakit çıkışı`,
       noteClass: 'text-red-500',
     },
   };
 
   const item = map[widgetKey];
   if (!item) return <div className="text-sm text-slate-400">Widget bulunamadı.</div>;
+  const displayTitle = periodSensitiveKeys.has(widgetKey)
+    ? title.replace(/^Bu Ay\s+/i, `${periodLabel} `).replace(/^Toplam Giderler$/i, `${periodLabel} Toplam Giderler`).replace(/^Tahmini Net Kar$/i, `${periodLabel} Tahmini Net Kar`)
+    : title;
 
   return (
-    <div className="flex h-full flex-col justify-between">
+    <div className="flex h-full min-w-0 flex-col justify-between overflow-hidden">
       <MetricIcon tone={item.tone} icon={item.icon} />
-      <div className="mt-5">
-        <div className="mb-3 text-xs font-black uppercase tracking-wider text-slate-500">
-          {title}
+      <div className="mt-5 min-w-0">
+        <div className="mb-3 flex min-w-0 flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0 break-words text-xs font-black uppercase tracking-wider text-slate-500 [overflow-wrap:anywhere]">
+            {displayTitle}
+          </div>
         </div>
-        <div className={`text-3xl font-black tracking-tight text-slate-900 ${item.valueClass || ''}`}>
+        <div className={`max-w-full break-words text-[clamp(1.65rem,2.4vw,2.55rem)] font-black leading-none tracking-tight text-slate-900 [overflow-wrap:anywhere] ${item.valueClass || ''}`}>
           {item.value}
         </div>
-        <div className={`mt-4 text-sm font-extrabold ${item.noteClass}`}>
+        <div className={`mt-4 max-w-full break-words text-sm font-extrabold leading-snug [overflow-wrap:anywhere] ${item.noteClass}`}>
           {item.note}
         </div>
       </div>

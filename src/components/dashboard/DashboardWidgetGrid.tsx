@@ -36,6 +36,27 @@ const GRID_SIZE: Record<string, { w: number; h: number }> = {
   full: { w: 12, h: 5 },
 };
 
+const DASHBOARD_PERIOD_OPTIONS = [
+  { value: 'last_1_month', label: '1 Ay' },
+  { value: 'last_3_months', label: '3 Ay' },
+  { value: 'last_6_months', label: '6 Ay' },
+  { value: 'all_time', label: 'Tüm Zaman' },
+];
+
+function dateKey(date: Date) {
+  return date.toISOString().split('T')[0];
+}
+
+function dashboardPeriodParams(period: string) {
+  const end = new Date();
+  if (period === 'all_time') return { dateFrom: '1970-01-01', dateTo: dateKey(end) };
+
+  const months = period === 'last_6_months' ? 6 : period === 'last_3_months' ? 3 : 1;
+  const start = new Date(end);
+  start.setMonth(start.getMonth() - months);
+  return { dateFrom: dateKey(start), dateTo: dateKey(end) };
+}
+
 function widgetDims(widget: Widget) {
   const saved = widget.settings_json?.grid;
   if (saved && Number.isFinite(saved.w) && Number.isFinite(saved.h)) {
@@ -114,6 +135,7 @@ export function DashboardWidgetGrid() {
   const [showSettings, setShowSettings] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [dashboardPeriod, setDashboardPeriod] = useState('last_1_month');
 
   useEffect(() => {
     loadDashboard();
@@ -121,11 +143,11 @@ export function DashboardWidgetGrid() {
 
   useEffect(() => {
     loadSummary();
-  }, [refreshKey]);
+  }, [refreshKey, dashboardPeriod]);
 
   const loadSummary = async () => {
     try {
-      const data = await dashboardApi.getSummary();
+      const data = await dashboardApi.getSummary({ period: dashboardPeriod });
       setSummary(data || null);
     } catch (err) {
       console.error(err);
@@ -137,7 +159,7 @@ export function DashboardWidgetGrid() {
     try {
       const [widgetData, summaryData] = await Promise.all([
         dashboardApi.getWidgets(),
-        dashboardApi.getSummary(),
+        dashboardApi.getSummary({ period: dashboardPeriod }),
       ]);
       setWidgets((widgetData || []).map((widget: Widget) => ({
         ...widget,
@@ -173,6 +195,7 @@ export function DashboardWidgetGrid() {
     xs: buildLayout(activeWidgets, GRID_COLS.xs),
     xxs: buildLayout(activeWidgets, GRID_COLS.xxs),
   }), [activeWidgets]);
+  const currentPeriodParams = useMemo(() => dashboardPeriodParams(dashboardPeriod), [dashboardPeriod]);
 
   const handleSaveSettings = async (newWidgets: Widget[]) => {
     if (isReadOnly) return;
@@ -254,7 +277,13 @@ export function DashboardWidgetGrid() {
 
   const renderWidgetContent = (widget: Widget) => {
     if (isDashboardMetric(widget.widget_key)) {
-      return <BusinessMetricWidget widgetKey={widget.widget_key} title={widget.title} summary={summary} />;
+      return (
+        <BusinessMetricWidget
+          widgetKey={widget.widget_key}
+          title={widget.title}
+          summary={summary}
+        />
+      );
     }
     if (isDashboardChart(widget.widget_key)) {
       return <BusinessChartWidget widgetKey={widget.widget_key} summary={summary} />;
@@ -262,17 +291,17 @@ export function DashboardWidgetGrid() {
 
     return (
       <>
-        {widget.widget_key.startsWith('payment_month_pending') && <PaymentSummaryWidget widgetKey={widget.widget_key} refreshKey={refreshKey} />}
-        {widget.widget_key.startsWith('payment_auto_') && <PaymentSummaryWidget widgetKey={widget.widget_key} refreshKey={refreshKey} />}
+        {widget.widget_key.startsWith('payment_month_pending') && <PaymentSummaryWidget widgetKey={widget.widget_key} refreshKey={refreshKey} periodParams={currentPeriodParams} />}
+        {widget.widget_key.startsWith('payment_auto_') && <PaymentSummaryWidget widgetKey={widget.widget_key} refreshKey={refreshKey} periodParams={currentPeriodParams} />}
         {widget.widget_key.startsWith('payment_overdue') && <PaymentSummaryWidget widgetKey={widget.widget_key} refreshKey={refreshKey} />}
-        {widget.widget_key.startsWith('payment_processed') && <PaymentSummaryWidget widgetKey={widget.widget_key} refreshKey={refreshKey} />}
+        {widget.widget_key.startsWith('payment_processed') && <PaymentSummaryWidget widgetKey={widget.widget_key} refreshKey={refreshKey} periodParams={currentPeriodParams} />}
         {widget.widget_key === 'payment_upcoming_list' && <UpcomingPaymentsWidget refreshKey={refreshKey} />}
-        {widget.widget_key.startsWith('product_total') && <ProductAnalysisChartWidget widgetKey={widget.widget_key} refreshKey={refreshKey} type="kpi" />}
-        {widget.widget_key.startsWith('product_top') && <ProductAnalysisChartWidget widgetKey={widget.widget_key} refreshKey={refreshKey} type="kpi" />}
+        {widget.widget_key.startsWith('product_total') && <ProductAnalysisChartWidget widgetKey={widget.widget_key} refreshKey={refreshKey} periodParams={currentPeriodParams} type="kpi" />}
+        {widget.widget_key.startsWith('product_top') && <ProductAnalysisChartWidget widgetKey={widget.widget_key} refreshKey={refreshKey} periodParams={currentPeriodParams} type="kpi" />}
         {widget.widget_key.startsWith('product_reorder') && <ProductAnalysisChartWidget widgetKey={widget.widget_key} refreshKey={refreshKey} type="kpi" />}
-        {widget.widget_key === 'product_material_pie' && <ProductAnalysisChartWidget widgetKey={widget.widget_key} refreshKey={refreshKey} type="pie" />}
-        {widget.widget_key === 'product_model_pie' && <ProductAnalysisChartWidget widgetKey={widget.widget_key} refreshKey={refreshKey} type="pie" />}
-        {widget.widget_key === 'sales_revenue_trend' && <SalesTrendWidget refreshKey={refreshKey} />}
+        {widget.widget_key === 'product_material_pie' && <ProductAnalysisChartWidget widgetKey={widget.widget_key} refreshKey={refreshKey} periodParams={currentPeriodParams} type="pie" />}
+        {widget.widget_key === 'product_model_pie' && <ProductAnalysisChartWidget widgetKey={widget.widget_key} refreshKey={refreshKey} periodParams={currentPeriodParams} type="pie" />}
+        {widget.widget_key === 'sales_revenue_trend' && <SalesTrendWidget refreshKey={refreshKey} periodParams={currentPeriodParams} />}
         {['payment_status_share', 'payment_category_share', 'payment_monthly_amounts'].includes(widget.widget_key) && (
           <div className="flex items-center justify-center rounded-xl bg-slate-50 p-8 text-sm font-bold text-slate-400">Grafik hazırlanıyor...</div>
         )}
@@ -283,8 +312,8 @@ export function DashboardWidgetGrid() {
   const renderWidget = (widget: Widget) => {
     const isInternalTitle = isDashboardMetric(widget.widget_key);
     return (
-      <div key={widget.id} className="h-full">
-        <div className={`dashboard-widget-card relative flex h-full flex-col rounded-2xl border bg-white p-6 shadow-sm transition-all ${editMode ? 'border-primary/40 ring-2 ring-primary/10' : 'border-slate-200 hover:shadow-md'}`}>
+      <div key={widget.id} className="h-full min-w-0">
+        <div className={`dashboard-widget-card relative flex h-full min-w-0 flex-col overflow-hidden rounded-2xl border bg-white p-5 shadow-sm transition-all sm:p-6 ${editMode ? 'border-primary/40 ring-2 ring-primary/10' : 'border-slate-200 hover:shadow-md'}`}>
           {editMode && (
             <div className="dashboard-drag-handle absolute right-4 top-4 z-10 flex cursor-move items-center gap-1 rounded-lg bg-slate-900/80 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-white">
               <GripVertical className="h-3 w-3" />
@@ -297,7 +326,7 @@ export function DashboardWidgetGrid() {
               {widget.description && <p className="mt-1 text-xs font-semibold text-slate-400">{widget.description}</p>}
             </div>
           )}
-          <div className="min-h-0 flex-1">
+          <div className="min-h-0 min-w-0 flex-1">
             {renderWidgetContent(widget)}
           </div>
         </div>
@@ -317,6 +346,19 @@ export function DashboardWidgetGrid() {
           <p className="mt-1 text-sm font-semibold text-slate-500">Ciro, kâr, stok ve finans göstergeleri tek ekranda.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
+            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Dönem</span>
+            <select
+              value={dashboardPeriod}
+              onChange={(event) => setDashboardPeriod(event.target.value)}
+              className="bg-transparent text-sm font-black text-slate-700 outline-none"
+              aria-label="Dashboard dönemi"
+            >
+              {DASHBOARD_PERIOD_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
           <button onClick={() => setRefreshKey((key) => key + 1)} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 shadow-sm transition-colors hover:bg-slate-50">
             <RefreshCw className="h-4 w-4" />
             Yenile

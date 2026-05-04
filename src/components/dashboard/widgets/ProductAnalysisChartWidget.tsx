@@ -5,26 +5,26 @@ import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recha
 
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#64748b'];
 
-export function ProductAnalysisChartWidget({ widgetKey, refreshKey, type }: any) {
+export function ProductAnalysisChartWidget({ widgetKey, refreshKey, type, periodParams }: any) {
   const { FormatAmount } = useCurrency();
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     loadData();
-  }, [refreshKey, widgetKey]);
+  }, [refreshKey, widgetKey, periodParams?.dateFrom, periodParams?.dateTo]);
 
   const loadData = async () => {
     setLoading(true);
     try {
       if (widgetKey === 'product_total_sold' || widgetKey === 'product_total_revenue') {
-        const res = await dashboardApi.getProductSummary();
+        const res = await dashboardApi.getProductSummary(periodParams);
         setData(res);
       } else if (widgetKey === 'product_top_material' || widgetKey === 'product_material_pie') {
-        const res = await dashboardApi.getProductMaterialShare({ limit: 10 });
+        const res = await dashboardApi.getProductMaterialShare({ ...periodParams, limit: 10 });
         setData(res);
       } else if (widgetKey === 'product_top_model' || widgetKey === 'product_model_pie') {
-        const res = await dashboardApi.getProductModelShare({ limit: 10 });
+        const res = await dashboardApi.getProductModelShare({ ...periodParams, limit: 10 });
         setData(res);
       } else if (widgetKey === 'product_reorder_summary') {
         const res = await dashboardApi.getProductReorderSummary();
