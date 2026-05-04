@@ -313,6 +313,16 @@ function centralStockChannel(platformName?: string | null): string {
   return channel || 'Merkez Depo';
 }
 
+function isLocalAddress(ip?: string): boolean {
+  if (!ip) return false;
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+}
+
+function shouldSkipGeneralLimiter(req: express.Request): boolean {
+  if (req.path === '/api/public/health') return true;
+  return process.env.NODE_ENV !== 'production' && isLocalAddress(req.ip);
+}
+
 function getProductBomComponents(productId: string): any[] {
   if (!productId) return [];
   return db.prepare(`
@@ -1367,6 +1377,7 @@ async function startServer() {
   const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 1000, // Limit each IP to 1000 requests per windowMs
+    skip: shouldSkipGeneralLimiter,
     standardHeaders: true,
     legacyHeaders: false,
     message: "Çok fazla istek gönderildi, lütfen daha sonra tekrar deneyin."

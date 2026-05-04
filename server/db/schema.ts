@@ -545,7 +545,6 @@ export function applySchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_transactions_type_date   ON transactions(type, date);
     CREATE INDEX IF NOT EXISTS idx_transactions_platform    ON transactions(platform);
     CREATE INDEX IF NOT EXISTS idx_products_status          ON products(status);
-    CREATE INDEX IF NOT EXISTS idx_products_visibility      ON products(is_sellable, visible_in_catalog, exclude_from_analysis);
     CREATE INDEX IF NOT EXISTS idx_recurring_plans_status   ON recurring_payment_plans(is_active);
     CREATE INDEX IF NOT EXISTS idx_recurring_occurrences_status ON recurring_payment_occurrences(status);
     CREATE INDEX IF NOT EXISTS idx_product_platforms_product_id ON product_platforms(product_id);
