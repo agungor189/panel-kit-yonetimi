@@ -89,10 +89,10 @@ export default function ApiKeys() {
     }
   };
 
-  const handleTest = async (id: string) => {
+  const handleTest = async (id: string, environment?: 'stage' | 'prod') => {
     if (isReadOnly) return;
     try {
-      const result = await api.post(`/integrations/keys/${id}/test`, {});
+      const result = await api.post(`/integrations/keys/${id}/test`, environment ? { environment } : {});
       if (result.status === 'success') {
         toast.success(result.message);
       } else {
@@ -136,7 +136,7 @@ export default function ApiKeys() {
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
       <Toaster position="top-right" />
-      
+
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-black text-text-main flex items-center space-x-3">
@@ -146,7 +146,7 @@ export default function ApiKeys() {
             <span>API Anahtarları</span>
           </h2>
           <p className="text-text-muted mt-2 text-sm max-w-xl">
-            Harici uygulamaların, pazar yerlerinin veya yapay zeka entegrasyonlarının API bağlantılarını 
+            Harici uygulamaların, pazar yerlerinin veya yapay zeka entegrasyonlarının API bağlantılarını
             buradan 256-bit şifreleme ile güvenli bir şekilde yönetin.
           </p>
         </div>
@@ -194,7 +194,7 @@ export default function ApiKeys() {
                       <div className="text-xs text-text-muted">{k.service_name} • {k.key_name || 'Varsayılan'}</div>
                     </td>
                     <td className="py-4 px-6">
-                      <button 
+                      <button
                         onClick={() => toggleStatus(k.id, k.status)}
                         className={`px-3 py-1 text-xs font-bold rounded-full ${k.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}
                       >
@@ -220,22 +220,43 @@ export default function ApiKeys() {
                     </td>
                     <td className="py-4 px-6 text-right">
                       <div className="flex items-center justify-end space-x-2">
-                         <button 
-                             title="Bağlantıyı Test Et"
-                             onClick={() => handleTest(k.id)}
-                             disabled={k.status !== 'active'}
-                             className="p-1.5 text-blue-500 hover:bg-blue-50 rounded-lg disabled:opacity-50"
-                         >
-                            <Play className="w-4 h-4" />
-                         </button>
-                         <button 
+                         {k.service_name === 'Trendyol' ? (
+                           <div className="flex items-center gap-1">
+                             <button
+                               title="Trendyol Test / Stage ortamında dene"
+                               onClick={() => handleTest(k.id, 'stage')}
+                               disabled={k.status !== 'active'}
+                               className="rounded-lg border border-blue-100 bg-blue-50 px-2 py-1 text-[10px] font-black text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+                             >
+                               Stage
+                             </button>
+                             <button
+                               title="Trendyol Canlı / Production ortamında dene"
+                               onClick={() => handleTest(k.id, 'prod')}
+                               disabled={k.status !== 'active'}
+                               className="rounded-lg border border-emerald-100 bg-emerald-50 px-2 py-1 text-[10px] font-black text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"
+                             >
+                               Canlı
+                             </button>
+                           </div>
+                         ) : (
+                           <button
+                               title="Bağlantıyı Test Et"
+                               onClick={() => handleTest(k.id)}
+                               disabled={k.status !== 'active'}
+                               className="p-1.5 text-blue-500 hover:bg-blue-50 rounded-lg disabled:opacity-50"
+                           >
+                              <Play className="w-4 h-4" />
+                           </button>
+                         )}
+                         <button
                              title="Düzenle"
                              onClick={() => openForm(k)}
                              className="p-1.5 text-gray-500 hover:bg-gray-100 rounded-lg"
                          >
                             <Edit2 className="w-4 h-4" />
                          </button>
-                         <button 
+                         <button
                              title="Sil"
                              onClick={() => setDeleteId(k.id)}
                              className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg"
@@ -264,7 +285,7 @@ export default function ApiKeys() {
                 <Trash2 className="w-5 h-5" /> {/* Just placeholder close icon */}
               </button>
             </div>
-            
+
             <form onSubmit={handleSave} className="p-6 space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div className="col-span-2 sm:col-span-1">

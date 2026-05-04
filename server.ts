@@ -4730,10 +4730,13 @@ async function startServer() {
 
       if (current.service_name === 'Trendyol') {
         try {
-          const config = { ...getTrendyolConfig(), api_key_id: current.id };
+          const environment = req.body?.environment !== undefined
+            ? normalizeTrendyolEnvironment(req.body.environment)
+            : normalizeTrendyolEnvironment(getTrendyolConfig().environment);
+          const config = { ...getTrendyolConfig(), api_key_id: current.id, environment };
           const credentials = getTrendyolCredentials(config);
           const headers = buildTrendyolHeaders(credentials, config);
-          const baseUrl = trendyolBaseUrl(normalizeTrendyolEnvironment(config.environment));
+          const baseUrl = trendyolBaseUrl(environment);
           const params = new URLSearchParams({
             page: '0',
             size: '1',
@@ -4745,12 +4748,16 @@ async function startServer() {
             headers,
           );
           status = "success";
-          message = "Trendyol bağlantısı başarılı";
+          message = `Trendyol ${environment === 'prod' ? 'canlı' : 'test'} bağlantısı başarılı`;
         } catch (err: any) {
           status = "failed";
-          message = err.statusCode === 503
-            ? "Stage ortamı için IP yetkilendirmesi gerekebilir"
-            : err.message || "Trendyol bağlantı hatası";
+          if (err.statusCode === 403) {
+            message = "403: Bu anahtar yanlış ortamda test ediliyor olabilir. Canlı API için Production, test API için Stage seçin. Seller ID, User-Agent ve API Key/Secret bilgilerini kontrol edin.";
+          } else if (err.statusCode === 503) {
+            message = "503: Stage ortamı için IP yetkilendirmesi gerekebilir. Sunucu çıkış IP adresini Trendyol tarafında yetkilendirin.";
+          } else {
+            message = err.message || "Trendyol bağlantı hatası";
+          }
         }
       } else if (current.service_name === 'Hepsiburada') {
         const merchantId = current.merchant_id;
