@@ -684,6 +684,50 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 30,
+    name: "add_backup_runs",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS backup_runs (
+          id                 TEXT PRIMARY KEY,
+          trigger_type       TEXT NOT NULL,
+          backup_kind        TEXT NOT NULL,
+          upload_mode        TEXT,
+          status             TEXT NOT NULL DEFAULT 'running',
+          file_name          TEXT,
+          file_path          TEXT,
+          size_bytes         INTEGER DEFAULT 0,
+          db_size_bytes      INTEGER DEFAULT 0,
+          upload_file_count  INTEGER DEFAULT 0,
+          upload_total_bytes INTEGER DEFAULT 0,
+          manifest_json      TEXT,
+          error_message      TEXT,
+          created_by         TEXT,
+          started_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
+          completed_at       DATETIME
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_backup_runs_started_at
+        ON backup_runs(started_at);
+
+        CREATE INDEX IF NOT EXISTS idx_backup_runs_kind_status
+        ON backup_runs(backup_kind, status, completed_at);
+      `);
+
+      const defaultConfig = {
+        enabled: true,
+        run_at: "03:00",
+        retention_days: 7,
+        include_uploads: true,
+        uploads_strategy: "smart",
+        weekly_full_day: 0,
+      };
+
+      db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)")
+        .run("backup_config", JSON.stringify(defaultConfig));
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

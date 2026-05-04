@@ -15,12 +15,16 @@ import {
   RotateCcw,
   ShieldCheck,
   Power,
-  Download
+  Download,
+  Archive,
+  Clock3,
+  HardDrive,
+  RefreshCw
 } from 'lucide-react';
 import { useCurrency } from '../CurrencyContext';
 import { api, getToken } from '../lib/api';
 import { useAuth } from '../App';
-import { Settings, type ManagedUser, type UserRole } from '../types';
+import { Settings, type BackupConfig, type BackupRun, type BackupStatus, type ManagedUser, type UserRole } from '../types';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -47,6 +51,9 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
   const [confirmInputText, setConfirmInputText] = useState("");
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [usersLoading, setUsersLoading] = useState(false);
+  const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
+  const [backupConfig, setBackupConfig] = useState<BackupConfig | null>(null);
+  const [backupLoading, setBackupLoading] = useState(false);
   const [newUser, setNewUser] = useState<{ username: string; password: string; role: UserRole }>({
     username: '',
     password: '',
@@ -62,7 +69,10 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
   }, []);
 
   useEffect(() => {
-    if (isAdmin) loadUsers();
+    if (isAdmin) {
+      loadUsers();
+      loadBackupStatus();
+    }
   }, [isAdmin]);
 
   const loadExchangeRate = async () => {
@@ -102,6 +112,21 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
       console.error(err);
     } finally {
       setUsersLoading(false);
+    }
+  };
+
+  const loadBackupStatus = async () => {
+    if (!isAdmin) return;
+    try {
+      setBackupLoading(true);
+      const res = await api.get('/backup/status');
+      const data = res.data || res;
+      setBackupStatus(data);
+      setBackupConfig(data.config);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setBackupLoading(false);
     }
   };
 
@@ -173,6 +198,88 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
     } finally {
       setLoading(false);
     }
+  };
+
+  const saveBackupConfig = async () => {
+    if (!backupConfig) return;
+    try {
+      setBackupLoading(true);
+      const res = await api.put('/backup/config', backupConfig);
+      const data = res.data || res;
+      setBackupConfig(data);
+      await loadBackupStatus();
+      alert("Yedekleme ayarları kaydedildi.");
+    } catch (err: any) {
+      alert(err.message || "Yedekleme ayarları kaydedilemedi.");
+    } finally {
+      setBackupLoading(false);
+    }
+  };
+
+  const runManagedBackupNow = async (uploadsMode: BackupConfig['uploads_strategy'] = 'smart') => {
+    try {
+      setBackupLoading(true);
+      await api.post('/backup/run', { uploads_mode: uploadsMode });
+      await loadBackupStatus();
+      alert("Yedek oluşturuldu.");
+    } catch (err: any) {
+      alert(err.message || "Yedek oluşturulamadı.");
+    } finally {
+      setBackupLoading(false);
+    }
+  };
+
+  const downloadStoredBackup = async (run: BackupRun) => {
+    try {
+      const res = await fetch(`/api/backup/files/${run.id}/download`, {
+        headers: { Authorization: `Bearer ${getToken() || ''}` },
+      });
+      if (!res.ok) {
+        let message = "Yedek indirilemedi.";
+        try {
+          const data = await res.json();
+          message = data?.error?.message || data?.error || message;
+        } catch (_) {}
+        throw new Error(message);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = run.file_name || filenameFromDisposition(res.headers.get('Content-Disposition'));
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err: any) {
+      alert(err.message || "Yedek indirilemedi.");
+    }
+  };
+
+  const deleteStoredBackup = async (run: BackupRun) => {
+    if (!window.confirm(`${run.file_name || 'Bu yedek'} silinsin mi?`)) return;
+    try {
+      setBackupLoading(true);
+      await api.delete(`/backup/files/${run.id}`);
+      await loadBackupStatus();
+    } catch (err: any) {
+      alert(err.message || "Yedek silinemedi.");
+    } finally {
+      setBackupLoading(false);
+    }
+  };
+
+  const formatBytes = (value?: number) => {
+    const bytes = Number(value || 0);
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+    return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  };
+
+  const formatBackupDate = (value?: string | null) => {
+    if (!value) return '-';
+    return new Date(value).toLocaleString('tr-TR');
   };
 
   const addCategory = (type: 'product' | 'income' | 'expense') => {
@@ -656,6 +763,265 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
                 {!usersLoading && users.length === 0 && (
                   <tr>
                     <td colSpan={6} className="px-6 py-10 text-center text-sm font-bold text-text-muted">Kullanıcı bulunamadı.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {isAdmin && backupConfig && (
+        <div className="card overflow-hidden mt-8">
+          <div className="p-6 lg:p-8 border-b border-border-color">
+            <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4">
+              <div>
+                <h3 className="text-xs font-bold text-text-muted uppercase tracking-widest flex items-center">
+                  <Archive className="w-4 h-4 mr-3 text-primary" />
+                  Gelişmiş Yedekleme Sistemi
+                </h3>
+                <p className="text-xs text-text-muted mt-2">
+                  DB günlük tam yedeklenir; dosyalar akıllı modda haftalık tam, günlük değişen dosya olarak saklanır.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={loadBackupStatus}
+                  disabled={backupLoading}
+                  className="px-4 py-2 bg-bg-main border border-border-color text-text-main rounded-xl text-[11px] font-bold uppercase tracking-widest hover:bg-primary/5 transition-all disabled:opacity-50 inline-flex items-center gap-2"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Yenile
+                </button>
+                <button
+                  onClick={() => runManagedBackupNow('smart')}
+                  disabled={backupLoading}
+                  className="btn-primary h-10 px-5 text-[11px] uppercase tracking-widest disabled:opacity-50"
+                >
+                  Şimdi Yedek Al
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="p-6 lg:p-8 grid grid-cols-1 lg:grid-cols-3 gap-4 border-b border-border-color bg-bg-main/40">
+            <div className="rounded-2xl border border-border-color bg-white p-4">
+              <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-text-muted">
+                <Clock3 className="w-4 h-4 text-primary" />
+                Sonraki Çalışma
+              </div>
+              <div className="mt-2 text-sm font-black text-text-main">
+                {backupConfig.enabled ? formatBackupDate(backupStatus?.next_run_at) : 'Kapalı'}
+              </div>
+              <p className="mt-1 text-[10px] font-bold text-text-muted">Sunucu yerel saatine göre.</p>
+            </div>
+            <div className="rounded-2xl border border-border-color bg-white p-4">
+              <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-text-muted">
+                <HardDrive className="w-4 h-4 text-primary" />
+                Backup Alanı
+              </div>
+              <div className="mt-2 text-sm font-black text-text-main">
+                {formatBytes(backupStatus?.storage?.totalBytes)}
+              </div>
+              <p className="mt-1 text-[10px] font-bold text-text-muted">{backupStatus?.storage?.fileCount || 0} dosya</p>
+            </div>
+            <div className="rounded-2xl border border-border-color bg-white p-4">
+              <div className="text-[10px] font-black uppercase tracking-widest text-text-muted">Konum</div>
+              <div className="mt-2 break-all font-mono text-[11px] font-bold text-text-main">{backupStatus?.backup_dir || '-'}</div>
+              <p className="mt-1 text-[10px] font-bold text-text-muted">Docker için dış volume önerilir.</p>
+            </div>
+          </div>
+
+          <div className="p-6 lg:p-8 space-y-5 border-b border-border-color">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              <label className="flex items-center justify-between gap-4 rounded-2xl border border-border-color bg-bg-main p-4">
+                <div>
+                  <div className="text-[11px] font-black uppercase tracking-widest text-text-main">Otomatik Backup</div>
+                  <p className="text-[10px] font-bold text-text-muted mt-1">Her gün seçili saatte çalışır.</p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={backupConfig.enabled}
+                  onChange={(e) => setBackupConfig({ ...backupConfig, enabled: e.target.checked })}
+                  className="h-5 w-5 accent-primary"
+                />
+              </label>
+
+              <div>
+                <label className="text-[11px] font-bold text-text-muted uppercase tracking-widest px-1">Çalışma Saati</label>
+                <input
+                  type="time"
+                  value={backupConfig.run_at}
+                  onChange={(e) => setBackupConfig({ ...backupConfig, run_at: e.target.value })}
+                  className="form-input mt-1 font-bold"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-bold text-text-muted uppercase tracking-widest px-1">Saklama Süresi</label>
+                <div className="relative mt-1">
+                  <input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={backupConfig.retention_days}
+                    onChange={(e) => setBackupConfig({ ...backupConfig, retention_days: Number(e.target.value) || 7 })}
+                    className="form-input font-bold pr-14"
+                  />
+                  <span className="absolute right-4 top-3 text-xs font-black text-text-muted">gün</span>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-[11px] font-bold text-text-muted uppercase tracking-widest px-1">Dosya Stratejisi</label>
+                <select
+                  value={backupConfig.uploads_strategy}
+                  onChange={(e) => setBackupConfig({ ...backupConfig, uploads_strategy: e.target.value as BackupConfig['uploads_strategy'] })}
+                  className="form-input mt-1 font-bold text-sm"
+                >
+                  <option value="smart">Akıllı</option>
+                  <option value="full">Her seferinde tam</option>
+                  <option value="incremental">Sadece değişenler</option>
+                  <option value="none">Dosya yedekleme kapalı</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <label className="flex items-center justify-between gap-4 rounded-2xl border border-border-color bg-white p-4">
+                <div>
+                  <div className="text-[11px] font-black uppercase tracking-widest text-text-main">Uploads Dahil</div>
+                  <p className="text-[10px] font-bold text-text-muted mt-1">Ürün görselleri ve gider ekleri.</p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={backupConfig.include_uploads}
+                  onChange={(e) => setBackupConfig({ ...backupConfig, include_uploads: e.target.checked })}
+                  className="h-5 w-5 accent-primary"
+                />
+              </label>
+
+              <div>
+                <label className="text-[11px] font-bold text-text-muted uppercase tracking-widest px-1">Haftalık Tam Dosya Günü</label>
+                <select
+                  value={backupConfig.weekly_full_day}
+                  onChange={(e) => setBackupConfig({ ...backupConfig, weekly_full_day: Number(e.target.value) })}
+                  className="form-input mt-1 font-bold text-sm"
+                >
+                  <option value={0}>Pazar</option>
+                  <option value={1}>Pazartesi</option>
+                  <option value={2}>Salı</option>
+                  <option value={3}>Çarşamba</option>
+                  <option value={4}>Perşembe</option>
+                  <option value={5}>Cuma</option>
+                  <option value={6}>Cumartesi</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-3">
+              <button
+                onClick={saveBackupConfig}
+                disabled={backupLoading}
+                className="btn-primary h-11 px-6 disabled:opacity-50"
+              >
+                Yedekleme Ayarlarını Kaydet
+              </button>
+              <button
+                onClick={() => runManagedBackupNow('full')}
+                disabled={backupLoading}
+                className="px-5 py-2.5 bg-white border border-border-color text-text-main rounded-xl text-[11px] font-bold uppercase tracking-widest hover:bg-primary/5 transition-all disabled:opacity-50"
+              >
+                Tam Dosya Yedeği Al
+              </button>
+              <button
+                onClick={() => runManagedBackupNow('none')}
+                disabled={backupLoading}
+                className="px-5 py-2.5 bg-white border border-border-color text-text-main rounded-xl text-[11px] font-bold uppercase tracking-widest hover:bg-primary/5 transition-all disabled:opacity-50"
+              >
+                Sadece DB Yedeği Al
+              </button>
+            </div>
+
+            <div className="flex items-start p-4 bg-blue-50/70 border border-blue-100 rounded-xl">
+              <Info className="w-4 h-4 text-blue-600 mr-3 mt-0.5 flex-shrink-0" />
+              <p className="text-[11px] text-blue-700 leading-relaxed font-bold uppercase tracking-tight opacity-80">
+                Akıllı mod: DB her çalışmada tam alınır. Dosyalar haftada bir tam, diğer günler son tam yedekten sonra değişen dosyalar olarak alınır. Retention eski dosyaları siler ama en son tam dosya yedeğini korur.
+              </p>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px] text-left">
+              <thead>
+                <tr className="border-b border-border-color bg-white">
+                  <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">Yedek</th>
+                  <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">Tür</th>
+                  <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">Boyut</th>
+                  <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">Durum</th>
+                  <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">Tarih</th>
+                  <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">İşlem</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border-color">
+                {(backupStatus?.runs || []).map((run) => (
+                  <tr key={run.id} className="hover:bg-bg-main/60 transition-colors">
+                    <td className="px-6 py-4">
+                      <div className="font-black text-text-main">{run.file_name || run.id.slice(0, 8)}</div>
+                      <div className="text-[10px] text-text-muted font-bold uppercase tracking-tight">{run.created_by || run.trigger_type}</div>
+                      {run.error_message && <div className="mt-1 text-[10px] font-bold text-danger">{run.error_message}</div>}
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className="inline-flex rounded-xl bg-primary/10 px-3 py-1 text-[10px] font-black uppercase tracking-widest text-primary">
+                        {run.backup_kind === 'database' ? 'DB' : `Uploads ${run.upload_mode || ''}`}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 text-xs font-bold text-text-muted">
+                      {formatBytes(run.size_bytes)}
+                      {run.backup_kind === 'uploads' && (
+                        <div className="mt-1 text-[10px]">{run.upload_file_count || 0} dosya</div>
+                      )}
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className={cn(
+                        "inline-flex rounded-xl border px-3 py-1 text-[10px] font-black uppercase tracking-widest",
+                        run.status === 'success'
+                          ? "border-green-100 bg-green-50 text-green-700"
+                          : run.status === 'failed'
+                            ? "border-red-100 bg-red-50 text-red-700"
+                            : "border-gray-200 bg-gray-50 text-gray-600"
+                      )}>
+                        {run.status}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 text-xs font-bold text-text-muted whitespace-nowrap">
+                      {formatBackupDate(run.completed_at || run.started_at)}
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => downloadStoredBackup(run)}
+                          disabled={run.status !== 'success' || !run.file_path}
+                          className="p-2 bg-primary/10 text-primary hover:bg-primary/20 rounded-xl transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                          title="Yedeği indir"
+                        >
+                          <Download className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => deleteStoredBackup(run)}
+                          disabled={!run.file_path || run.status !== 'success'}
+                          className="p-2 bg-red-50 text-danger hover:bg-red-100 rounded-xl transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                          title="Yedeği sil"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {!backupLoading && (!backupStatus?.runs || backupStatus.runs.length === 0) && (
+                  <tr>
+                    <td colSpan={6} className="px-6 py-10 text-center text-sm font-bold text-text-muted">Henüz otomatik yedek kaydı yok.</td>
                   </tr>
                 )}
               </tbody>

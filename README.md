@@ -34,7 +34,17 @@ docker compose up -d
 ```
 
 Uygulama `http://localhost:3000` adresinde açılır.
-Veriler `panel_data` (SQLite) ve `panel_uploads` (görseller) isimli Docker volume'larında kalıcı olarak saklanır.
+Veriler varsayılan olarak `panel_data` (SQLite) ve `panel_uploads` (görseller) isimli Docker volume'larında kalıcı olarak saklanır. Backup arşivleri `./backups` klasörüne yazılır.
+
+Verileri doğrudan host klasörlerinde tutmak için `.env` içine şunları ekleyebilirsin:
+
+```bash
+PANEL_DATA_DIR=/opt/dsdst-panel/data
+PANEL_UPLOADS_DIR=/opt/dsdst-panel/uploads
+PANEL_BACKUP_DIR=/opt/dsdst-panel/backups
+```
+
+> Mevcut named volume'dan host klasörüne geçerken önce canlı DB ve uploads'ı yeni klasöre kopyala; boş klasörle başlatırsan uygulama yeni DB oluşturur.
 
 ```bash
 # Logları izle
@@ -61,6 +71,10 @@ npm run dev        # Vite + Express birlikte localhost:3000
 | `ENCRYPTION_SECRET` | ✅ | API anahtarlarını şifrelemek için AES-256 anahtarı |
 | `PANEL_API_HASH_SECRET` | ✅ | Panel API anahtarlarını hash'lemek için HMAC anahtarı |
 | `DB_PATH` | — | SQLite dosya yolu. **Docker'da mutlaka set et:** `DB_PATH=/data/dsdst_panel.db` (volume'a bağlı). Set edilmezse proje dizinine yazar — Docker container yeniden başlatıldığında veri kaybolur. |
+| `BACKUP_DIR` | — | Otomatik backup arşivlerinin yazılacağı klasör. Docker'da varsayılan: `/backups` |
+| `PANEL_DATA_DIR` | — | docker-compose için host DB klasörü veya named volume adı. Varsayılan: `panel_data` |
+| `PANEL_UPLOADS_DIR` | — | docker-compose için host uploads klasörü veya named volume adı. Varsayılan: `panel_uploads` |
+| `PANEL_BACKUP_DIR` | — | docker-compose için host backup klasörü. Varsayılan: `./backups` |
 | `APP_URL` | — | Uygulamanın dışarıdan erişilen URL'i |
 | `ALLOWED_ORIGINS` | — | İzin verilen CORS origin'leri (virgülle ayrılmış). Boş bırakılırsa hepsi izinli |
 | `GEMINI_API_KEY` | — | Google Gemini AI entegrasyonu için |
@@ -79,8 +93,14 @@ Stok modeli tek merkezi depo stoğudur. Platform bazlı stok fiziksel stok deği
 
 ### Yedek & Geri Yükleme
 
-Panelden **Ayarlar → Yedek İndir** ile ZIP yedek al.
-Geri yüklemek için **Ayarlar → Yedek Yükle** — yalnızca admin yapabilir.
+Panelden **Ayarlar → Gelişmiş Yedekleme Sistemi** ile otomatik yedekleri yönet.
+
+- DB her otomatik çalışmada SQLite hot-backup ile tam yedeklenir.
+- Upload dosyaları akıllı modda haftalık tam, günlük değişen dosyalar şeklinde yedeklenir.
+- Varsayılan saklama süresi 7 gündür; eski dosyalar otomatik silinir.
+- En son tam uploads yedeği, restore zinciri bozulmasın diye retention dışında korunur.
+- **Yedek İndir** butonu tek ZIP içinde DB + uploads tam yedeği indirir.
+- Geri yüklemek için **Ayarlar → Geri Yükle** — yalnızca admin yapabilir.
 
 Manuel yedek (Docker):
 ```bash

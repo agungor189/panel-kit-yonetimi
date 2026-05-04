@@ -165,6 +165,28 @@ const expenseUpload = multer({
 // 500 MB max backup restore size — prevents disk exhaustion from malicious / corrupt uploads.
 const backupUpload = multer({ dest: os.tmpdir(), limits: { fileSize: 500 * 1024 * 1024 } });
 
+const BACKUP_DIR = process.env.BACKUP_DIR || path.join(process.cwd(), "backups");
+const BACKUP_DB_DIR = path.join(BACKUP_DIR, "db");
+const BACKUP_UPLOADS_DIR = path.join(BACKUP_DIR, "uploads");
+
+type BackupConfig = {
+  enabled: boolean;
+  run_at: string;
+  retention_days: number;
+  include_uploads: boolean;
+  uploads_strategy: "smart" | "full" | "incremental" | "none";
+  weekly_full_day: number;
+};
+
+const DEFAULT_BACKUP_CONFIG: BackupConfig = {
+  enabled: true,
+  run_at: "03:00",
+  retention_days: 7,
+  include_uploads: true,
+  uploads_strategy: "smart",
+  weekly_full_day: 0,
+};
+
 export const AppLogger = {
   info: (category: string, message: string, data?: any) => {
     console.log(JSON.stringify({ level: 'INFO', timestamp: new Date().toISOString(), category, message, data }));
@@ -403,6 +425,408 @@ function ensureUniqueExternalOrderId(platform: string, externalOrderId: string, 
     err.statusCode = 409;
     throw err;
   }
+}
+
+function ensureBackupDirectories(): void {
+  fs.mkdirSync(BACKUP_DB_DIR, { recursive: true });
+  fs.mkdirSync(BACKUP_UPLOADS_DIR, { recursive: true });
+}
+
+function safeBackupTimestamp(date = new Date()): string {
+  return date.toISOString().replace(/[:.]/g, "-");
+}
+
+function normalizeBackupConfig(input: any): BackupConfig {
+  const merged = { ...DEFAULT_BACKUP_CONFIG, ...(input && typeof input === "object" ? input : {}) };
+  const runAt = String(merged.run_at || DEFAULT_BACKUP_CONFIG.run_at);
+  const isValidRunAt = /^([01]\d|2[0-3]):[0-5]\d$/.test(runAt);
+  const strategy = ["smart", "full", "incremental", "none"].includes(merged.uploads_strategy)
+    ? merged.uploads_strategy
+    : DEFAULT_BACKUP_CONFIG.uploads_strategy;
+
+  return {
+    enabled: Boolean(merged.enabled),
+    run_at: isValidRunAt ? runAt : DEFAULT_BACKUP_CONFIG.run_at,
+    retention_days: Math.min(30, Math.max(1, Math.trunc(Number(merged.retention_days) || DEFAULT_BACKUP_CONFIG.retention_days))),
+    include_uploads: Boolean(merged.include_uploads),
+    uploads_strategy: strategy as BackupConfig["uploads_strategy"],
+    weekly_full_day: Math.min(6, Math.max(0, Math.trunc(Number(merged.weekly_full_day) || 0))),
+  };
+}
+
+function getBackupConfig(): BackupConfig {
+  return normalizeBackupConfig(readJsonSetting<Partial<BackupConfig>>("backup_config", DEFAULT_BACKUP_CONFIG));
+}
+
+function saveBackupConfig(config: BackupConfig): void {
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
+    .run("backup_config", JSON.stringify(normalizeBackupConfig(config)));
+}
+
+function backupPathIsSafe(filePath: string): boolean {
+  const resolvedRoot = path.resolve(BACKUP_DIR);
+  const resolvedPath = path.resolve(filePath);
+  return resolvedPath === resolvedRoot || resolvedPath.startsWith(`${resolvedRoot}${path.sep}`);
+}
+
+function countFilesInFolder(folderPath: string): { fileCount: number; totalBytes: number } {
+  let fileCount = 0;
+  let totalBytes = 0;
+  if (!fs.existsSync(folderPath)) return { fileCount, totalBytes };
+
+  const walk = (dirPath: string) => {
+    for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+      const fullPath = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        walk(fullPath);
+      } else if (entry.isFile()) {
+        const stat = fs.statSync(fullPath);
+        fileCount++;
+        totalBytes += stat.size;
+      }
+    }
+  };
+
+  walk(folderPath);
+  return { fileCount, totalBytes };
+}
+
+function addUploadFilesToZip(zip: AdmZip, mode: "full" | "incremental", since?: Date | null): { fileCount: number; totalBytes: number } {
+  let fileCount = 0;
+  let totalBytes = 0;
+  const root = path.resolve(uploadsDir);
+  if (!fs.existsSync(root)) return { fileCount, totalBytes };
+
+  const normalizedSince = mode === "incremental" && since ? since.getTime() : null;
+
+  const walk = (dirPath: string) => {
+    for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+      const fullPath = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        walk(fullPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+
+      const stat = fs.statSync(fullPath);
+      if (normalizedSince !== null && stat.mtime.getTime() <= normalizedSince) continue;
+
+      const relative = path.relative(root, fullPath).split(path.sep).join("/");
+      const zipDir = path.posix.join("uploads", path.posix.dirname(relative));
+      zip.addLocalFile(fullPath, zipDir === "uploads/." ? "uploads" : zipDir, path.posix.basename(relative));
+      fileCount++;
+      totalBytes += stat.size;
+    }
+  };
+
+  walk(root);
+  return { fileCount, totalBytes };
+}
+
+function createBackupRun(triggerType: string, backupKind: string, uploadMode: string | null, createdBy?: string | null): string {
+  const id = uuidv4();
+  db.prepare(`
+    INSERT INTO backup_runs (id, trigger_type, backup_kind, upload_mode, status, created_by, started_at)
+    VALUES (?, ?, ?, ?, 'running', ?, CURRENT_TIMESTAMP)
+  `).run(id, triggerType, backupKind, uploadMode, createdBy || null);
+  return id;
+}
+
+function finishBackupRun(runId: string, filePath: string, manifest: any): void {
+  const fileName = path.basename(filePath);
+  const sizeBytes = fs.existsSync(filePath) ? fs.statSync(filePath).size : 0;
+  db.prepare(`
+    UPDATE backup_runs
+    SET status = 'success',
+        file_name = ?,
+        file_path = ?,
+        size_bytes = ?,
+        db_size_bytes = ?,
+        upload_file_count = ?,
+        upload_total_bytes = ?,
+        manifest_json = ?,
+        completed_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(
+    fileName,
+    filePath,
+    sizeBytes,
+    Number(manifest?.contents?.database?.size_bytes || 0),
+    Number(manifest?.contents?.uploads?.file_count || 0),
+    Number(manifest?.contents?.uploads?.total_bytes || 0),
+    JSON.stringify(manifest),
+    runId,
+  );
+}
+
+function failBackupRun(runId: string, err: any): void {
+  db.prepare(`
+    UPDATE backup_runs
+    SET status = 'failed',
+        error_message = ?,
+        completed_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(err?.message || String(err), runId);
+}
+
+function latestSuccessfulUploadsFullBackup(): Date | null {
+  const row = db.prepare(`
+    SELECT completed_at
+    FROM backup_runs
+    WHERE backup_kind = 'uploads'
+      AND upload_mode = 'full'
+      AND status = 'success'
+      AND completed_at IS NOT NULL
+    ORDER BY datetime(completed_at) DESC
+    LIMIT 1
+  `).get() as any;
+
+  if (!row?.completed_at) return null;
+  const parsed = new Date(row.completed_at);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+async function createDatabaseBackupArchive(triggerType: string, createdBy?: string | null): Promise<any> {
+  ensureBackupDirectories();
+  const runId = createBackupRun(triggerType, "database", null, createdBy);
+  const ts = safeBackupTimestamp();
+  const tempDbPath = path.join(os.tmpdir(), `dsdst_db_${ts}.sqlite`);
+  const zipPath = path.join(BACKUP_DB_DIR, `dsdst_db_${ts}.zip`);
+
+  try {
+    await db.backup(tempDbPath);
+    const tempDbSize = fs.statSync(tempDbPath).size;
+    const zip = new AdmZip();
+    zip.addLocalFile(tempDbPath, "", "dsdst_panel.db");
+    const manifest = {
+      app: "DSDST Panel",
+      version: "v2.5.5",
+      created_at: new Date().toISOString(),
+      created_by: createdBy || null,
+      trigger_type: triggerType,
+      backup_type: "database",
+      contents: {
+        database: { entry: "dsdst_panel.db", source_path: DB_PATH, size_bytes: tempDbSize },
+        uploads: { entry: null, included: false, file_count: 0, total_bytes: 0 },
+      },
+    };
+    zip.addFile("backup_manifest.json", Buffer.from(JSON.stringify(manifest, null, 2), "utf8"));
+    zip.writeZip(zipPath);
+    finishBackupRun(runId, zipPath, manifest);
+    return { runId, filePath: zipPath, manifest };
+  } catch (err) {
+    failBackupRun(runId, err);
+    try { fs.unlinkSync(zipPath); } catch (_) {}
+    throw err;
+  } finally {
+    try { fs.unlinkSync(tempDbPath); } catch (_) {}
+  }
+}
+
+async function createUploadsBackupArchive(triggerType: string, mode: "full" | "incremental", createdBy?: string | null, since?: Date | null): Promise<any> {
+  ensureBackupDirectories();
+  const runId = createBackupRun(triggerType, "uploads", mode, createdBy);
+  const ts = safeBackupTimestamp();
+  const zipPath = path.join(BACKUP_UPLOADS_DIR, `dsdst_uploads_${mode}_${ts}.zip`);
+
+  try {
+    const zip = new AdmZip();
+    const uploadStats = addUploadFilesToZip(zip, mode, since);
+    const manifest = {
+      app: "DSDST Panel",
+      version: "v2.5.5",
+      created_at: new Date().toISOString(),
+      created_by: createdBy || null,
+      trigger_type: triggerType,
+      backup_type: "uploads",
+      upload_mode: mode,
+      incremental_since: mode === "incremental" && since ? since.toISOString() : null,
+      contents: {
+        database: { entry: null, included: false, size_bytes: 0 },
+        uploads: {
+          entry: "uploads/",
+          source_path: uploadsDir,
+          exists: fs.existsSync(uploadsDir),
+          file_count: uploadStats.fileCount,
+          total_bytes: uploadStats.totalBytes,
+        },
+      },
+    };
+    zip.addFile("backup_manifest.json", Buffer.from(JSON.stringify(manifest, null, 2), "utf8"));
+    zip.writeZip(zipPath);
+    finishBackupRun(runId, zipPath, manifest);
+    return { runId, filePath: zipPath, manifest };
+  } catch (err) {
+    failBackupRun(runId, err);
+    try { fs.unlinkSync(zipPath); } catch (_) {}
+    throw err;
+  }
+}
+
+async function createFullDownloadBackupArchive(createdBy?: string | null): Promise<{ zipPath: string; tempDbPath: string; manifest: any }> {
+  const ts = Date.now();
+  const tempDbPath = path.join(os.tmpdir(), `dsdst_backup_${ts}.sqlite`);
+  const zipPath = path.join(os.tmpdir(), `dsdst_backup_${ts}.zip`);
+
+  try {
+    await db.backup(tempDbPath);
+    const zip = new AdmZip();
+    zip.addLocalFile(tempDbPath, "", "dsdst_panel.db");
+    const uploadStats = addUploadFilesToZip(zip, "full");
+
+    const manifest = {
+      app: "DSDST Panel",
+      version: "v2.5.5",
+      created_at: new Date().toISOString(),
+      created_by: createdBy || null,
+      trigger_type: "download",
+      backup_type: "full",
+      contents: {
+        database: {
+          entry: "dsdst_panel.db",
+          source_path: DB_PATH,
+          size_bytes: fs.statSync(tempDbPath).size,
+        },
+        uploads: {
+          entry: "uploads/",
+          source_path: uploadsDir,
+          exists: fs.existsSync(uploadsDir),
+          file_count: uploadStats.fileCount,
+          total_bytes: uploadStats.totalBytes,
+        },
+      },
+    };
+    zip.addFile("backup_manifest.json", Buffer.from(JSON.stringify(manifest, null, 2), "utf8"));
+    zip.writeZip(zipPath);
+    return { zipPath, tempDbPath, manifest };
+  } catch (err) {
+    try { fs.unlinkSync(tempDbPath); } catch (_) {}
+    try { fs.unlinkSync(zipPath); } catch (_) {}
+    throw err;
+  }
+}
+
+function shouldCreateFullUploadsBackup(config: BackupConfig): boolean {
+  if (config.uploads_strategy === "full") return true;
+  if (config.uploads_strategy === "incremental") return false;
+  const latestFull = latestSuccessfulUploadsFullBackup();
+  if (!latestFull) return true;
+  return new Date().getDay() === config.weekly_full_day;
+}
+
+async function runManagedBackup(triggerType: "manual" | "scheduled", createdBy?: string | null, options?: { uploads_mode?: "smart" | "full" | "incremental" | "none" }): Promise<any[]> {
+  const config = getBackupConfig();
+  const runs: any[] = [];
+  runs.push(await createDatabaseBackupArchive(triggerType, createdBy));
+
+  const requestedUploadsMode = options?.uploads_mode || config.uploads_strategy;
+  const includeUploads = config.include_uploads && requestedUploadsMode !== "none";
+  if (includeUploads) {
+    const fullMode = requestedUploadsMode === "full" || (requestedUploadsMode === "smart" && shouldCreateFullUploadsBackup(config));
+    const uploadMode = fullMode ? "full" : "incremental";
+    const since = uploadMode === "incremental" ? latestSuccessfulUploadsFullBackup() : null;
+    runs.push(await createUploadsBackupArchive(triggerType, uploadMode, createdBy, since));
+  }
+
+  cleanupOldBackups(config.retention_days);
+  return runs;
+}
+
+function cleanupOldBackups(retentionDays: number): void {
+  ensureBackupDirectories();
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  const latestUploadsFull = db.prepare(`
+    SELECT id
+    FROM backup_runs
+    WHERE backup_kind = 'uploads'
+      AND upload_mode = 'full'
+      AND status = 'success'
+    ORDER BY datetime(completed_at) DESC
+    LIMIT 1
+  `).get() as any;
+
+  const oldRuns = db.prepare(`
+    SELECT id, file_path, backup_kind, upload_mode, completed_at
+    FROM backup_runs
+    WHERE status = 'success'
+      AND completed_at IS NOT NULL
+      AND datetime(completed_at) < datetime(?)
+  `).all(new Date(cutoff).toISOString()) as any[];
+
+  for (const run of oldRuns) {
+    if (latestUploadsFull?.id === run.id) continue;
+    if (run.file_path && backupPathIsSafe(run.file_path)) {
+      try { fs.unlinkSync(run.file_path); } catch (_) {}
+    }
+    db.prepare(`
+      UPDATE backup_runs
+      SET status = 'expired',
+          file_path = NULL,
+          error_message = 'Retention süresi dolduğu için dosya silindi.'
+      WHERE id = ?
+    `).run(run.id);
+  }
+}
+
+function backupDirectoryStats(): { fileCount: number; totalBytes: number } {
+  return countFilesInFolder(BACKUP_DIR);
+}
+
+function nextBackupRunAt(config: BackupConfig): string | null {
+  if (!config.enabled) return null;
+  const [hour, minute] = config.run_at.split(":").map(Number);
+  const next = new Date();
+  next.setHours(hour, minute, 0, 0);
+  if (next.getTime() <= Date.now()) next.setDate(next.getDate() + 1);
+  return next.toISOString();
+}
+
+function localDateKey(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+let backupSchedulerStarted = false;
+let backupSchedulerRunning = false;
+
+function startBackupScheduler(): void {
+  if (backupSchedulerStarted) return;
+  backupSchedulerStarted = true;
+
+  const tick = async () => {
+    if (backupSchedulerRunning) return;
+    const config = getBackupConfig();
+    if (!config.enabled) return;
+
+    const [hour, minute] = config.run_at.split(":").map(Number);
+    const now = new Date();
+    if (now.getHours() !== hour || now.getMinutes() !== minute) return;
+
+    const today = localDateKey(now);
+    const lastAttempt = readJsonSetting<string>("backup_last_auto_attempt_date", "");
+    if (lastAttempt === today) return;
+
+    backupSchedulerRunning = true;
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
+      .run("backup_last_auto_attempt_date", JSON.stringify(today));
+
+    try {
+      const runs = await runManagedBackup("scheduled", "system");
+      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
+        .run("backup_last_auto_success_at", JSON.stringify(new Date().toISOString()));
+      logActivity("AUTO_BACKUP_COMPLETED", "system", "backup", { runs: runs.map((run) => run.runId) }, "system");
+      AppLogger.info("BACKUP", "Scheduled backup completed", { runs: runs.map((run) => run.runId) });
+    } catch (err) {
+      AppLogger.error("BACKUP", "Scheduled backup failed", err);
+    } finally {
+      backupSchedulerRunning = false;
+    }
+  };
+
+  setInterval(tick, 60 * 1000);
+  setTimeout(tick, 10 * 1000);
 }
 
 function buildExpenseCashDescription(expense: any): string {
@@ -3724,72 +4148,116 @@ async function startServer() {
   // --- DATABASE BACKUP / RESTORE ---
   // Both endpoints are admin-only — a backup contains the entire DB including credentials.
   app.get("/api/backup/download", requireAdmin, async (req, res) => {
-    const ts = Date.now();
-    // Write temp files to OS temp dir, not process.cwd(), to avoid polluting the project dir.
-    const backupPath = path.join(os.tmpdir(), `dsdst_backup_${ts}.sqlite`);
-    const zipPath    = path.join(os.tmpdir(), `dsdst_backup_${ts}.zip`);
+    let tempDbPath = "";
+    let zipPath = "";
     try {
-      await db.backup(backupPath);
-
-      const zip = new AdmZip();
-      zip.addLocalFile(backupPath, "", "dsdst_panel.db");
-
-      const uploadsDir = path.join(process.cwd(), "uploads");
-      let uploadFileCount = 0;
-      let uploadTotalBytes = 0;
-      if (fs.existsSync(uploadsDir)) {
-        zip.addLocalFolder(uploadsDir, "uploads");
-        const walkUploads = (dirPath: string) => {
-          for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
-            const fullPath = path.join(dirPath, entry.name);
-            if (entry.isDirectory()) {
-              walkUploads(fullPath);
-            } else if (entry.isFile()) {
-              uploadFileCount++;
-              uploadTotalBytes += fs.statSync(fullPath).size;
-            }
-          }
-        };
-        walkUploads(uploadsDir);
-      }
-
-      const manifest = {
-        app: "DSDST Panel",
-        version: "v2.5.5",
-        created_at: new Date().toISOString(),
-        created_by: req.user?.username || null,
-        backup_type: "full",
-        contents: {
-          database: {
-            entry: "dsdst_panel.db",
-            source_path: DB_PATH,
-            size_bytes: fs.statSync(backupPath).size,
-          },
-          uploads: {
-            entry: "uploads/",
-            source_path: uploadsDir,
-            exists: fs.existsSync(uploadsDir),
-            file_count: uploadFileCount,
-            total_bytes: uploadTotalBytes,
-          },
-        },
-      };
-      zip.addFile("backup_manifest.json", Buffer.from(JSON.stringify(manifest, null, 2), "utf8"));
-
-      zip.writeZip(zipPath);
+      const backup = await createFullDownloadBackupArchive(req.user?.username || null);
+      tempDbPath = backup.tempDbPath;
+      zipPath = backup.zipPath;
 
       logActivity("BACKUP_DOWNLOADED", "system", "backup", { ip: req.ip }, req.user?.id);
 
       res.setHeader("Cache-Control", "no-store");
       res.download(zipPath, `dsdst_backup_${new Date().toISOString().split('T')[0]}.zip`, () => {
-        try { fs.unlinkSync(backupPath); } catch (_) {}
+        try { fs.unlinkSync(tempDbPath); } catch (_) {}
         try { fs.unlinkSync(zipPath); }    catch (_) {}
       });
     } catch (err: any) {
-      try { fs.unlinkSync(backupPath); } catch (_) {}
-      try { fs.unlinkSync(zipPath); }    catch (_) {}
+      if (tempDbPath) try { fs.unlinkSync(tempDbPath); } catch (_) {}
+      if (zipPath) try { fs.unlinkSync(zipPath); } catch (_) {}
       AppLogger.error('BACKUP_ERROR', 'Backup download failed', err);
       res.status(500).json({ success: false, error: { code: 'BACKUP_FAILED', message: err.message } });
+    }
+  });
+
+  app.get("/api/backup/status", requireAdmin, (req, res) => {
+    try {
+      const config = getBackupConfig();
+      cleanupOldBackups(config.retention_days);
+      const runs = db.prepare(`
+        SELECT id, trigger_type, backup_kind, upload_mode, status, file_name, file_path,
+               size_bytes, db_size_bytes, upload_file_count, upload_total_bytes,
+               error_message, created_by, started_at, completed_at
+        FROM backup_runs
+        ORDER BY datetime(started_at) DESC
+        LIMIT 30
+      `).all();
+      const storage = backupDirectoryStats();
+      res.json({
+        success: true,
+        data: {
+          config,
+          backup_dir: BACKUP_DIR,
+          db_path: DB_PATH,
+          uploads_dir: uploadsDir,
+          next_run_at: nextBackupRunAt(config),
+          storage,
+          runs,
+        },
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: { code: 'BACKUP_STATUS_FAILED', message: err.message } });
+    }
+  });
+
+  app.put("/api/backup/config", requireAdmin, (req, res) => {
+    try {
+      const nextConfig = normalizeBackupConfig(req.body || {});
+      saveBackupConfig(nextConfig);
+      cleanupOldBackups(nextConfig.retention_days);
+      logActivity("BACKUP_CONFIG_UPDATED", "system", "backup", { after: nextConfig }, req.user?.id);
+      res.json({ success: true, data: nextConfig });
+    } catch (err: any) {
+      res.status(400).json({ success: false, error: { code: 'BACKUP_CONFIG_FAILED', message: err.message } });
+    }
+  });
+
+  app.post("/api/backup/run", requireAdmin, async (req, res) => {
+    try {
+      const mode = ["smart", "full", "incremental", "none"].includes(req.body?.uploads_mode)
+        ? req.body.uploads_mode
+        : "smart";
+      const runs = await runManagedBackup("manual", req.user?.username || null, { uploads_mode: mode });
+      logActivity("BACKUP_CREATED", "system", "backup", { runs: runs.map((run) => run.runId), uploads_mode: mode }, req.user?.id);
+      res.json({ success: true, data: { runs: runs.map((run) => ({ id: run.runId, manifest: run.manifest })) } });
+    } catch (err: any) {
+      AppLogger.error("BACKUP_ERROR", "Managed backup failed", err);
+      res.status(500).json({ success: false, error: { code: 'BACKUP_RUN_FAILED', message: err.message } });
+    }
+  });
+
+  app.get("/api/backup/files/:id/download", requireAdmin, (req, res) => {
+    try {
+      const run = db.prepare("SELECT * FROM backup_runs WHERE id = ?").get(req.params.id) as any;
+      if (!run || run.status !== "success" || !run.file_path) {
+        return res.status(404).json({ success: false, error: { code: 'BACKUP_NOT_FOUND', message: 'Yedek dosyası bulunamadı.' } });
+      }
+      if (!backupPathIsSafe(run.file_path) || !fs.existsSync(run.file_path)) {
+        return res.status(404).json({ success: false, error: { code: 'BACKUP_FILE_MISSING', message: 'Yedek dosyası disk üzerinde bulunamadı.' } });
+      }
+
+      res.setHeader("Cache-Control", "no-store");
+      res.download(run.file_path, run.file_name || path.basename(run.file_path));
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: { code: 'BACKUP_DOWNLOAD_FAILED', message: err.message } });
+    }
+  });
+
+  app.delete("/api/backup/files/:id", requireAdmin, (req, res) => {
+    try {
+      const run = db.prepare("SELECT * FROM backup_runs WHERE id = ?").get(req.params.id) as any;
+      if (!run) {
+        return res.status(404).json({ success: false, error: { code: 'BACKUP_NOT_FOUND', message: 'Yedek kaydı bulunamadı.' } });
+      }
+      if (run.file_path && backupPathIsSafe(run.file_path)) {
+        try { fs.unlinkSync(run.file_path); } catch (_) {}
+      }
+      db.prepare("UPDATE backup_runs SET status = 'deleted', file_path = NULL, error_message = 'Admin tarafından silindi.' WHERE id = ?")
+        .run(req.params.id);
+      logActivity("BACKUP_DELETED", "system", "backup", { backup_id: req.params.id, file_name: run.file_name }, req.user?.id);
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: { code: 'BACKUP_DELETE_FAILED', message: err.message } });
     }
   });
 
@@ -3998,6 +4466,8 @@ async function startServer() {
       isRestoring = false;
     }
   });
+
+  startBackupScheduler();
 
   // --- VITE MIDDLEWARE ---
 

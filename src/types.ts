@@ -219,6 +219,46 @@ export interface PanelApiKey {
   maskedKey: string;
 }
 
+export interface BackupConfig {
+  enabled: boolean;
+  run_at: string;
+  retention_days: number;
+  include_uploads: boolean;
+  uploads_strategy: 'smart' | 'full' | 'incremental' | 'none';
+  weekly_full_day: number;
+}
+
+export interface BackupRun {
+  id: string;
+  trigger_type: string;
+  backup_kind: 'database' | 'uploads';
+  upload_mode?: 'full' | 'incremental' | null;
+  status: 'running' | 'success' | 'failed' | 'expired' | 'deleted';
+  file_name?: string | null;
+  file_path?: string | null;
+  size_bytes?: number;
+  db_size_bytes?: number;
+  upload_file_count?: number;
+  upload_total_bytes?: number;
+  error_message?: string | null;
+  created_by?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+
+export interface BackupStatus {
+  config: BackupConfig;
+  backup_dir: string;
+  db_path: string;
+  uploads_dir: string;
+  next_run_at?: string | null;
+  storage: {
+    fileCount: number;
+    totalBytes: number;
+  };
+  runs: BackupRun[];
+}
+
 export interface Settings {
   company_name: string;
   low_stock_threshold: number;
@@ -228,6 +268,7 @@ export interface Settings {
   default_buffer_percentage: number;
   default_profit_percentage?: string | number;
   api_key?: string;
+  backup_config?: BackupConfig;
   sales_channels?: string[];
   commission_rates: Record<string, number>;
   product_categories: string[];

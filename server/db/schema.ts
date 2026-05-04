@@ -128,6 +128,25 @@ export function applySchema(db: Database.Database): void {
       created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS backup_runs (
+      id                 TEXT PRIMARY KEY,
+      trigger_type       TEXT NOT NULL,
+      backup_kind        TEXT NOT NULL,
+      upload_mode        TEXT,
+      status             TEXT NOT NULL DEFAULT 'running',
+      file_name          TEXT,
+      file_path          TEXT,
+      size_bytes         INTEGER DEFAULT 0,
+      db_size_bytes      INTEGER DEFAULT 0,
+      upload_file_count  INTEGER DEFAULT 0,
+      upload_total_bytes INTEGER DEFAULT 0,
+      manifest_json      TEXT,
+      error_message      TEXT,
+      created_by         TEXT,
+      started_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
+      completed_at       DATETIME
+    );
+
     CREATE TABLE IF NOT EXISTS recurring_payment_plans (
       id                    TEXT    PRIMARY KEY,
       title                 TEXT    NOT NULL,

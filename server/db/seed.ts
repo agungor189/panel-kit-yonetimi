@@ -89,6 +89,14 @@ export function applySeed(db: Database.Database): void {
   s.run("default_buffer_percentage", "20");
   s.run("default_profit_percentage", "30");
   s.run("api_key",                   uuidv4());
+  s.run("backup_config", JSON.stringify({
+    enabled: true,
+    run_at: "03:00",
+    retention_days: 7,
+    include_uploads: true,
+    uploads_strategy: "smart",
+    weekly_full_day: 0,
+  }));
   s.run("sales_channels", JSON.stringify(["Satış Sistemi", "Website", "Trendyol", "Hepsiburada", "Amazon", "N11"]));
   s.run("commission_rates", JSON.stringify({
     "Satış Sistemi": 0, Website: 0, Trendyol: 15, Hepsiburada: 15, Amazon: 10, N11: 15,

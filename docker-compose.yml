@@ -10,6 +10,8 @@ services:
       PORT: 3000
       # Database — persisted via the volume below
       DB_PATH: /data/dsdst_panel.db
+      # Automatic backups — persisted via the volume below
+      BACKUP_DIR: /backups
       # Required secrets — fill these in before running (or use a .env file)
       JWT_SECRET: ${JWT_SECRET}
       ENCRYPTION_SECRET: ${ENCRYPTION_SECRET}
@@ -20,10 +22,12 @@ services:
       # Comma-separated allowed origins. Leave empty to allow all (tunnel / dev).
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
     volumes:
-      # SQLite database — never stored inside the container
-      - panel_data:/data
-      # Uploaded product images and expense attachments
-      - panel_uploads:/app/uploads
+      # SQLite database — use PANEL_DATA_DIR=/opt/dsdst-panel/data for visible host storage.
+      - ${PANEL_DATA_DIR:-panel_data}:/data
+      # Uploaded product images and expense attachments.
+      - ${PANEL_UPLOADS_DIR:-panel_uploads}:/app/uploads
+      # Automatic backup archives. Defaults to a visible ./backups folder.
+      - ${PANEL_BACKUP_DIR:-./backups}:/backups
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/public/health"]
       interval: 30s

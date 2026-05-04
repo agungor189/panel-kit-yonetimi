@@ -37,11 +37,12 @@ COPY tsconfig.json ./
 RUN npm prune --omit=dev --ignore-scripts
 
 # Data directories — mount as Docker volumes in production.
-RUN mkdir -p /data /app/uploads
+RUN mkdir -p /data /app/uploads /backups
 
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV DB_PATH=/data/dsdst_panel.db
+ENV BACKUP_DIR=/backups
 
 EXPOSE 3000
 
