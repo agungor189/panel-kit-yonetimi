@@ -313,6 +313,98 @@ function centralStockChannel(platformName?: string | null): string {
   return channel || 'Merkez Depo';
 }
 
+function getProductBomComponents(productId: string): any[] {
+  if (!productId) return [];
+  return db.prepare(`
+    SELECT
+      b.component_product_id,
+      b.quantity_per_unit,
+      b.component_role,
+      p.id,
+      p.sku,
+      p.name,
+      p.title,
+      COALESCE(p.central_stock, 0) as central_stock,
+      COALESCE(p.purchase_cost, 0) as purchase_cost,
+      COALESCE(p.purchase_price_usd, 0) as purchase_price_usd,
+      COALESCE(p.weight, 0) as weight
+    FROM product_bom b
+    JOIN products p ON p.id = b.component_product_id
+    WHERE b.parent_product_id = ?
+    ORDER BY b.component_role ASC, p.sku ASC
+  `).all(productId) as any[];
+}
+
+function getProductStockProfile(product: any) {
+  const physicalStock = stockQuantity(product?.central_stock);
+  const components = product?.id ? getProductBomComponents(product.id) : [];
+
+  if (components.length === 0) {
+    return {
+      hasBom: false,
+      available_stock: physicalStock,
+      physical_stock: physicalStock,
+      unit_purchase_cost: Number(product?.purchase_cost) || 0,
+      unit_weight: Number(product?.weight) || 0,
+      components: [],
+    };
+  }
+
+  let availableStock = Number.POSITIVE_INFINITY;
+  let unitPurchaseCost = 0;
+  let unitWeight = 0;
+
+  const normalizedComponents = components.map((component) => {
+    const quantityPerUnit = Math.max(Number(component.quantity_per_unit) || 0, 0);
+    const componentStock = stockQuantity(component.central_stock);
+    const componentAvailable = quantityPerUnit > 0 ? Math.floor(componentStock / quantityPerUnit) : 0;
+    availableStock = Math.min(availableStock, componentAvailable);
+    unitPurchaseCost += (Number(component.purchase_cost) || 0) * quantityPerUnit;
+    unitWeight += (Number(component.weight) || 0) * quantityPerUnit;
+
+    return {
+      ...component,
+      quantity_per_unit: quantityPerUnit,
+      available_for_parent: componentAvailable,
+    };
+  });
+
+  if (!Number.isFinite(availableStock)) availableStock = 0;
+
+  return {
+    hasBom: true,
+    available_stock: Math.max(Math.floor(availableStock), 0),
+    physical_stock: physicalStock,
+    unit_purchase_cost: unitPurchaseCost || (Number(product?.purchase_cost) || 0),
+    unit_weight: unitWeight || (Number(product?.weight) || 0),
+    components: normalizedComponents,
+  };
+}
+
+function hydrateProductStock(product: any, includeBom = false) {
+  const stockProfile = getProductStockProfile(product);
+  return {
+    ...product,
+    total_stock: stockProfile.available_stock,
+    available_stock: stockProfile.available_stock,
+    physical_stock: stockProfile.physical_stock,
+    is_assembly: stockProfile.hasBom ? 1 : 0,
+    stock_source: stockProfile.hasBom ? 'bom' : 'central',
+    purchase_cost: stockProfile.hasBom ? stockProfile.unit_purchase_cost : product.purchase_cost,
+    weight: stockProfile.hasBom ? stockProfile.unit_weight : product.weight,
+    ...(includeBom ? { bom_components: stockProfile.components } : {}),
+  };
+}
+
+function catalogVisibilityWhere(includeComponents: boolean): string {
+  if (includeComponents) return "COALESCE(p.status, 'Active') != 'deleted'";
+  return `
+    COALESCE(p.status, 'Active') != 'deleted'
+    AND COALESCE(p.is_sellable, 1) = 1
+    AND COALESCE(p.visible_in_catalog, 1) = 1
+  `;
+}
+
 function orderDateKey(date = new Date()): string {
   const year = String(date.getFullYear()).slice(2);
   const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -2230,21 +2322,27 @@ async function startServer() {
       const totalExpenses = periodExpenses;
       const previousExpenses = previousPeriodExpenses;
 
-      const lowStockProductsQuery = db.prepare(`
-        SELECT p.*,
-          (SELECT path FROM product_images WHERE product_id = p.id ORDER BY sort_order ASC LIMIT 1) as cover_image,
-          COALESCE(p.central_stock, 0) as total_stock
-        FROM products p
-        WHERE COALESCE(p.central_stock, 0) <= COALESCE(NULLIF(p.min_stock_level, 0), CAST((SELECT value FROM settings WHERE key = 'low_stock_threshold') AS INTEGER), 50)
-        AND p.status = 'Active'
-        ORDER BY total_stock ASC
-      `).all() as any[];
+      const defaultLowStockThreshold = Number(
+        (db.prepare("SELECT value FROM settings WHERE key = 'low_stock_threshold'").get() as any)?.value
+      ) || 50;
 
-      const allProducts = db.prepare(`
-        SELECT p.id, p.purchase_cost, p.sale_price, p.purchase_price_usd, p.exchange_rate_used, p.buffer_percentage, p.material, p.model, p.size, p.category,
-          COALESCE(p.central_stock, 0) as total_stock
+      const lowStockCandidates = (db.prepare(`
+        SELECT p.*,
+          (SELECT path FROM product_images WHERE product_id = p.id ORDER BY sort_order ASC LIMIT 1) as cover_image
         FROM products p
-      `).all() as any[];
+        WHERE ${catalogVisibilityWhere(false)}
+          AND p.status = 'Active'
+      `).all() as any[]).map((product) => hydrateProductStock(product));
+      const lowStockProductsQuery = lowStockCandidates
+        .filter((product) => product.total_stock <= (Number(product.min_stock_level) || defaultLowStockThreshold))
+        .sort((a, b) => a.total_stock - b.total_stock);
+
+      const allProducts = (db.prepare(`
+        SELECT p.id, p.purchase_cost, p.sale_price, p.purchase_price_usd, p.exchange_rate_used, p.buffer_percentage, p.material, p.model, p.size, p.category,
+          p.central_stock, p.weight
+        FROM products p
+        WHERE ${catalogVisibilityWhere(false)}
+      `).all() as any[]).map((product) => hydrateProductStock(product));
 
       let totalSaleValue = 0;
       let totalCostValue = 0;
@@ -2430,13 +2528,14 @@ async function startServer() {
   });
 
   app.get("/api/products", (req, res) => {
-    const products = db.prepare(`
+    const includeComponents = req.query.include_components === '1' || req.query.include_components === 'true';
+    const products = (db.prepare(`
       SELECT p.*, 
-        (SELECT path FROM product_images WHERE product_id = p.id ORDER BY sort_order ASC LIMIT 1) as cover_image,
-        COALESCE(p.central_stock, 0) as total_stock
+        (SELECT path FROM product_images WHERE product_id = p.id ORDER BY sort_order ASC LIMIT 1) as cover_image
       FROM products p
+      WHERE ${catalogVisibilityWhere(includeComponents)}
       ORDER BY p.created_at DESC
-    `).all();
+    `).all() as any[]).map((product) => hydrateProductStock(product));
     res.json(products);
   });
 
@@ -2447,7 +2546,7 @@ async function startServer() {
     const images = db.prepare("SELECT * FROM product_images WHERE product_id = ? ORDER BY sort_order ASC").all(req.params.id);
     const platforms = db.prepare("SELECT * FROM product_platforms WHERE product_id = ?").all(req.params.id);
     
-    res.json({ ...product, total_stock: product.central_stock || 0, images, platforms });
+    res.json({ ...hydrateProductStock(product, true), images, platforms });
   });
 
 
@@ -2607,8 +2706,11 @@ async function startServer() {
         beforeState.images = db.prepare("SELECT id, path, sort_order FROM product_images WHERE product_id = ? ORDER BY sort_order ASC").all(req.params.id);
       }
       const previousCentralStock = stockQuantity(beforeState?.central_stock);
+      const hasBom = beforeState
+        ? (db.prepare("SELECT COUNT(*) as count FROM product_bom WHERE parent_product_id = ?").get(req.params.id) as any)?.count > 0
+        : false;
       const nextCentralStock = hasCentralStockPayload(req.body)
-        ? resolveCentralStock(req.body, previousCentralStock)
+        ? (hasBom ? previousCentralStock : resolveCentralStock(req.body, previousCentralStock))
         : previousCentralStock;
 
       db.prepare(`
@@ -2754,6 +2856,10 @@ async function startServer() {
       db.transaction(() => {
         const beforeState = db.prepare("SELECT id, central_stock FROM products WHERE id = ?").get(product_id) as any;
         if (!beforeState) throw new Error("Ürün bulunamadı.");
+        const hasBom = (db.prepare("SELECT COUNT(*) as count FROM product_bom WHERE parent_product_id = ?").get(product_id) as any)?.count > 0;
+        if (hasBom) {
+          throw new Error("Bu final ürünün stoğu H parça reçetesinden hesaplanır. Stok düzeltmesini ilgili H komponent ürününde yapın.");
+        }
 
         const beforeStock = stockQuantity(beforeState.central_stock);
         const nextStock = beforeStock + delta;
@@ -3599,6 +3705,75 @@ async function startServer() {
   const FINAL_SALE_STATUSES = ['İptal Edildi', 'İade Edildi'];
   const isFinalSaleStatus = (status?: string) => FINAL_SALE_STATUSES.includes(status || '');
 
+  const buildSaleStockPlan = (product: any, saleQuantity: number) => {
+    const stockProfile = getProductStockProfile(product);
+    const quantity = Math.max(Math.trunc(Number(saleQuantity)) || 0, 0);
+
+    if (!stockProfile.hasBom) {
+      return {
+        hasBom: false,
+        available_stock: stockProfile.available_stock,
+        unit_purchase_cost: stockProfile.unit_purchase_cost,
+        unit_weight: stockProfile.unit_weight,
+        movements: [{
+          product_id: product.id,
+          sku: product.sku,
+          title: product.title || product.name,
+          quantity_required: quantity,
+          available_stock: stockProfile.available_stock,
+          component_role: null,
+        }],
+      };
+    }
+
+    return {
+      hasBom: true,
+      available_stock: stockProfile.available_stock,
+      unit_purchase_cost: stockProfile.unit_purchase_cost,
+      unit_weight: stockProfile.unit_weight,
+      movements: stockProfile.components.map((component: any) => ({
+        product_id: component.component_product_id,
+        sku: component.sku,
+        title: component.title || component.name,
+        quantity_required: component.quantity_per_unit * quantity,
+        available_stock: stockQuantity(component.central_stock),
+        component_role: component.component_role,
+      })),
+    };
+  };
+
+  const applySaleStockDeduction = (item: any, sale: any) => {
+    for (const movement of item.stock_plan.movements) {
+      const requiredQuantity = Math.trunc(Number(movement.quantity_required));
+      if (!Number.isFinite(requiredQuantity) || requiredQuantity <= 0) continue;
+
+      const stockUpdate = db.prepare(`
+        UPDATE products
+        SET central_stock = COALESCE(central_stock, 0) - ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND COALESCE(central_stock, 0) >= ?
+      `).run(requiredQuantity, movement.product_id, requiredQuantity);
+
+      if (stockUpdate.changes === 0) {
+        const currentStock = db.prepare("SELECT COALESCE(central_stock, 0) as central_stock, title, sku FROM products WHERE id = ?")
+          .get(movement.product_id) as any;
+        throw new Error(
+          `Yetersiz komponent/merkez depo stoğu. ${currentStock?.title || movement.title || item.product_name} (${currentStock?.sku || movement.sku || ''}) için mevcut stok: ${currentStock?.central_stock || 0} adet.`
+        );
+      }
+
+      db.prepare("INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(
+          uuidv4(),
+          movement.product_id,
+          centralStockChannel(sale.platform),
+          -requiredQuantity,
+          `Satış No: ${sale.order_code}`,
+          'OUT'
+        );
+    }
+  };
+
   const restoreSaleStock = (sale: any, finalStatus: string) => {
     const originalMovementReasons = saleStockMovementReasons(sale);
     const restoredByProduct = new Map<string, number>();
@@ -3628,14 +3803,22 @@ async function startServer() {
       restoreToCentralStock(movement.product_id, movement.platform_name, Number(movement.quantity) || 0);
     }
 
+    if (originalMovements.length > 0) return;
+
     const saleItems = db.prepare("SELECT product_id, SUM(quantity) as quantity FROM sale_items WHERE sale_id = ? GROUP BY product_id").all(sale.id) as any[];
     for (const item of saleItems) {
       if (!item.product_id) continue;
       const soldQty = Number(item.quantity) || 0;
-      const restoredQty = restoredByProduct.get(item.product_id) || 0;
-      const remainingQty = soldQty - restoredQty;
-      if (remainingQty > 0) {
-        restoreToCentralStock(item.product_id, sale.platform, remainingQty);
+      const product = db.prepare("SELECT * FROM products WHERE id = ?").get(item.product_id) as any;
+      if (!product) continue;
+      const stockPlan = buildSaleStockPlan(product, soldQty);
+
+      for (const movement of stockPlan.movements) {
+        const restoredQty = restoredByProduct.get(movement.product_id) || 0;
+        const remainingQty = Math.trunc(Number(movement.quantity_required)) - restoredQty;
+        if (remainingQty > 0) {
+          restoreToCentralStock(movement.product_id, sale.platform, remainingQty);
+        }
       }
     }
   };
@@ -3860,17 +4043,27 @@ async function startServer() {
 
         let totalPurchaseCost = 0;
         const processedItems = mergedItems.map((item: any) => {
-          const product = db.prepare("SELECT purchase_cost, central_stock FROM products WHERE id = ?").get(item.product_id) as any;
+          const product = db.prepare("SELECT * FROM products WHERE id = ?").get(item.product_id) as any;
           if (!product) throw new Error(`Ürün bulunamadı: ${item.product_name || item.product_id}`);
-          const pc = product?.purchase_cost || 0;
-          totalPurchaseCost += (pc * item.quantity);
-          return { ...item, purchase_cost: pc, price: item.price || 0, available_stock: stockQuantity(product.central_stock) };
+          if (Number(product.is_sellable) === 0 || Number(product.visible_in_catalog) === 0) {
+            throw new Error(`${product.title || product.name || product.sku} satış ürünü değil. Depo komponentleri doğrudan satılamaz.`);
+          }
+          const stockPlan = buildSaleStockPlan(product, item.quantity);
+          totalPurchaseCost += (stockPlan.unit_purchase_cost * item.quantity);
+          return {
+            ...item,
+            purchase_cost: stockPlan.unit_purchase_cost,
+            price: item.price || 0,
+            available_stock: stockPlan.available_stock,
+            weight: item.weight || stockPlan.unit_weight,
+            stock_plan: stockPlan,
+          };
         });
 
         // 1. Central warehouse stock validation for all items
         for (const item of processedItems) {
           if (item.available_stock < item.quantity) {
-            throw new Error(`Yetersiz merkez depo stoğu. ${item.product_name} için mevcut stok: ${item.available_stock} adet.`);
+            throw new Error(`Yetersiz merkez depo/komponent stoğu. ${item.product_name} için üretilebilir mevcut stok: ${item.available_stock} adet.`);
           }
         }
 
@@ -3951,20 +4144,7 @@ async function startServer() {
 
           insertItem.run(uuidv4(), id, item.product_id, item.product_name, item.quantity, item.weight, item.price, item.purchase_cost, itemNetProfit);
 
-          const stockUpdate = db.prepare(`
-            UPDATE products
-            SET central_stock = COALESCE(central_stock, 0) - ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND COALESCE(central_stock, 0) >= ?
-          `).run(item.quantity, item.product_id, item.quantity);
-
-          if (stockUpdate.changes === 0) {
-            const currentStock = db.prepare("SELECT COALESCE(central_stock, 0) as central_stock FROM products WHERE id = ?").get(item.product_id) as any;
-            throw new Error(`Yetersiz merkez depo stoğu. ${item.product_name} için mevcut stok: ${currentStock?.central_stock || 0} adet.`);
-          }
-
-          db.prepare("INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type) VALUES (?, ?, ?, ?, ?, ?)")
-            .run(uuidv4(), item.product_id, centralStockChannel(plat), -item.quantity, `Satış No: ${orderCode}`, 'OUT');
+          applySaleStockDeduction(item, { order_code: orderCode, platform: plat });
         }
 
         // 4. Auto-create income transaction so the financial ledger is always consistent.
@@ -4192,9 +4372,9 @@ async function startServer() {
 
   const findMatchingProductForMarketplaceLine = (line: { barcode: string; stock_code: string; merchant_sku: string }) => {
     const candidates = [
-      { method: 'barcode', value: line.barcode, sql: "SELECT id FROM products WHERE barcode = ? COLLATE NOCASE LIMIT 1" },
-      { method: 'sku_stock_code', value: line.stock_code, sql: "SELECT id FROM products WHERE sku = ? COLLATE NOCASE LIMIT 1" },
-      { method: 'sku_merchant_sku', value: line.merchant_sku, sql: "SELECT id FROM products WHERE sku = ? COLLATE NOCASE LIMIT 1" },
+      { method: 'barcode', value: line.barcode, sql: "SELECT id FROM products WHERE barcode = ? COLLATE NOCASE AND COALESCE(is_sellable, 1) = 1 AND COALESCE(visible_in_catalog, 1) = 1 LIMIT 1" },
+      { method: 'sku_stock_code', value: line.stock_code, sql: "SELECT id FROM products WHERE sku = ? COLLATE NOCASE AND COALESCE(is_sellable, 1) = 1 AND COALESCE(visible_in_catalog, 1) = 1 LIMIT 1" },
+      { method: 'sku_merchant_sku', value: line.merchant_sku, sql: "SELECT id FROM products WHERE sku = ? COLLATE NOCASE AND COALESCE(is_sellable, 1) = 1 AND COALESCE(visible_in_catalog, 1) = 1 LIMIT 1" },
     ];
 
     for (const candidate of candidates) {
@@ -5185,17 +5365,29 @@ async function startServer() {
   });
 
   app.get("/api/public/products", publicApiAuth("products:read"), (req, res) => {
-    const products = db.prepare("SELECT * FROM products").all();
+    const products = (db.prepare(`
+      SELECT * FROM products p
+      WHERE ${catalogVisibilityWhere(false)}
+    `).all() as any[]).map((product) => hydrateProductStock(product));
     logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip });
     res.json({ success: true, data: products });
   });
 
   app.get("/api/public/stock", publicApiAuth("stock:read"), (req, res) => {
-    const stock = db.prepare(`
-      SELECT id as product_id, sku, title, COALESCE(central_stock, 0) as central_stock
+    const stock = (db.prepare(`
+      SELECT id, sku, title, central_stock
       FROM products
-      WHERE status != 'deleted'
-    `).all();
+      WHERE ${catalogVisibilityWhere(false)}
+    `).all() as any[]).map((product) => {
+      const hydrated = hydrateProductStock(product);
+      return {
+        product_id: hydrated.id,
+        sku: hydrated.sku,
+        title: hydrated.title,
+        central_stock: hydrated.total_stock,
+        stock_source: hydrated.stock_source,
+      };
+    });
     logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip });
     res.json({ success: true, data: stock });
   });

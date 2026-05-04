@@ -150,6 +150,8 @@ Test ortamı notları:
 
 Stok modeli tek merkezi depo stoğudur. Platform bazlı stok fiziksel stok değildir; `product_platforms` kanal/listelenme/fiyat bilgisi için tutulur, gerçek stok kaynağı `products.central_stock` alanıdır.
 
+Karbon çelik demonte ürünlerde müşteri final ürün SKU'sunu görür; depo stoğu ise H komponentleri ve aksesuar parçaları olarak tutulur. `product_bom` reçetesi final üründen hangi H parçasının kaç adet kullanılacağını belirler; satışta final ürün kaydedilirken stok hareketi otomatik olarak komponentlerden düşer. H parçaları ve vidalar satış kataloğunda/ürün analizlerinde görünmez.
+
 ### Yedek & Geri Yükleme
 
 Panelden **Ayarlar → Gelişmiş Yedekleme Sistemi** ile otomatik yedekleri yönet.

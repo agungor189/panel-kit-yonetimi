@@ -79,7 +79,7 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
   const loadProduct = async () => {
     try {
       const data = await api.get(`/products/${productId}`);
-      const totalStock = data.central_stock ?? data.total_stock ?? 0;
+      const totalStock = data.total_stock ?? data.central_stock ?? 0;
       setFormData({
         ...data,
         total_stock: totalStock,

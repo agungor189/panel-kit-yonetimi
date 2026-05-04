@@ -141,6 +141,7 @@ export function createDashboardDataRouter(db: Database) {
     let productWhere = "";
     if (req.query.material || req.query.model || req.query.pipeType || req.query.pipeSize) {
       productJoin = " JOIN products p ON p.id = i.product_id ";
+      productWhere += " AND COALESCE(p.exclude_from_analysis, 0) = 0 AND COALESCE(p.is_sellable, 1) = 1";
       if (req.query.material) {
         productWhere += " AND (p.material = ? OR p.normalized_material = ?)";
         params.push(req.query.material, req.query.material);
@@ -198,6 +199,8 @@ export function createDashboardDataRouter(db: Database) {
         JOIN sales s ON s.id = i.sale_id AND ${activeSalesFilter}
         JOIN products p ON p.id = i.product_id
         WHERE 1=1 ${q} ${productWhere}
+          AND COALESCE(p.exclude_from_analysis, 0) = 0
+          AND COALESCE(p.is_sellable, 1) = 1
         GROUP BY p.material
         ORDER BY value DESC
       `).all(...params);
@@ -214,6 +217,8 @@ export function createDashboardDataRouter(db: Database) {
         JOIN sales s ON s.id = i.sale_id AND ${activeSalesFilter}
         JOIN products p ON p.id = i.product_id
         WHERE 1=1 ${q} ${productWhere}
+          AND COALESCE(p.exclude_from_analysis, 0) = 0
+          AND COALESCE(p.is_sellable, 1) = 1
         GROUP BY ${modelDisplayExpr}
         ORDER BY value DESC
       `).all(...params);
@@ -230,6 +235,8 @@ export function createDashboardDataRouter(db: Database) {
         JOIN sales s ON s.id = i.sale_id AND ${activeSalesFilter}
         JOIN products p ON p.id = i.product_id
         WHERE 1=1 ${q} ${productWhere}
+          AND COALESCE(p.exclude_from_analysis, 0) = 0
+          AND COALESCE(p.is_sellable, 1) = 1
         GROUP BY COALESCE(p.normalized_pipe_size, p.pipe_size, p.size, 'Bilinmiyor')
         ORDER BY value DESC
       `).all(...params);
@@ -246,6 +253,8 @@ export function createDashboardDataRouter(db: Database) {
         JOIN sales s ON s.id = i.sale_id AND ${activeSalesFilter}
         JOIN products p ON p.id = i.product_id
         WHERE 1=1 ${q} ${productWhere}
+          AND COALESCE(p.exclude_from_analysis, 0) = 0
+          AND COALESCE(p.is_sellable, 1) = 1
         GROUP BY COALESCE(p.normalized_tube_type, p.connection_type, 'Bilinmiyor')
         ORDER BY value DESC
       `).all(...params);
@@ -275,13 +284,28 @@ export function createDashboardDataRouter(db: Database) {
         SELECT COUNT(*) as critical_count, SUM(deficit) as est_order_qty
         FROM (
           SELECT
-            p.id,
-            COALESCE(p.min_stock_level, 50) as min_stock_level,
-            COALESCE(p.central_stock, 0) as stock_quantity,
-            MAX(COALESCE(p.min_stock_level, 50) - COALESCE(p.central_stock, 0), 0) as deficit
-          FROM products p
-          GROUP BY p.id, p.min_stock_level, p.central_stock
-          HAVING stock_quantity <= min_stock_level
+            product_stock.id,
+            product_stock.min_stock_level,
+            product_stock.stock_quantity,
+            MAX(product_stock.min_stock_level - product_stock.stock_quantity, 0) as deficit
+          FROM (
+            SELECT
+              p.id,
+              COALESCE(p.min_stock_level, 50) as min_stock_level,
+              CASE
+                WHEN EXISTS (SELECT 1 FROM product_bom b WHERE b.parent_product_id = p.id) THEN COALESCE((
+                  SELECT MIN(CAST(COALESCE(cp.central_stock, 0) / NULLIF(b.quantity_per_unit, 0) AS INTEGER))
+                  FROM product_bom b
+                  JOIN products cp ON cp.id = b.component_product_id
+                  WHERE b.parent_product_id = p.id
+                ), 0)
+                ELSE COALESCE(p.central_stock, 0)
+              END as stock_quantity
+            FROM products p
+            WHERE COALESCE(p.exclude_from_analysis, 0) = 0
+              AND COALESCE(p.is_sellable, 1) = 1
+          ) product_stock
+          WHERE stock_quantity <= min_stock_level
         )
       `).get() as any;
       res.json({

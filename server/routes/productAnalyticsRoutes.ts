@@ -24,7 +24,7 @@ export function createProductAnalyticsRouter(db: Database.Database) {
     const pipeSize = firstQueryValue(req.query.pipeSize ?? req.query.pipe_size);
     const tubeType = firstQueryValue(req.query.tubeType ?? req.query.tube_type);
 
-    let productWhere = "p.status != 'deleted'";
+    let productWhere = "p.status != 'deleted' AND COALESCE(p.exclude_from_analysis, 0) = 0 AND COALESCE(p.is_sellable, 1) = 1";
     const productParams: any[] = [];
 
     if (isActiveFilter(material)) {
@@ -86,10 +86,29 @@ export function createProductAnalyticsRouter(db: Database.Database) {
     END
   `;
 
+  const stockExpr = `
+    CASE
+      WHEN EXISTS (SELECT 1 FROM product_bom b WHERE b.parent_product_id = p.id) THEN COALESCE((
+        SELECT MIN(CAST(COALESCE(cp.central_stock, 0) / NULLIF(b.quantity_per_unit, 0) AS INTEGER))
+        FROM product_bom b
+        JOIN products cp ON cp.id = b.component_product_id
+        WHERE b.parent_product_id = p.id
+      ), 0)
+      ELSE COALESCE(p.central_stock, 0)
+    END
+  `;
+
   // 0. Filter Options
   router.get("/products/filter-options", (req, res) => {
     try {
-      const dbSizes = db.prepare(`SELECT DISTINCT COALESCE(normalized_pipe_size, normalized_size, 'Bilinmiyor') as val FROM products WHERE COALESCE(normalized_pipe_size, normalized_size, 'Bilinmiyor') != 'Bilinmiyor' ORDER BY val ASC`).all();
+      const dbSizes = db.prepare(`
+        SELECT DISTINCT COALESCE(normalized_pipe_size, normalized_size, 'Bilinmiyor') as val
+        FROM products
+        WHERE COALESCE(normalized_pipe_size, normalized_size, 'Bilinmiyor') != 'Bilinmiyor'
+          AND COALESCE(exclude_from_analysis, 0) = 0
+          AND COALESCE(is_sellable, 1) = 1
+        ORDER BY val ASC
+      `).all();
       
       const pipeSizes = ['Tümü', ...dbSizes.map((row: any) => row.val), 'Bilinmiyor'];
       res.json({ pipeSizes });
@@ -110,7 +129,7 @@ export function createProductAnalyticsRouter(db: Database.Database) {
           COUNT(DISTINCT p.id) as totalSku,
           IFNULL(SUM(ss.soldQty), 0) as totalSoldQty,
           IFNULL(SUM(ss.revenue), 0) as totalRevenue,
-          IFNULL(SUM(COALESCE(p.central_stock, 0)), 0) as totalStock
+          IFNULL(SUM(${stockExpr}), 0) as totalStock
         FROM products p
         ${salesJoinSql}
         WHERE ${productWhere}
@@ -170,7 +189,7 @@ export function createProductAnalyticsRouter(db: Database.Database) {
           COUNT(DISTINCT p.id) as skuCount,
           IFNULL(SUM(ss.soldQty), 0) as soldQty,
           IFNULL(SUM(ss.revenue), 0) as revenue,
-          IFNULL(SUM(COALESCE(p.central_stock, 0)), 0) as currentStock
+          IFNULL(SUM(${stockExpr}), 0) as currentStock
         FROM products p
         ${salesJoinSql}
         WHERE ${productWhere}
@@ -202,7 +221,7 @@ export function createProductAnalyticsRouter(db: Database.Database) {
           ${modelDisplayExpr} as model,
           COALESCE(p.normalized_pipe_size, p.normalized_size, 'Bilinmiyor') as size,
           IFNULL(p.normalized_tube_type, 'Bilinmiyor') as tubeType,
-          IFNULL(p.central_stock, 0) as currentStock,
+          IFNULL(${stockExpr}, 0) as currentStock,
           IFNULL(ss.soldQty, 0) as soldQty,
           IFNULL(ss.revenue, 0) as revenue,
           ss.lastSaleDate as lastSaleDate
@@ -231,7 +250,7 @@ export function createProductAnalyticsRouter(db: Database.Database) {
             COUNT(DISTINCT p.id) as skuCount,
             IFNULL(SUM(ss.soldQty), 0) as soldQty,
             IFNULL(SUM(ss.revenue), 0) as revenue,
-            IFNULL(SUM(COALESCE(p.central_stock, 0)), 0) as currentStock
+            IFNULL(SUM(${stockExpr}), 0) as currentStock
           FROM products p
           ${salesJoinSql}
           WHERE ${productWhere}

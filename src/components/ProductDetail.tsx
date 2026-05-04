@@ -97,7 +97,7 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
 
   const bufferedCostTRY = product.purchase_cost * (1 + (product.buffer_percentage || 0) / 100);
   const profit = product.sale_price - bufferedCostTRY;
-  const centralStock = product.central_stock ?? product.total_stock ?? 0;
+  const centralStock = product.total_stock ?? product.central_stock ?? 0;
 
   return (
     <div className="space-y-8 animate-in slide-in-from-bottom-4 duration-500">
@@ -229,6 +229,34 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
                   color="text-success"
                 />
               </div>
+
+              {product.stock_source === 'bom' && product.bom_components && product.bom_components.length > 0 && (
+                <div className="rounded-2xl border border-blue-100 bg-blue-50/60 p-5 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-xs font-black text-blue-700 uppercase tracking-widest">Demonte Ürün Reçetesi</h3>
+                      <p className="text-xs text-blue-700/80 mt-1">Satışta final ürün görünür; stok H parçalarından otomatik düşer.</p>
+                    </div>
+                    <span className="text-[11px] font-black text-blue-700 bg-white border border-blue-100 px-3 py-1 rounded-full">
+                      Üretilebilir: {centralStock} Adet
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    {product.bom_components.map((component) => (
+                      <div key={component.component_product_id} className="flex items-center justify-between gap-3 rounded-xl bg-white border border-blue-100 px-3 py-2">
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-text-main truncate">{component.component_role || component.sku}</p>
+                          <p className="text-[10px] text-text-muted font-mono truncate">{component.sku}</p>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="text-xs font-black text-blue-700">x{component.quantity_per_unit}</p>
+                          <p className="text-[10px] text-text-muted">Stok {component.central_stock ?? 0}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 pb-6">
                 <div className="space-y-3">

@@ -42,8 +42,28 @@ export interface Product {
   cover_image?: string;
   central_stock?: number;
   total_stock?: number;
+  available_stock?: number;
+  physical_stock?: number;
+  product_type?: 'finished' | 'assembly' | 'component' | 'accessory';
+  is_sellable?: boolean | number;
+  visible_in_catalog?: boolean | number;
+  exclude_from_analysis?: boolean | number;
+  is_assembly?: boolean | number;
+  stock_source?: 'central' | 'bom';
+  bom_components?: ProductBomComponent[];
   images?: ProductImage[];
   platforms?: ProductPlatform[];
+}
+
+export interface ProductBomComponent {
+  component_product_id: string;
+  quantity_per_unit: number;
+  component_role?: string;
+  sku?: string;
+  title?: string;
+  name?: string;
+  central_stock?: number;
+  available_for_parent?: number;
 }
 
 export interface ProductImage {

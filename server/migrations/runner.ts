@@ -853,6 +853,363 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 34,
+    name: "add_product_bom_and_carbon_steel_assemblies",
+    up(db) {
+      const productColumns = new Set(
+        (db.prepare("PRAGMA table_info(products)").all() as { name: string }[]).map((column) => column.name),
+      );
+      const addProductColumn = (name: string, definition: string) => {
+        if (!productColumns.has(name)) db.exec(`ALTER TABLE products ADD COLUMN ${definition}`);
+      };
+
+      addProductColumn("product_type", "product_type TEXT DEFAULT 'finished'");
+      addProductColumn("is_sellable", "is_sellable INTEGER DEFAULT 1");
+      addProductColumn("visible_in_catalog", "visible_in_catalog INTEGER DEFAULT 1");
+      addProductColumn("exclude_from_analysis", "exclude_from_analysis INTEGER DEFAULT 0");
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS product_bom (
+          id                    TEXT PRIMARY KEY,
+          parent_product_id     TEXT NOT NULL,
+          component_product_id  TEXT NOT NULL,
+          quantity_per_unit     REAL NOT NULL DEFAULT 1,
+          component_role        TEXT,
+          created_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(parent_product_id, component_product_id),
+          FOREIGN KEY(parent_product_id) REFERENCES products(id) ON DELETE CASCADE,
+          FOREIGN KEY(component_product_id) REFERENCES products(id) ON DELETE RESTRICT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_products_visibility
+          ON products(is_sellable, visible_in_catalog, exclude_from_analysis);
+        CREATE INDEX IF NOT EXISTS idx_product_bom_parent
+          ON product_bom(parent_product_id);
+        CREATE INDEX IF NOT EXISTS idx_product_bom_component
+          ON product_bom(component_product_id);
+      `);
+
+      db.exec(`
+        UPDATE products
+        SET product_type = CASE
+              WHEN sku LIKE 'CS-%-SCR%' THEN 'accessory'
+              ELSE 'component'
+            END,
+            is_sellable = 0,
+            visible_in_catalog = 0,
+            exclude_from_analysis = 1,
+            status = COALESCE(NULLIF(status, ''), 'Active')
+        WHERE sku LIKE 'CS-%-H%'
+           OR sku LIKE 'CS-%-SWA'
+           OR sku LIKE 'CS-%-SWB'
+           OR sku LIKE 'CS-%-SCR%';
+      `);
+
+      type ComponentSpec = { sku: string; qty: number; role: string };
+      type AssemblySpec = {
+        sku: string;
+        title: string;
+        model: string;
+        size: string;
+        tubeType: string;
+        series: string;
+        components: ComponentSpec[];
+      };
+
+      const assemblies: AssemblySpec[] = [
+        {
+          sku: "CS-STD-RD-25-TEE",
+          title: "Carbon Steel Round Tube Clamp Tee 25 mm",
+          model: "Tee",
+          size: "25 mm",
+          tubeType: "Yuvarlak",
+          series: "Standart",
+          components: [{ sku: "CS-STD-RD-25-H01", qty: 2, role: "H1" }],
+        },
+        {
+          sku: "CS-STD-RD-25-W4",
+          title: "Carbon Steel Round Tube Clamp 4 Way 25 mm",
+          model: "4 Way",
+          size: "25 mm",
+          tubeType: "Yuvarlak",
+          series: "Standart",
+          components: [
+            { sku: "CS-STD-RD-25-H03", qty: 1, role: "H3" },
+            { sku: "CS-STD-RD-25-H02", qty: 1, role: "H2" },
+          ],
+        },
+        {
+          sku: "CS-STD-RD-25-CRS",
+          title: "Carbon Steel Round Tube Clamp Cross 25 mm",
+          model: "Cross",
+          size: "25 mm",
+          tubeType: "Yuvarlak",
+          series: "Standart",
+          components: [{ sku: "CS-STD-RD-25-H04", qty: 2, role: "H4" }],
+        },
+        {
+          sku: "CS-STD-RD-25-W5",
+          title: "Carbon Steel Round Tube Clamp 5 Way 25 mm",
+          model: "5 Way",
+          size: "25 mm",
+          tubeType: "Yuvarlak",
+          series: "Standart",
+          components: [
+            { sku: "CS-STD-RD-25-H04", qty: 1, role: "H4" },
+            { sku: "CS-STD-RD-25-H02", qty: 2, role: "H2" },
+          ],
+        },
+        {
+          sku: "CS-STD-RD-25-W6",
+          title: "Carbon Steel Round Tube Clamp 6 Way 25 mm",
+          model: "6 Way",
+          size: "25 mm",
+          tubeType: "Yuvarlak",
+          series: "Standart",
+          components: [{ sku: "CS-STD-RD-25-H02", qty: 4, role: "H2" }],
+        },
+        {
+          sku: "CS-STD-RD-25-ELB",
+          title: "Carbon Steel Round Tube Clamp Elbow 25 mm",
+          model: "Elbow",
+          size: "25 mm",
+          tubeType: "Yuvarlak",
+          series: "Standart",
+          components: [{ sku: "CS-STD-RD-25-H16", qty: 2, role: "H16" }],
+        },
+        {
+          sku: "CS-STD-RD-25-SWJ",
+          title: "Carbon Steel Round Tube Clamp Swivel Joint 25 mm",
+          model: "Swivel Joint",
+          size: "25 mm",
+          tubeType: "Yuvarlak",
+          series: "Standart",
+          components: [
+            { sku: "CS-STD-RD-25-H05", qty: 2, role: "H5" },
+            { sku: "CS-STD-RD-25-H06", qty: 2, role: "H6" },
+          ],
+        },
+        {
+          sku: "CS-STD-RD-25-SWT",
+          title: "Carbon Steel Round Tube Clamp Swivel Tee 25 mm",
+          model: "Swivel Tee",
+          size: "25 mm",
+          tubeType: "Yuvarlak",
+          series: "Standart",
+          components: [
+            { sku: "CS-STD-RD-25-SWA", qty: 1, role: "Swivel A" },
+            { sku: "CS-STD-RD-25-SWB", qty: 1, role: "Swivel B" },
+          ],
+        },
+        {
+          sku: "CS-STD-SQ-25-TEE",
+          title: "Carbon Steel Square Tube Clamp Tee 25x25 mm",
+          model: "Tee",
+          size: "25x25 mm",
+          tubeType: "Kare",
+          series: "Standart",
+          components: [{ sku: "CS-STD-SQ-25-H01", qty: 2, role: "H1" }],
+        },
+        {
+          sku: "CS-STD-SQ-25-W4",
+          title: "Carbon Steel Square Tube Clamp 4 Way 25x25 mm",
+          model: "4 Way",
+          size: "25x25 mm",
+          tubeType: "Kare",
+          series: "Standart",
+          components: [
+            { sku: "CS-STD-SQ-25-H03", qty: 1, role: "H3" },
+            { sku: "CS-STD-SQ-25-H02", qty: 1, role: "H2" },
+          ],
+        },
+        {
+          sku: "CS-STD-SQ-25-CRS",
+          title: "Carbon Steel Square Tube Clamp Cross 25x25 mm",
+          model: "Cross",
+          size: "25x25 mm",
+          tubeType: "Kare",
+          series: "Standart",
+          components: [{ sku: "CS-STD-SQ-25-H04", qty: 2, role: "H4" }],
+        },
+        {
+          sku: "CS-STD-SQ-25-W5",
+          title: "Carbon Steel Square Tube Clamp 5 Way 25x25 mm",
+          model: "5 Way",
+          size: "25x25 mm",
+          tubeType: "Kare",
+          series: "Standart",
+          components: [
+            { sku: "CS-STD-SQ-25-H04", qty: 1, role: "H4" },
+            { sku: "CS-STD-SQ-25-H02", qty: 2, role: "H2" },
+          ],
+        },
+        {
+          sku: "CS-STD-SQ-25-W6",
+          title: "Carbon Steel Square Tube Clamp 6 Way 25x25 mm",
+          model: "6 Way",
+          size: "25x25 mm",
+          tubeType: "Kare",
+          series: "Standart",
+          components: [{ sku: "CS-STD-SQ-25-H02", qty: 4, role: "H2" }],
+        },
+        {
+          sku: "CS-DRL-SQ-40-TEE",
+          title: "Carbon Steel Square Tube Drilling Clamp Tee 40x40 mm",
+          model: "Tee",
+          size: "40x40 mm",
+          tubeType: "Kare",
+          series: "DRL",
+          components: [{ sku: "CS-DRL-SQ-40-H01", qty: 2, role: "H1" }],
+        },
+        {
+          sku: "CS-DRL-SQ-40-W4",
+          title: "Carbon Steel Square Tube Drilling Clamp 4 Way 40x40 mm",
+          model: "4 Way",
+          size: "40x40 mm",
+          tubeType: "Kare",
+          series: "DRL",
+          components: [
+            { sku: "CS-DRL-SQ-40-H03", qty: 1, role: "H3" },
+            { sku: "CS-DRL-SQ-40-H02", qty: 1, role: "H2" },
+          ],
+        },
+        {
+          sku: "CS-DRL-SQ-40-CRS",
+          title: "Carbon Steel Square Tube Drilling Clamp Cross 40x40 mm",
+          model: "Cross",
+          size: "40x40 mm",
+          tubeType: "Kare",
+          series: "DRL",
+          components: [{ sku: "CS-DRL-SQ-40-H04", qty: 2, role: "H4" }],
+        },
+        {
+          sku: "CS-DRL-SQ-40-W5",
+          title: "Carbon Steel Square Tube Drilling Clamp 5 Way 40x40 mm",
+          model: "5 Way",
+          size: "40x40 mm",
+          tubeType: "Kare",
+          series: "DRL",
+          components: [
+            { sku: "CS-DRL-SQ-40-H04", qty: 1, role: "H4" },
+            { sku: "CS-DRL-SQ-40-H02", qty: 2, role: "H2" },
+          ],
+        },
+        {
+          sku: "CS-DRL-SQ-40-BAS",
+          title: "Carbon Steel Square Tube Drilling Clamp Base 40x40 mm",
+          model: "Base",
+          size: "40x40 mm",
+          tubeType: "Kare",
+          series: "DRL",
+          components: [{ sku: "CS-DRL-SQ-40-H02", qty: 2, role: "H2" }],
+        },
+      ];
+
+      const getProductBySku = db.prepare("SELECT * FROM products WHERE sku = ?");
+      const insertAssembly = db.prepare(`
+        INSERT INTO products (
+          id, name, title, sku, category, model, description, material, size, pipe_size,
+          connection_type, min_stock_level, central_stock, product_type, is_sellable,
+          visible_in_catalog, exclude_from_analysis, purchase_price_usd, purchase_cost,
+          sale_price, weight, status, normalized_material, normalized_model,
+          normalized_size, normalized_tube_type, normalized_pipe_size
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 50, 0, 'assembly', 1, 1, 0, ?, ?, 0, ?, 'Active', ?, ?, ?, ?, ?)
+      `);
+      const updateAssembly = db.prepare(`
+        UPDATE products
+        SET product_type = 'assembly',
+            is_sellable = 1,
+            visible_in_catalog = 1,
+            exclude_from_analysis = 0,
+            material = COALESCE(NULLIF(material, ''), 'Karbon Çelik'),
+            category = COALESCE(NULLIF(category, ''), 'Karbon Çelik'),
+            model = COALESCE(NULLIF(model, ''), ?),
+            pipe_size = COALESCE(NULLIF(pipe_size, ''), ?),
+            normalized_material = COALESCE(NULLIF(normalized_material, ''), 'Karbon Çelik'),
+            normalized_model = COALESCE(NULLIF(normalized_model, ''), ?),
+            normalized_tube_type = COALESCE(NULLIF(normalized_tube_type, ''), ?),
+            normalized_pipe_size = COALESCE(NULLIF(normalized_pipe_size, ''), ?),
+            purchase_price_usd = CASE WHEN COALESCE(purchase_price_usd, 0) = 0 THEN ? ELSE purchase_price_usd END,
+            purchase_cost = CASE WHEN COALESCE(purchase_cost, 0) = 0 THEN ? ELSE purchase_cost END,
+            weight = CASE WHEN COALESCE(weight, 0) = 0 THEN ? ELSE weight END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `);
+      const upsertBom = db.prepare(`
+        INSERT INTO product_bom (id, parent_product_id, component_product_id, quantity_per_unit, component_role)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(parent_product_id, component_product_id)
+        DO UPDATE SET quantity_per_unit = excluded.quantity_per_unit,
+                      component_role = excluded.component_role,
+                      updated_at = CURRENT_TIMESTAMP
+      `);
+
+      for (const assembly of assemblies) {
+        const components = assembly.components
+          .map((component) => ({ ...component, product: getProductBySku.get(component.sku) as any }))
+          .filter((component) => component.product);
+
+        if (components.length !== assembly.components.length) continue;
+
+        const purchasePriceUsd = components.reduce((sum, component) => sum + ((Number(component.product.purchase_price_usd) || 0) * component.qty), 0);
+        const purchaseCost = components.reduce((sum, component) => sum + ((Number(component.product.purchase_cost) || 0) * component.qty), 0);
+        const weight = components.reduce((sum, component) => sum + ((Number(component.product.weight) || 0) * component.qty), 0);
+        const assemblyId = `assembly-${assembly.sku.toLowerCase()}`;
+        const existingAssembly = getProductBySku.get(assembly.sku) as any;
+        const productId = existingAssembly?.id || assemblyId;
+        const description = `${assembly.title} — depoda H parçaları olarak tutulur, satışta final ürün olarak görünür.`;
+
+        if (!existingAssembly) {
+          insertAssembly.run(
+            productId,
+            assembly.title,
+            assembly.title,
+            assembly.sku,
+            "Karbon Çelik",
+            assembly.model,
+            description,
+            "Karbon Çelik",
+            assembly.size,
+            assembly.size,
+            assembly.tubeType,
+            purchasePriceUsd,
+            purchaseCost,
+            weight,
+            "Karbon Çelik",
+            assembly.model,
+            assembly.size,
+            assembly.tubeType,
+            assembly.size,
+          );
+        } else {
+          updateAssembly.run(
+            assembly.model,
+            assembly.size,
+            assembly.model,
+            assembly.tubeType,
+            assembly.size,
+            purchasePriceUsd,
+            purchaseCost,
+            weight,
+            productId,
+          );
+        }
+
+        for (const component of components) {
+          upsertBom.run(
+            `bom-${assembly.sku.toLowerCase()}-${component.sku.toLowerCase()}`,
+            productId,
+            component.product.id,
+            component.qty,
+            component.role,
+          );
+        }
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

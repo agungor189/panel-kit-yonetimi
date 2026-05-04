@@ -30,6 +30,10 @@ export function applySchema(db: Database.Database): void {
       supplier                TEXT,
       min_stock_level         INTEGER DEFAULT 50,
       central_stock           INTEGER DEFAULT 0,
+      product_type            TEXT    DEFAULT 'finished',
+      is_sellable             INTEGER DEFAULT 1,
+      visible_in_catalog      INTEGER DEFAULT 1,
+      exclude_from_analysis   INTEGER DEFAULT 0,
       purchase_price_usd      REAL    DEFAULT 0,
       purchase_cost           REAL    DEFAULT 0,
       sale_price              REAL    DEFAULT 0,
@@ -65,6 +69,19 @@ export function applySchema(db: Database.Database): void {
       price          REAL,
       is_listed      INTEGER DEFAULT 0,
       FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS product_bom (
+      id                    TEXT PRIMARY KEY,
+      parent_product_id     TEXT NOT NULL,
+      component_product_id  TEXT NOT NULL,
+      quantity_per_unit     REAL NOT NULL DEFAULT 1,
+      component_role        TEXT,
+      created_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(parent_product_id, component_product_id),
+      FOREIGN KEY(parent_product_id) REFERENCES products(id) ON DELETE CASCADE,
+      FOREIGN KEY(component_product_id) REFERENCES products(id) ON DELETE RESTRICT
     );
 
     CREATE TABLE IF NOT EXISTS stock_movements (
@@ -528,9 +545,13 @@ export function applySchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_transactions_type_date   ON transactions(type, date);
     CREATE INDEX IF NOT EXISTS idx_transactions_platform    ON transactions(platform);
     CREATE INDEX IF NOT EXISTS idx_products_status          ON products(status);
+    CREATE INDEX IF NOT EXISTS idx_products_visibility      ON products(is_sellable, visible_in_catalog, exclude_from_analysis);
     CREATE INDEX IF NOT EXISTS idx_recurring_plans_status   ON recurring_payment_plans(is_active);
     CREATE INDEX IF NOT EXISTS idx_recurring_occurrences_status ON recurring_payment_occurrences(status);
     CREATE INDEX IF NOT EXISTS idx_product_platforms_product_id ON product_platforms(product_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_product_platforms_unique_product_platform ON product_platforms(product_id, platform_name);
+    CREATE INDEX IF NOT EXISTS idx_product_bom_parent       ON product_bom(parent_product_id);
+    CREATE INDEX IF NOT EXISTS idx_product_bom_component    ON product_bom(component_product_id);
     CREATE INDEX IF NOT EXISTS idx_product_images_product_id    ON product_images(product_id);
     CREATE INDEX IF NOT EXISTS idx_sales_status             ON sales(status);
     CREATE INDEX IF NOT EXISTS idx_sales_created_at         ON sales(created_at);
