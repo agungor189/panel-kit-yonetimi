@@ -279,6 +279,132 @@ function centralStockChannel(platformName?: string | null): string {
   return channel || 'Merkez Depo';
 }
 
+function orderDateKey(date = new Date()): string {
+  const year = String(date.getFullYear()).slice(2);
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}${month}${day}`;
+}
+
+function buildOrderCode(dateKey: string, sequence: number): string {
+  return `DS-${dateKey}-${String(sequence).padStart(4, '0')}`;
+}
+
+function reserveOrderCode(): string {
+  const dateKey = orderDateKey();
+  const current = db.prepare("SELECT last_number FROM order_counters WHERE date_key = ?").get(dateKey) as any;
+  let nextNumber = (Number(current?.last_number) || 0) + 1;
+  let orderCode = buildOrderCode(dateKey, nextNumber);
+
+  while (db.prepare("SELECT 1 FROM sales WHERE order_code = ? LIMIT 1").get(orderCode)) {
+    nextNumber++;
+    orderCode = buildOrderCode(dateKey, nextNumber);
+  }
+
+  db.prepare(`
+    INSERT INTO order_counters (date_key, last_number, updated_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(date_key) DO UPDATE SET
+      last_number = excluded.last_number,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(dateKey, nextNumber);
+
+  return orderCode;
+}
+
+function saleDisplayCode(sale: any): string {
+  return cleanText(sale?.order_code) || cleanText(sale?.id) || 'Bilinmeyen';
+}
+
+function saleStockMovementReasons(sale: any): string[] {
+  const reasons = new Set<string>();
+  if (sale?.id) reasons.add(`Satış No: ${sale.id}`);
+  if (sale?.order_code) reasons.add(`Satış No: ${sale.order_code}`);
+  return [...reasons];
+}
+
+function readJsonSetting<T>(key: string, fallback: T): T {
+  try {
+    const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as any;
+    if (!row?.value) return fallback;
+    const parsed = JSON.parse(row.value);
+    return parsed as T;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function getSalesChannels(): string[] {
+  const channels = readJsonSetting<string[]>("sales_channels", []);
+  const merged = ["Satış Sistemi", "Website", "Trendyol", "Hepsiburada", "Amazon", "N11", ...(Array.isArray(channels) ? channels : [])];
+  const result: string[] = [];
+  for (const value of merged) {
+    const channel = cleanText(value);
+    if (!channel || result.includes(channel)) continue;
+    result.push(channel);
+  }
+  return result;
+}
+
+function defaultSaleChannel(): string {
+  return getSalesChannels()[0] || 'Satış Sistemi';
+}
+
+function isPendingSaleChannel(channel: string): boolean {
+  const platform = cleanText(channel);
+  if (!platform) return false;
+  const defaultPendingChannels = new Set(['Trendyol', 'Hepsiburada', 'Amazon', 'N11']);
+  if (defaultPendingChannels.has(platform)) return true;
+
+  const exactPendingAccount = db.prepare(`
+    SELECT id
+    FROM cash_accounts
+    WHERE type = 'platform'
+      AND is_active = 1
+      AND name = ?
+    LIMIT 1
+  `).get(`${platform} Bekleyen`) as any;
+
+  return !!exactPendingAccount;
+}
+
+function normalizeSaleChannelName(channel: string | null | undefined): string {
+  return cleanText(channel).toLocaleLowerCase('tr-TR');
+}
+
+function requiresPlatformOrderNumber(channel: string | null | undefined): boolean {
+  const normalized = normalizeSaleChannelName(channel);
+  if (!normalized) return false;
+  return normalized !== 'satış sistemi' && normalized !== 'website';
+}
+
+function ensureUniqueExternalOrderId(platform: string, externalOrderId: string, saleId?: string): void {
+  if (!externalOrderId) return;
+
+  const existing = saleId
+    ? db.prepare(`
+        SELECT id
+        FROM sales
+        WHERE platform = ?
+          AND external_order_id = ?
+          AND id <> ?
+        LIMIT 1
+      `).get(platform, externalOrderId, saleId) as any
+    : db.prepare(`
+        SELECT id
+        FROM sales
+        WHERE platform = ?
+          AND external_order_id = ?
+        LIMIT 1
+      `).get(platform, externalOrderId) as any;
+
+  if (existing) {
+    const err = new Error("Bu platform sipariş numarası aynı satış kanalında zaten kayıtlı.") as any;
+    err.statusCode = 409;
+    throw err;
+  }
+}
+
 function buildExpenseCashDescription(expense: any): string {
   const category = cleanText(expense?.category) || 'Gider';
   const detail =
@@ -2663,15 +2789,16 @@ async function startServer() {
   const isFinalSaleStatus = (status?: string) => FINAL_SALE_STATUSES.includes(status || '');
 
   const restoreSaleStock = (sale: any, finalStatus: string) => {
-    const originalMovementReason = `Satış No: ${sale.id}`;
+    const originalMovementReasons = saleStockMovementReasons(sale);
     const restoredByProduct = new Map<string, number>();
+    const placeholders = originalMovementReasons.map(() => "?").join(",");
 
     const originalMovements = db.prepare(`
       SELECT product_id, platform_name, SUM(ABS(change_amount)) as quantity
       FROM stock_movements
-      WHERE reason = ? AND type = 'OUT' AND change_amount < 0
+      WHERE reason IN (${placeholders}) AND type = 'OUT' AND change_amount < 0
       GROUP BY product_id, platform_name
-    `).all(originalMovementReason) as any[];
+    `).all(...originalMovementReasons) as any[];
 
     const restoreToCentralStock = (productId: string, saleChannel: string | null | undefined, quantity: number) => {
       if (!productId || quantity <= 0) return;
@@ -2681,7 +2808,7 @@ async function startServer() {
       db.prepare(`
         INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type)
         VALUES (?, ?, ?, ?, ?, ?)
-      `).run(uuidv4(), productId, centralStockChannel(saleChannel), quantity, `${finalStatus} — Satış No: ${sale.id}`, 'IN');
+      `).run(uuidv4(), productId, centralStockChannel(saleChannel), quantity, `${finalStatus} — Satış No: ${saleDisplayCode(sale)}`, 'IN');
 
       restoredByProduct.set(productId, (restoredByProduct.get(productId) || 0) + quantity);
     };
@@ -2746,7 +2873,7 @@ async function startServer() {
       originalCash?.currency || 'TRY',
       originalCash?.exchange_rate_at_transaction || 1,
       sale.id,
-      `${finalStatus}: Satış No ${sale.id}`
+      `${finalStatus}: Satış No ${saleDisplayCode(sale)}`
     );
   };
 
@@ -2772,13 +2899,23 @@ async function startServer() {
         throw new Error("İptal/iade edilmiş bir satış geri alınamaz.");
       }
 
+      const targetPlatform = cleanText(changes.platform ?? sale.platform) || defaultSaleChannel();
+      const targetExternalOrderId = changes.external_order_id !== undefined
+        ? cleanText(changes.external_order_id)
+        : cleanText(sale.external_order_id);
+
+      if (requiresPlatformOrderNumber(targetPlatform) && !targetExternalOrderId) {
+        throw new Error(`${targetPlatform} satışları için platform sipariş numarası zorunludur.`);
+      }
+      ensureUniqueExternalOrderId(targetPlatform, targetExternalOrderId, saleId);
+
       const isBecomingFinal = willBeFinal && !wasFinal;
       if (isBecomingFinal) {
         reverseSaleLedger(sale, targetStatus);
         logActivity(targetStatus === 'İptal Edildi' ? 'SALE_CANCELLED' : 'SALE_RETURNED', 'sale', saleId,
-          { reason: changes.return_reason, previous_status: sale.status }, userId);
+          { order_code: sale.order_code, external_order_id: targetExternalOrderId, reason: changes.return_reason, previous_status: sale.status }, userId);
       } else {
-        logActivity('SALE_UPDATED', 'sale', saleId, { previous_status: sale.status, status: targetStatus }, userId);
+        logActivity('SALE_UPDATED', 'sale', saleId, { order_code: sale.order_code, external_order_id: targetExternalOrderId, previous_status: sale.status, status: targetStatus }, userId);
       }
 
       db.prepare(`
@@ -2786,6 +2923,7 @@ async function startServer() {
           customer_name=?,
           customer_phone=?,
           customer_address=?,
+          external_order_id=?,
           shipping_company=?,
           tracking_number=?,
           status=?,
@@ -2797,6 +2935,7 @@ async function startServer() {
         changes.customer_name ?? sale.customer_name,
         changes.customer_phone ?? sale.customer_phone,
         changes.customer_address ?? sale.customer_address,
+        targetExternalOrderId,
         changes.shipping_company ?? sale.shipping_company,
         changes.tracking_number ?? sale.tracking_number,
         targetStatus,
@@ -2885,14 +3024,17 @@ async function startServer() {
     try {
       const validated = saleSchema.parse(req.body);
       const id = uuidv4();
+      let orderCode = '';
       const { 
         customer_name, customer_phone, customer_address, 
-        shipping_company, tracking_number, total_weight, total_quantity, total_amount, 
+        shipping_company, tracking_number, external_order_id, total_weight, total_quantity, total_amount,
         items, platform, commission_rate, shipping_cost, discount, cash_account_id,
         packaging_cost, ad_spend, other_expenses
       } = req.body;
       
       db.transaction(() => {
+        orderCode = reserveOrderCode();
+
         // Sepette aynı ürün birden fazla satırda varsa, stok hatasını engellemek için adetleri birleştir:
         const mergedItemsMap = new Map();
         for (const item of items) {
@@ -2934,12 +3076,19 @@ async function startServer() {
 
         // Cash Logic
         let finalCashAccountId = cash_account_id;
-        const plat = platform || 'Satış Sistemi';
-        const isPlatform = ['Trendyol', 'Hepsiburada', 'Amazon', 'N11'].includes(plat);
+        const plat = cleanText(platform) || defaultSaleChannel();
+        const externalOrderId = cleanText(external_order_id);
+        if (requiresPlatformOrderNumber(plat) && !externalOrderId) {
+          throw new Error(`${plat} satışları için platform sipariş numarası zorunludur.`);
+        }
+        ensureUniqueExternalOrderId(plat, externalOrderId);
+
+        const isPlatform = isPendingSaleChannel(plat);
 
         if (isPlatform) {
            const platAccountName = `${plat} Bekleyen`;
-           const foundAcc = db.prepare("SELECT id FROM cash_accounts WHERE name LIKE ?").get(`%${platAccountName}%`) as any;
+           const foundAcc = db.prepare("SELECT id FROM cash_accounts WHERE name = ? OR name LIKE ? ORDER BY name = ? DESC LIMIT 1")
+             .get(platAccountName, `%${platAccountName}%`, platAccountName) as any;
            if (foundAcc) {
               finalCashAccountId = foundAcc.id;
            } else {
@@ -2965,7 +3114,7 @@ async function startServer() {
         db.prepare(`
            INSERT INTO cash_transactions (id, account_id, type, amount, currency, exchange_rate_at_transaction, source_type, source_id, description)
            VALUES (?, ?, 'IN', ?, ?, 1, 'sale', ?, ?)
-        `).run(uuidv4(), finalCashAccountId, finalAmountToCash, account.currency, id, `Satış: ${customer_name} (${plat})`);
+        `).run(uuidv4(), finalCashAccountId, finalAmountToCash, account.currency, id, `Satış ${orderCode}: ${customer_name} (${plat})`);
 
 
         const activeRate = getActiveExchangeRate();
@@ -2973,9 +3122,9 @@ async function startServer() {
 
         // 2. Create Sale
         db.prepare(`
-          INSERT INTO sales (id, customer_name, customer_phone, customer_address, shipping_company, tracking_number, total_weight, total_quantity, total_amount, platform, commission_rate, shipping_cost, discount, packaging_cost, ad_spend, other_expenses, net_total, gross_profit, net_profit, cash_account_id, exchange_rate_at_transaction)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(id, customer_name, customer_phone, customer_address, shipping_company, tracking_number, total_weight, total_quantity, total_amount, plat, commRate, shipCost, discountAmt, packCost, adCost, otherCost, netTotal, grossProfit, netProfit, finalCashAccountId, activeRate);
+          INSERT INTO sales (id, order_code, external_order_id, customer_name, customer_phone, customer_address, shipping_company, tracking_number, total_weight, total_quantity, total_amount, platform, commission_rate, shipping_cost, discount, packaging_cost, ad_spend, other_expenses, net_total, gross_profit, net_profit, cash_account_id, exchange_rate_at_transaction)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(id, orderCode, externalOrderId, customer_name, customer_phone, customer_address, shipping_company, tracking_number, total_weight, total_quantity, total_amount, plat, commRate, shipCost, discountAmt, packCost, adCost, otherCost, netTotal, grossProfit, netProfit, finalCashAccountId, activeRate);
 
         const insertItem = db.prepare(`
           INSERT INTO sale_items (id, sale_id, product_id, product_name, quantity, weight, unit_price, purchase_cost, net_profit)
@@ -3004,7 +3153,7 @@ async function startServer() {
           }
 
           db.prepare("INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type) VALUES (?, ?, ?, ?, ?, ?)")
-            .run(uuidv4(), item.product_id, centralStockChannel(plat), -item.quantity, `Satış No: ${id}`, 'OUT');
+            .run(uuidv4(), item.product_id, centralStockChannel(plat), -item.quantity, `Satış No: ${orderCode}`, 'OUT');
         }
 
         // 4. Auto-create income transaction so the financial ledger is always consistent.
@@ -3016,19 +3165,19 @@ async function startServer() {
         `).run(
           incTxnId, plat, netTotal, netTotal, activeRate,
           `${customer_name || 'Müşteri'} — ${plat} satışı`,
-          id, finalCashAccountId
+          orderCode, finalCashAccountId
         );
 
         // Update the sale with the linked income transaction id
         db.prepare("UPDATE sales SET income_transaction_id = ? WHERE id = ?").run(incTxnId, id);
 
         logActivity('SALE_CREATED', 'sale', id, {
-          customer: customer_name, platform: plat, total: total_amount, net_profit: netProfit,
+          order_code: orderCode, external_order_id: externalOrderId, customer: customer_name, platform: plat, total: total_amount, net_profit: netProfit,
         }, req.user?.id);
 
       })();
 
-      res.json({ success: true, message: "Satış başarıyla kaydedildi.", id });
+      res.json({ success: true, message: "Satış başarıyla kaydedildi.", id, order_code: orderCode });
     } catch (err: any) {
       if (err instanceof z.ZodError) {
          return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: err.issues } });
@@ -3586,14 +3735,52 @@ async function startServer() {
       zip.addLocalFile(backupPath, "", "dsdst_panel.db");
 
       const uploadsDir = path.join(process.cwd(), "uploads");
+      let uploadFileCount = 0;
+      let uploadTotalBytes = 0;
       if (fs.existsSync(uploadsDir)) {
         zip.addLocalFolder(uploadsDir, "uploads");
+        const walkUploads = (dirPath: string) => {
+          for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+            const fullPath = path.join(dirPath, entry.name);
+            if (entry.isDirectory()) {
+              walkUploads(fullPath);
+            } else if (entry.isFile()) {
+              uploadFileCount++;
+              uploadTotalBytes += fs.statSync(fullPath).size;
+            }
+          }
+        };
+        walkUploads(uploadsDir);
       }
+
+      const manifest = {
+        app: "DSDST Panel",
+        version: "v2.5.5",
+        created_at: new Date().toISOString(),
+        created_by: req.user?.username || null,
+        backup_type: "full",
+        contents: {
+          database: {
+            entry: "dsdst_panel.db",
+            source_path: DB_PATH,
+            size_bytes: fs.statSync(backupPath).size,
+          },
+          uploads: {
+            entry: "uploads/",
+            source_path: uploadsDir,
+            exists: fs.existsSync(uploadsDir),
+            file_count: uploadFileCount,
+            total_bytes: uploadTotalBytes,
+          },
+        },
+      };
+      zip.addFile("backup_manifest.json", Buffer.from(JSON.stringify(manifest, null, 2), "utf8"));
 
       zip.writeZip(zipPath);
 
       logActivity("BACKUP_DOWNLOADED", "system", "backup", { ip: req.ip }, req.user?.id);
 
+      res.setHeader("Cache-Control", "no-store");
       res.download(zipPath, `dsdst_backup_${new Date().toISOString().split('T')[0]}.zip`, () => {
         try { fs.unlinkSync(backupPath); } catch (_) {}
         try { fs.unlinkSync(zipPath); }    catch (_) {}

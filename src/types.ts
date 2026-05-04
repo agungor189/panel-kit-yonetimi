@@ -228,6 +228,7 @@ export interface Settings {
   default_buffer_percentage: number;
   default_profit_percentage?: string | number;
   api_key?: string;
+  sales_channels?: string[];
   commission_rates: Record<string, number>;
   product_categories: string[];
   income_categories: string[];

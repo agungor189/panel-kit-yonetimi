@@ -512,6 +512,178 @@ const migrations: Migration[] = [
       } catch (_) {}
     },
   },
+  {
+    version: 27,
+    name: "add_sales_order_codes",
+    up(db) {
+      const saleColumns = new Set(
+        (db.prepare("PRAGMA table_info(sales)").all() as { name: string }[]).map((col) => col.name),
+      );
+
+      if (!saleColumns.has("order_code")) {
+        db.exec("ALTER TABLE sales ADD COLUMN order_code TEXT");
+      }
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS order_counters (
+          date_key    TEXT PRIMARY KEY,
+          last_number INTEGER NOT NULL DEFAULT 0,
+          updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+
+      const toDateKey = (value: unknown): string => {
+        const text = String(value || "").trim();
+        const match = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+        if (match) return `${match[1].slice(2)}${match[2]}${match[3]}`;
+
+        const fallback = new Date(text);
+        if (!Number.isNaN(fallback.getTime())) {
+          const year = String(fallback.getFullYear()).slice(2);
+          const month = String(fallback.getMonth() + 1).padStart(2, "0");
+          const day = String(fallback.getDate()).padStart(2, "0");
+          return `${year}${month}${day}`;
+        }
+
+        const now = new Date();
+        return `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
+      };
+
+      const counters = new Map<string, number>();
+      const usedCodes = new Set<string>();
+
+      const existingCodes = db.prepare(`
+        SELECT order_code
+        FROM sales
+        WHERE order_code IS NOT NULL AND TRIM(order_code) <> ''
+      `).all() as { order_code: string }[];
+
+      for (const row of existingCodes) {
+        const code = String(row.order_code || "").trim();
+        if (!code) continue;
+        usedCodes.add(code);
+        const match = code.match(/^DS-(\d{6})-(\d{4})$/);
+        if (!match) continue;
+        counters.set(match[1], Math.max(counters.get(match[1]) || 0, Number(match[2]) || 0));
+      }
+
+      const existingCounters = db.prepare("SELECT date_key, last_number FROM order_counters").all() as { date_key: string; last_number: number }[];
+      for (const row of existingCounters) {
+        counters.set(row.date_key, Math.max(counters.get(row.date_key) || 0, Number(row.last_number) || 0));
+      }
+
+      const sales = db.prepare(`
+        SELECT id, created_at
+        FROM sales
+        WHERE order_code IS NULL OR TRIM(order_code) = ''
+        ORDER BY datetime(COALESCE(created_at, CURRENT_TIMESTAMP)) ASC, rowid ASC
+      `).all() as { id: string; created_at: string }[];
+
+      const updateSale = db.prepare("UPDATE sales SET order_code = ? WHERE id = ?");
+      for (const sale of sales) {
+        const dateKey = toDateKey(sale.created_at);
+        let nextNumber = (counters.get(dateKey) || 0) + 1;
+        let orderCode = `DS-${dateKey}-${String(nextNumber).padStart(4, "0")}`;
+
+        while (usedCodes.has(orderCode)) {
+          nextNumber++;
+          orderCode = `DS-${dateKey}-${String(nextNumber).padStart(4, "0")}`;
+        }
+
+        updateSale.run(orderCode, sale.id);
+        usedCodes.add(orderCode);
+        counters.set(dateKey, nextNumber);
+      }
+
+      const upsertCounter = db.prepare(`
+        INSERT INTO order_counters (date_key, last_number, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(date_key) DO UPDATE SET
+          last_number = MAX(order_counters.last_number, excluded.last_number),
+          updated_at = CURRENT_TIMESTAMP
+      `);
+      for (const [dateKey, lastNumber] of counters) {
+        upsertCounter.run(dateKey, lastNumber);
+      }
+
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_order_code_unique
+        ON sales(order_code) WHERE order_code IS NOT NULL AND order_code <> ''
+      `);
+    },
+  },
+  {
+    version: 28,
+    name: "add_configurable_sales_channels",
+    up(db) {
+      const defaultChannels = ["Satış Sistemi", "Website", "Trendyol", "Hepsiburada", "Amazon", "N11"];
+      const defaultRates: Record<string, number> = {
+        "Satış Sistemi": 0,
+        Website: 0,
+        Trendyol: 15,
+        Hepsiburada: 15,
+        Amazon: 10,
+        N11: 15,
+      };
+
+      const readJsonSetting = (key: string, fallback: any) => {
+        const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as any;
+        if (!row?.value) return fallback;
+        try {
+          return JSON.parse(row.value);
+        } catch (_) {
+          return fallback;
+        }
+      };
+
+      const uniqueChannels = (values: unknown[]) => {
+        const result: string[] = [];
+        for (const value of values) {
+          const channel = String(value || "").trim();
+          if (!channel || result.includes(channel)) continue;
+          result.push(channel);
+        }
+        return result;
+      };
+
+      const existingChannels = readJsonSetting("sales_channels", []);
+      const currentChannels = Array.isArray(existingChannels) ? existingChannels : [];
+      const salesChannels = uniqueChannels([...currentChannels, ...defaultChannels]);
+      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
+        .run("sales_channels", JSON.stringify(salesChannels));
+
+      const existingRates = readJsonSetting("commission_rates", {});
+      const rates = typeof existingRates === "object" && existingRates !== null && !Array.isArray(existingRates)
+        ? { ...existingRates }
+        : {};
+      for (const [channel, rate] of Object.entries(defaultRates)) {
+        if (rates[channel] === undefined || rates[channel] === null || rates[channel] === "") {
+          rates[channel] = rate;
+        }
+      }
+      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
+        .run("commission_rates", JSON.stringify(rates));
+    },
+  },
+  {
+    version: 29,
+    name: "add_sales_external_order_id",
+    up(db) {
+      const saleColumns = new Set(
+        (db.prepare("PRAGMA table_info(sales)").all() as { name: string }[]).map((col) => col.name),
+      );
+
+      if (!saleColumns.has("external_order_id")) {
+        db.exec("ALTER TABLE sales ADD COLUMN external_order_id TEXT");
+      }
+
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_platform_external_order
+        ON sales(platform, external_order_id)
+        WHERE external_order_id IS NOT NULL AND TRIM(external_order_id) <> ''
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

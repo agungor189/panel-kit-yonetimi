@@ -268,6 +268,8 @@ export function applySchema(db: Database.Database): void {
 
     CREATE TABLE IF NOT EXISTS sales (
       id                         TEXT PRIMARY KEY,
+      order_code                 TEXT,
+      external_order_id          TEXT,
       customer_name              TEXT,
       customer_phone             TEXT,
       customer_address           TEXT,
@@ -294,6 +296,12 @@ export function applySchema(db: Database.Database): void {
       returned_at                DATETIME,
       created_at                 DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at                 DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS order_counters (
+      date_key    TEXT PRIMARY KEY,
+      last_number INTEGER NOT NULL DEFAULT 0,
+      updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
     CREATE TABLE IF NOT EXISTS sale_items (

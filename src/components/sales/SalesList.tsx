@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { api } from '../../lib/api';
-import { Package, Truck, User } from 'lucide-react';
+import { CalendarDays, Search, Truck, User } from 'lucide-react';
 import { useCurrency } from '../../CurrencyContext';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -10,6 +10,51 @@ function cn(...inputs: ClassValue[]) {
 }
 
 const finalStatuses = ['İptal Edildi', 'İade Edildi'];
+type PeriodFilter = 'all' | 'this_month' | 'last_month' | 'last_3_months';
+
+const periodOptions: { key: PeriodFilter; label: string }[] = [
+  { key: 'all', label: 'Tümü' },
+  { key: 'this_month', label: 'Bu Ay' },
+  { key: 'last_month', label: 'Geçen Ay' },
+  { key: 'last_3_months', label: 'Son 3 Ay' },
+];
+
+const getPeriodRange = (period: PeriodFilter) => {
+  const now = new Date();
+  const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  if (period === 'this_month') {
+    return { start: startOfThisMonth, end: null as Date | null };
+  }
+
+  if (period === 'last_month') {
+    return {
+      start: new Date(now.getFullYear(), now.getMonth() - 1, 1),
+      end: startOfThisMonth,
+    };
+  }
+
+  if (period === 'last_3_months') {
+    const start = new Date(now);
+    start.setMonth(start.getMonth() - 3);
+    start.setHours(0, 0, 0, 0);
+    return { start, end: null as Date | null };
+  }
+
+  return { start: null as Date | null, end: null as Date | null };
+};
+
+const matchesPeriod = (sale: any, period: PeriodFilter) => {
+  const { start, end } = getPeriodRange(period);
+  if (!start && !end) return true;
+  const saleDate = new Date(sale.created_at || sale.date || 0);
+  if (Number.isNaN(saleDate.getTime())) return false;
+  if (start && saleDate < start) return false;
+  if (end && saleDate >= end) return false;
+  return true;
+};
+
+const normalizeSearchText = (value: unknown) => String(value || '').toLocaleLowerCase('tr-TR');
 
 const getSaleStatusClass = (status?: string) => {
   switch (status) {
@@ -32,6 +77,8 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
   const { FormatAmount } = useCurrency();
   const [sales, setSales] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [periodFilter, setPeriodFilter] = useState<PeriodFilter>('this_month');
+  const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
     loadSales();
@@ -48,16 +95,69 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
     }
   };
 
+  const filteredSales = useMemo(() => {
+    const query = normalizeSearchText(searchQuery.trim());
+    return sales.filter((sale) => {
+      if (!matchesPeriod(sale, periodFilter)) return false;
+      if (!query) return true;
+
+      const searchable = [
+        sale.order_code,
+        sale.external_order_id,
+        sale.id,
+        sale.customer_name,
+        sale.customer_phone,
+        sale.tracking_number,
+        sale.platform,
+      ].map(normalizeSearchText).join(' ');
+
+      return searchable.includes(query);
+    });
+  }, [periodFilter, sales, searchQuery]);
+
   if (loading) {
     return <div className="p-8 text-center text-text-muted font-semibold">Yükleniyor...</div>;
   }
 
   return (
     <div className="bg-white rounded-3xl shadow-lg border border-border-color overflow-hidden">
+      <div className="flex flex-col gap-4 border-b border-border-color bg-bg-main/40 px-5 py-4 xl:flex-row xl:items-center xl:justify-between">
+        <div className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+          <input
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Sipariş kodu veya platform sipariş no ara..."
+            className="w-full rounded-2xl border border-gray-200 bg-white py-3 pl-10 pr-4 text-sm font-semibold text-text-main outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/15"
+          />
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="mr-1 hidden items-center gap-2 text-xs font-black uppercase tracking-wider text-text-muted sm:flex">
+            <CalendarDays className="h-4 w-4" />
+            Dönem
+          </div>
+          {periodOptions.map((option) => (
+            <button
+              key={option.key}
+              type="button"
+              onClick={() => setPeriodFilter(option.key)}
+              className={cn(
+                "rounded-xl px-3 py-2 text-xs font-black transition-colors",
+                periodFilter === option.key
+                  ? "bg-primary text-white shadow-sm"
+                  : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+              )}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="overflow-x-auto">
-        <table className="w-full text-sm text-left min-w-[1000px]">
+        <table className="w-full text-sm text-left min-w-[1120px]">
           <thead className="bg-bg-main/50 text-text-muted font-bold text-[11px] uppercase tracking-wider">
             <tr>
+              <th className="px-6 py-4">Sipariş Kodu</th>
               <th className="px-6 py-4">Müşteri</th>
               <th className="px-6 py-4">Kargo Firması</th>
               <th className="px-6 py-4 text-center">Platform</th>
@@ -70,7 +170,7 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
             </tr>
           </thead>
           <tbody className="divide-y divide-border-color">
-            {sales.map((sale) => {
+            {filteredSales.map((sale) => {
               const isFinal = finalStatuses.includes(sale.status);
               return (
                 <tr
@@ -78,6 +178,16 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
                   onClick={() => onSaleClick && onSaleClick(sale)}
                   className="hover:bg-bg-main/50 transition-colors cursor-pointer"
                 >
+                  <td className="px-6 py-4">
+                    <span className="inline-flex rounded-xl bg-slate-900 px-3 py-1.5 font-mono text-xs font-black tracking-wide text-white shadow-sm">
+                      {sale.order_code || sale.id?.slice(0, 8)?.toUpperCase()}
+                    </span>
+                    {sale.external_order_id && (
+                      <div className="mt-1 text-[10px] font-black uppercase tracking-wide text-slate-500">
+                        Platform: {sale.external_order_id}
+                      </div>
+                    )}
+                  </td>
                   <td className="px-6 py-4">
                     <div className="font-bold text-text-main flex items-center gap-2">
                       <User className="w-4 h-4 text-primary" /> {sale.customer_name}
@@ -126,10 +236,10 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
                 </tr>
               );
             })}
-            {sales.length === 0 && (
+            {filteredSales.length === 0 && (
               <tr>
-                <td colSpan={9} className="px-6 py-8 text-center text-text-muted font-medium">
-                  Henüz satış kaydı bulunmamaktadır.
+                <td colSpan={10} className="px-6 py-8 text-center text-text-muted font-medium">
+                  {sales.length === 0 ? 'Henüz satış kaydı bulunmamaktadır.' : 'Bu filtrelere uygun sipariş bulunamadı.'}
                 </td>
               </tr>
             )}

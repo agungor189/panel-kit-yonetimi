@@ -14,10 +14,11 @@ import {
   UserPlus,
   RotateCcw,
   ShieldCheck,
-  Power
+  Power,
+  Download
 } from 'lucide-react';
 import { useCurrency } from '../CurrencyContext';
-import { api } from '../lib/api';
+import { api, getToken } from '../lib/api';
 import { useAuth } from '../App';
 import { Settings, type ManagedUser, type UserRole } from '../types';
 import { clsx, type ClassValue } from 'clsx';
@@ -40,6 +41,7 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
   const [saved, setSaved] = useState(false);
 
   const [newCat, setNewCat] = useState({ product: '', income: '', expense: '' });
+  const [newSalesChannel, setNewSalesChannel] = useState('');
   const [restoreProgress, setRestoreProgress] = useState<{ percentage: number; text: string } | null>(null);
   const [confirmRestoreFile, setConfirmRestoreFile] = useState<File | null>(null);
   const [confirmInputText, setConfirmInputText] = useState("");
@@ -118,6 +120,61 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
     }
   };
 
+  const filenameFromDisposition = (disposition: string | null) => {
+    if (!disposition) return `dsdst_backup_${new Date().toISOString().slice(0, 10)}.zip`;
+
+    const encodedMatch = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    if (encodedMatch?.[1]) {
+      try {
+        return decodeURIComponent(encodedMatch[1].replace(/["']/g, ''));
+      } catch (_) {}
+    }
+
+    const plainMatch = disposition.match(/filename="?([^"]+)"?/i);
+    return plainMatch?.[1] || `dsdst_backup_${new Date().toISOString().slice(0, 10)}.zip`;
+  };
+
+  const handleDownloadBackup = async () => {
+    if (!isAdmin) {
+      alert("Yedek indirme sadece admin kullanıcılar için açıktır.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await fetch('/api/backup/download', {
+        headers: {
+          Authorization: `Bearer ${getToken() || ''}`,
+        },
+      });
+
+      if (!res.ok) {
+        let message = "Yedek indirilemedi.";
+        try {
+          const data = await res.json();
+          message = data?.error?.message || data?.error || message;
+        } catch (_) {}
+        throw new Error(message);
+      }
+
+      const blob = await res.blob();
+      if (!blob.size) throw new Error("Yedek dosyası boş geldi.");
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filenameFromDisposition(res.headers.get('Content-Disposition'));
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err: any) {
+      alert(err.message || "Yedek indirilemedi.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const addCategory = (type: 'product' | 'income' | 'expense') => {
     if (!settings) return;
     const key = `${type}_categories` as keyof Settings;
@@ -142,6 +199,36 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
     setSettings({
       ...settings,
       [key]: currentList.filter(c => c !== value)
+    });
+  };
+
+  const addSalesChannel = () => {
+    if (!settings) return;
+    const value = newSalesChannel.trim();
+    if (!value) return;
+
+    const channels = settings.sales_channels || [];
+    if (channels.includes(value)) return;
+
+    setSettings({
+      ...settings,
+      sales_channels: [...channels, value],
+      commission_rates: {
+        ...(settings.commission_rates || {}),
+        [value]: settings.commission_rates?.[value] ?? 0,
+      },
+    });
+    setNewSalesChannel('');
+  };
+
+  const removeSalesChannel = (channel: string) => {
+    if (!settings || channel === 'Satış Sistemi') return;
+    const nextRates = { ...(settings.commission_rates || {}) };
+    delete nextRates[channel];
+    setSettings({
+      ...settings,
+      sales_channels: (settings.sales_channels || []).filter((value) => value !== channel),
+      commission_rates: nextRates,
     });
   };
 
@@ -365,35 +452,65 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
             </div>
          </div>
 
-         {/* Commission Rates */}
+         {/* Sales Channels & Commission Rates */}
          <div className="p-8 space-y-6">
             <h3 className="text-xs font-bold text-text-muted uppercase tracking-widest flex items-center">
                <Percent className="w-4 h-4 mr-3 text-primary" />
-               Platform Komisyon Oranları
+               Satış Kanalları & Komisyon Oranları
             </h3>
-            <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-               {Object.entries(settings.commission_rates).map(([platform, rate]) => (
-                  <div key={platform} className="flex items-center justify-between p-4 bg-bg-main rounded-xl border border-border-color group focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary transition-all">
-                     <span className="text-[11px] font-bold text-text-main uppercase tracking-tight">{platform}</span>
-                     <div className="flex items-center space-x-1.5">
-                        <input 
-                           type="number" 
+            <div className="flex gap-2">
+               <input
+                  type="text"
+                  value={newSalesChannel}
+                  onChange={(e) => setNewSalesChannel(e.target.value)}
+                  placeholder="Yeni kanal ekleyin..."
+                  className="form-input text-sm font-bold"
+                  onKeyDown={(e) => e.key === 'Enter' && addSalesChannel()}
+               />
+               <button
+                  onClick={addSalesChannel}
+                  className="p-3 bg-primary text-white rounded-xl hover:bg-primary/90 transition-colors"
+                  title="Satış kanalı ekle"
+               >
+                  <Plus className="w-4 h-4" />
+               </button>
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+               {(settings.sales_channels || Object.keys(settings.commission_rates || {})).map((platform) => (
+                  <div key={platform} className="flex items-center justify-between gap-4 p-4 bg-bg-main rounded-xl border border-border-color group focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary transition-all">
+                     <div>
+                        <span className="text-[11px] font-bold text-text-main uppercase tracking-tight">{platform}</span>
+                        <p className="text-[10px] text-text-muted mt-1 font-bold uppercase tracking-tight">
+                          {['Trendyol', 'Hepsiburada', 'Amazon', 'N11'].includes(platform) ? 'Bekleyen platform hesabı kullanır' : 'Kasa hesabı seçilerek işlenir'}
+                        </p>
+                     </div>
+                     <div className="flex items-center space-x-2">
+                        <input
+                           type="number"
                            step="0.1"
-                           value={rate} 
+                           value={settings.commission_rates?.[platform] ?? 0}
                            onChange={e => {
-                              const newRates = {...settings.commission_rates, [platform]: parseFloat(e.target.value)};
+                              const newRates = {...(settings.commission_rates || {}), [platform]: parseFloat(e.target.value) || 0};
                               setSettings({...settings, commission_rates: newRates});
                            }}
-                           className="w-12 bg-transparent text-right outline-none font-bold text-text-main text-sm"
+                           className="w-16 bg-white border border-border-color rounded-lg px-2 py-1.5 text-right outline-none font-bold text-text-main text-sm"
                         />
                         <span className="text-text-muted font-bold text-[10px]">%</span>
+                        <button
+                          onClick={() => removeSalesChannel(platform)}
+                          disabled={platform === 'Satış Sistemi'}
+                          className="p-2 text-text-muted hover:text-danger disabled:cursor-not-allowed disabled:opacity-30 transition-colors"
+                          title={platform === 'Satış Sistemi' ? 'Varsayılan kanal kaldırılamaz' : 'Kanalı kaldır'}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                      </div>
                   </div>
                ))}
             </div>
             <div className="flex items-start p-4 bg-blue-50/50 border border-blue-100 rounded-xl">
                <Info className="w-4 h-4 text-blue-600 mr-3 mt-0.5 flex-shrink-0" />
-               <p className="text-[11px] text-blue-700 leading-relaxed font-bold uppercase tracking-tight opacity-80">Bu oranlar, finansal raporlar ve platform karşılaştırmalarında net kar hesaplamaları için kullanılmaktadır.</p>
+               <p className="text-[11px] text-blue-700 leading-relaxed font-bold uppercase tracking-tight opacity-80">Bu liste yeni satış formunda Platform / Satış Kanalı seçeneklerini belirler. Komisyon oranları net kâr ve platform analizlerinde kullanılır.</p>
             </div>
          </div>
       </div>
@@ -547,6 +664,7 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
         </div>
       )}
 
+      {isAdmin && (
       <div className="card overflow-hidden divide-y divide-border-color mt-8 space-y-0">
           <div className="p-6 bg-red-50/50 border border-red-100 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
              <div className="flex items-start md:items-center">
@@ -562,7 +680,7 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
                     if (window.confirm("Bu işlem eski formatta kalmış ürün fiyatlarını yeni fiyat yönetimine entegre edecektir. Onaylıyor musunuz?")) {
                        setLoading(true);
                        try {
-                          const res = await api.post('/api/maintenance/fix-pricing', {});
+                          const res = await api.post('/maintenance/fix-pricing', { confirm: 'FIX_PRICING' });
                           alert(res.message || "Fiyatlar onarıldı.");
                           onUpdate();
                        } catch(e: any) {
@@ -586,16 +704,17 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
                  }} />
                </label>
                <button 
-                 onClick={() => {
-                   window.location.href = '/api/backup/download';
-                 }}
-                 className="px-5 py-2 bg-danger border border-transparent text-white rounded-xl text-[11px] font-bold uppercase tracking-widest hover:bg-red-700 transition-all shadow-sm active:scale-95 text-center flex-1 md:flex-none"
+                 onClick={handleDownloadBackup}
+                 disabled={loading}
+                 className="px-5 py-2 bg-danger border border-transparent text-white rounded-xl text-[11px] font-bold uppercase tracking-widest hover:bg-red-700 transition-all shadow-sm active:scale-95 text-center flex-1 md:flex-none disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2"
                >
+                 <Download className="w-3.5 h-3.5" />
                  Yedek İndir
                </button>
              </div>
           </div>
       </div>
+      )}
 
       {confirmRestoreFile && (
         <div className="fixed inset-0 z-[9999] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
@@ -639,6 +758,8 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
                      
                      const xhr = new XMLHttpRequest();
                      xhr.open("POST", "/api/backup/restore", true);
+                     const token = getToken();
+                     if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
                      
                      xhr.upload.onprogress = (event) => {
                        if (event.lengthComputable) {
@@ -658,7 +779,8 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
                          let errMsg = "Geri yükleme başarısız.";
                          try {
                            const err = JSON.parse(xhr.responseText);
-                           if (err.error) errMsg = err.error;
+                           if (err.error?.message) errMsg = err.error.message;
+                           else if (err.error) errMsg = err.error;
                          } catch(e) {}
                          alert(errMsg);
                          setRestoreProgress(null);

@@ -25,8 +25,8 @@ export default function Sales() {
                 <ShoppingCart className="w-6 h-6 text-primary" />
               </div>
               <div>
-                <h1 className="text-2xl font-black text-text-main flex items-center tracking-tight">Satışlar / Kargo</h1>
-                <p className="text-text-muted mt-1 font-medium">Satış işlemleri ve kargo ağırlık hesaplamaları</p>
+                <h1 className="text-2xl font-black text-text-main flex items-center tracking-tight">Sipariş Yönetimi</h1>
+                <p className="text-text-muted mt-1 font-medium">Satış, kargo ve sipariş takip süreçleri</p>
               </div>
             </div>
             {!isReadOnly && (

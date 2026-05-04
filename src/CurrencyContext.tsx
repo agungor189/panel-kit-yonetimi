@@ -118,7 +118,7 @@ export const CurrencyProvider = ({ children }: { children: React.ReactNode }) =>
     return (
       <span className={`inline-flex flex-col justify-center ${alignmentClass} leading-[1.1] ${className || ''}`}>
         <span className="block">{formatMoney(tryAmount, 'TRY')}</span>
-        <span className="block text-[0.45em] text-gray-500 font-semibold tracking-tight relative mt-[0.1em]">
+        <span className="block text-[1em] text-gray-700 font-bold tracking-tight relative mt-1">
           ({formatMoney(usdAmount, 'USD')})
         </span>
       </span>

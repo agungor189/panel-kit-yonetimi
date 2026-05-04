@@ -2,6 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { api } from '../../lib/api';
 import { ArrowLeft, User, Phone, MapPin, Truck, Hash, Search, Plus, Trash2, Package } from 'lucide-react';
 
+const DEFAULT_SALES_CHANNELS = ['Satış Sistemi', 'Website', 'Trendyol', 'Hepsiburada', 'Amazon', 'N11'];
+const DEFAULT_PENDING_CHANNELS = ['Trendyol', 'Hepsiburada', 'Amazon', 'N11'];
+const DIRECT_SALES_CHANNELS = ['Satış Sistemi', 'Website'];
+
 export default function SalesForm({ onBack }: { onBack: () => void }) {
   const [formData, setFormData] = useState({
     customer_name: '',
@@ -9,6 +13,7 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
     customer_address: '',
     shipping_company: '',
     tracking_number: '',
+    external_order_id: '',
     platform: 'Satış Sistemi',
     commission_rate: 0,
     shipping_cost: 0,
@@ -25,6 +30,72 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
   
   const [saving, setSaving] = useState(false);
 
+  const normalizeSettings = (data: any) => {
+    if (!Array.isArray(data)) return data || {};
+    return data.reduce((acc: any, curr: any) => {
+      try {
+        acc[curr.key] = JSON.parse(curr.value);
+      } catch {
+        acc[curr.key] = curr.value;
+      }
+      return acc;
+    }, {});
+  };
+
+  const getCommissionRates = (settingsValue = settings) => {
+    const raw = settingsValue?.commission_rates || {};
+    if (typeof raw === 'string') {
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return {};
+      }
+    }
+    return raw && typeof raw === 'object' ? raw : {};
+  };
+
+  const getSalesChannels = (settingsValue = settings) => {
+    const rawChannels = settingsValue?.sales_channels;
+    const parsedChannels = Array.isArray(rawChannels)
+      ? rawChannels
+      : typeof rawChannels === 'string'
+        ? (() => {
+            try {
+              const parsed = JSON.parse(rawChannels);
+              return Array.isArray(parsed) ? parsed : [];
+            } catch {
+              return [];
+            }
+          })()
+        : [];
+    const commissionChannels = Object.keys(getCommissionRates(settingsValue));
+    const sourceChannels = parsedChannels.length > 0
+      ? parsedChannels
+      : commissionChannels.length > 0
+        ? commissionChannels
+        : DEFAULT_SALES_CHANNELS;
+    const result: string[] = [];
+    ['Satış Sistemi', ...sourceChannels].forEach((channel) => {
+      const value = String(channel || '').trim();
+      if (value && !result.includes(value)) result.push(value);
+    });
+    return result;
+  };
+
+  const isPendingChannel = (platform: string) => {
+    if (DEFAULT_PENDING_CHANNELS.includes(platform)) return true;
+    return cashAccounts.some((account) =>
+      account.type === 'platform' &&
+      account.is_active !== 0 &&
+      account.name === `${platform} Bekleyen`
+    );
+  };
+
+  const requiresPlatformOrderNumber = (platform: string) => {
+    const normalized = String(platform || '').trim().toLocaleLowerCase('tr-TR');
+    return !!normalized && !DIRECT_SALES_CHANNELS.some((channel) => channel.toLocaleLowerCase('tr-TR') === normalized);
+  };
+
   useEffect(() => {
     loadProducts();
     loadSettings();
@@ -33,15 +104,21 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
 
   const loadSettings = async () => {
     try {
-      const data = await api.get('/settings');
-      const settingsObj = data.reduce((acc: any, curr: any) => ({ ...acc, [curr.key]: curr.value }), {});
+      const data = normalizeSettings(await api.get('/settings'));
+      const settingsObj = {
+        ...data,
+        sales_channels: getSalesChannels(data),
+        commission_rates: getCommissionRates(data),
+      };
       setSettings(settingsObj);
-      if (settingsObj.commission_rates) {
-        try {
-          const rates = JSON.parse(settingsObj.commission_rates);
-          if (rates['Satış Sistemi']) setFormData(prev => ({ ...prev, commission_rate: rates['Satış Sistemi'] }));
-        } catch(e) {}
-      }
+      const initialPlatform = settingsObj.sales_channels.includes(formData.platform)
+        ? formData.platform
+        : settingsObj.sales_channels[0] || 'Satış Sistemi';
+      setFormData(prev => ({
+        ...prev,
+        platform: initialPlatform,
+        commission_rate: Number(settingsObj.commission_rates?.[initialPlatform] ?? prev.commission_rate ?? 0),
+      }));
     } catch (err) {
       console.error(err);
     }
@@ -57,14 +134,15 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
   };
 
   const handlePlatformChange = (platform: string) => {
-    let rate = 0;
-    if (settings.commission_rates) {
-      try {
-        const rates = JSON.parse(settings.commission_rates);
-        if (rates[platform] !== undefined) rate = rates[platform];
-      } catch(e) {}
-    }
-    setFormData(prev => ({ ...prev, platform, commission_rate: rate }));
+    const rates = getCommissionRates();
+    const rate = Number(rates[platform] ?? 0);
+    setFormData(prev => ({
+      ...prev,
+      platform,
+      commission_rate: rate,
+      cash_account_id: isPendingChannel(platform) ? '' : prev.cash_account_id,
+      external_order_id: requiresPlatformOrderNumber(platform) ? prev.external_order_id : '',
+    }));
   };
 
   const handleAddItem = (product: any) => {
@@ -132,6 +210,9 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (selectedItems.length === 0) return alert('Lütfen en az bir ürün ekleyin.');
+    if (requiresPlatformOrderNumber(formData.platform) && !formData.external_order_id.trim()) {
+      return alert(`${formData.platform} için platform sipariş numarası zorunludur.`);
+    }
     
     // Additional validation check just in case
     for (const item of selectedItems) {
@@ -144,6 +225,7 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
     try {
       const response = await api.post('/sales', {
         ...formData,
+        external_order_id: formData.external_order_id.trim(),
         total_quantity: totalQuantity,
         total_weight: totalWeight,
         total_amount: totalAmount,
@@ -273,13 +355,27 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
                   onChange={e => handlePlatformChange(e.target.value)}
                   className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-semibold outline-none focus:ring-2 focus:border-primary"
                 >
-                  <option value="Satış Sistemi">Satış Sistemi (Fiziksel/Manual)</option>
-                  {settings.commission_rates && Object.keys(JSON.parse(settings.commission_rates)).map(k => (
+                  {getSalesChannels().map(k => (
                      <option key={k} value={k}>{k}</option>
                   ))}
                 </select>
               </div>
-              {!['Trendyol', 'Hepsiburada', 'Amazon', 'N11'].includes(formData.platform) && (
+              {requiresPlatformOrderNumber(formData.platform) && (
+                <div>
+                  <label className="block text-xs font-semibold text-gray-500 mb-1">
+                    Platform Sipariş No <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    required
+                    type="text"
+                    value={formData.external_order_id}
+                    onChange={e => setFormData({...formData, external_order_id: e.target.value})}
+                    placeholder={`${formData.platform} sipariş numarası`}
+                    className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-semibold outline-none focus:ring-2 focus:border-primary"
+                  />
+                </div>
+              )}
+              {!isPendingChannel(formData.platform) && (
                 <div>
                   <label className="block text-xs font-semibold text-gray-500 mb-1">Kasa Hesabı (Giriş)</label>
                   <select

@@ -8,6 +8,7 @@ type SaleDetailFormData = {
   customer_name: string;
   customer_phone: string;
   customer_address: string;
+  external_order_id: string;
   shipping_company: string;
   tracking_number: string;
   status: string;
@@ -17,6 +18,7 @@ const buildFormData = (sale: any): SaleDetailFormData => ({
   customer_name: sale?.customer_name || '',
   customer_phone: sale?.customer_phone || '',
   customer_address: sale?.customer_address || '',
+  external_order_id: sale?.external_order_id || '',
   shipping_company: sale?.shipping_company || '',
   tracking_number: sale?.tracking_number || '',
   status: sale?.status || 'Hazırlanıyor'
@@ -24,6 +26,12 @@ const buildFormData = (sale: any): SaleDetailFormData => ({
 
 const finalStatuses = ['İptal Edildi', 'İade Edildi'];
 const statusOptions = ['Hazırlanıyor', 'Gönderildi', 'Tamamlandı', 'İptal Edildi', 'İade Edildi'];
+const DIRECT_SALES_CHANNELS = ['Satış Sistemi', 'Website'];
+
+const requiresPlatformOrderNumber = (platform?: string) => {
+  const normalized = String(platform || '').trim().toLocaleLowerCase('tr-TR');
+  return !!normalized && !DIRECT_SALES_CHANNELS.some((channel) => channel.toLocaleLowerCase('tr-TR') === normalized);
+};
 
 const getSaleStatusClass = (status?: string) => {
   switch (status) {
@@ -51,6 +59,7 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
   const [formData, setFormData] = useState<SaleDetailFormData>(() => buildFormData(sale));
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
+  const displayOrderCode = currentSale?.order_code || currentSale?.id?.slice(0, 8)?.toUpperCase();
 
   useEffect(() => {
     setCurrentSale(sale);
@@ -61,6 +70,7 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
   }, [sale]);
 
   const isFinalStatus = finalStatuses.includes(currentSale?.status);
+  const platformRequiresOrderNumber = requiresPlatformOrderNumber(currentSale?.platform);
 
   const hasChanges = useMemo(() => {
     const base = buildFormData(currentSale);
@@ -91,6 +101,10 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
       setError(`Durumu '${currentSale.status}' olan satış farklı bir duruma alınamaz.`);
       return;
     }
+    if (platformRequiresOrderNumber && !formData.external_order_id.trim()) {
+      setError(`${currentSale.platform} için platform sipariş numarası zorunludur.`);
+      return;
+    }
 
     setSaving(true);
     setError('');
@@ -101,6 +115,7 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
         customer_name: formData.customer_name.trim(),
         customer_phone: formData.customer_phone.trim(),
         customer_address: formData.customer_address.trim(),
+        external_order_id: formData.external_order_id.trim(),
         shipping_company: formData.shipping_company.trim(),
         tracking_number: formData.tracking_number.trim(),
       });
@@ -124,7 +139,7 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
           <div>
             <h2 className="text-xl font-black text-text-main flex items-center gap-3">
               <span>Sipariş Detayı</span>
-              <span className="text-sm px-3 py-1 bg-gray-100 text-gray-600 rounded-lg">{currentSale.id.slice(0, 8).toUpperCase()}</span>
+              <span className="font-mono text-sm px-3 py-1 bg-gray-100 text-gray-600 rounded-lg">{displayOrderCode}</span>
             </h2>
           </div>
           <div className="flex items-center gap-3">
@@ -219,6 +234,20 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
                        </p>
                      )}
                    </div>
+                   {(platformRequiresOrderNumber || formData.external_order_id) && (
+                     <div>
+                       <label className="block text-[10px] font-bold text-gray-500 uppercase">
+                         Platform Sipariş No {platformRequiresOrderNumber && <span className="text-red-500">*</span>}
+                       </label>
+                       <input
+                         required={platformRequiresOrderNumber}
+                         type="text"
+                         value={formData.external_order_id}
+                         onChange={e => updateForm('external_order_id', e.target.value)}
+                         className="w-full mt-1 px-3 py-2 border rounded-xl font-mono text-sm"
+                       />
+                     </div>
+                   )}
                    <div>
                      <label className="block text-[10px] font-bold text-gray-500 uppercase">Kargo Firması</label>
                      <input type="text" value={formData.shipping_company} onChange={e => updateForm('shipping_company', e.target.value)} className="w-full mt-1 px-3 py-2 border rounded-xl" />
@@ -244,6 +273,17 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
                         {currentSale.status}
                      </span>
                    </div>
+                   {(platformRequiresOrderNumber || currentSale.external_order_id) && (
+                     <div className="flex bg-white rounded-xl shadow-sm border border-gray-100 p-4 gap-4 items-center">
+                        <div className="w-10 h-10 bg-indigo-50 text-indigo-500 rounded-lg flex items-center justify-center shrink-0">
+                          <Hash className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <div className="text-[10px] font-bold text-gray-400 uppercase">Platform Sipariş No</div>
+                          <div className="font-mono font-bold text-gray-800 mt-1">{currentSale.external_order_id || '-'}</div>
+                        </div>
+                     </div>
+                   )}
                    <div className="flex bg-white rounded-xl shadow-sm border border-gray-100 p-4 gap-4 items-center">
                       <div className="w-10 h-10 bg-blue-50 text-blue-500 rounded-lg flex items-center justify-center shrink-0">
                         <Truck className="w-5 h-5" />
