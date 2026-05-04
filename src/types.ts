@@ -201,6 +201,56 @@ export interface ApiKey {
   updated_at: string;
 }
 
+export interface TrendyolConfig {
+  enabled: boolean;
+  environment: 'stage' | 'prod';
+  api_key_id: string;
+  sync_window_days: number;
+  store_front_code?: string;
+}
+
+export interface TrendyolMarketplaceOrder {
+  id: string;
+  platform: 'Trendyol';
+  environment: 'stage' | 'prod';
+  external_order_id: string;
+  shipment_package_id: string;
+  status?: string;
+  panel_status?: string;
+  customer_name?: string;
+  customer_phone?: string;
+  total_amount?: number;
+  currency?: string;
+  package_created_at?: string;
+  package_last_modified_at?: string;
+  sale_id?: string | null;
+  imported_at?: string | null;
+  sync_status?: string;
+  sync_error?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface TrendyolStatus {
+  config: TrendyolConfig;
+  keys: ApiKey[];
+  stats: {
+    total?: number;
+    stage_count?: number;
+    prod_count?: number;
+    last_package_at?: string | null;
+    last_local_update_at?: string | null;
+  };
+  last_sync_at?: string | null;
+  last_sync_summary?: {
+    fetched: number;
+    created: number;
+    updated: number;
+    unchanged: number;
+    environment: 'stage' | 'prod';
+  } | null;
+}
+
 export interface PanelApiKey {
   id: string;
   name: string;

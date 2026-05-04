@@ -50,6 +50,7 @@ import B2BFirmForm from './components/b2b/B2BFirmForm';
 import Sales from './components/sales/Sales';
 import ApiKeys from './components/integrations/ApiKeys';
 import PanelApiKeys from './components/integrations/PanelApiKeys';
+import TrendyolIntegration from './components/integrations/TrendyolIntegration';
 
 const APP_VERSION = 'v2.5.5';
 
@@ -64,7 +65,7 @@ function normalizeRole(role: unknown): UserRole {
   return role === 'admin' || role === 'user' || role === 'readonly' ? role : 'admin';
 }
 
-type View = 'dashboard' | 'products' | 'product-detail' | 'product-wizard' | 'stock' | 'income' | 'expense' | 'recurring' | 'analytics' | 'product-analytics' | 'settings' | 'activity-logs' | 'b2b' | 'sales' | 'api-keys' | 'panel-api' | 'cash';
+type View = 'dashboard' | 'products' | 'product-detail' | 'product-wizard' | 'stock' | 'income' | 'expense' | 'recurring' | 'analytics' | 'product-analytics' | 'settings' | 'activity-logs' | 'b2b' | 'sales' | 'api-keys' | 'panel-api' | 'trendyol' | 'cash';
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
@@ -199,7 +200,7 @@ export default function App() {
     { id: 'product-analytics', label: 'Ürün Analizi', icon: BarChart2 },
   ];
   const isReadOnly = userRole === 'readonly';
-  const restrictedReadonlyViews: View[] = ['settings', 'api-keys', 'panel-api', 'product-wizard', 'b2b'];
+  const restrictedReadonlyViews: View[] = ['settings', 'api-keys', 'panel-api', 'trendyol', 'product-wizard', 'b2b'];
   const visibleNavItems = navItems.filter(item => !isReadOnly || item.id !== 'b2b');
 
   useEffect(() => {
@@ -212,6 +213,15 @@ export default function App() {
   }, [currentView, isReadOnly, showFirmAdd]);
 
   const { viewCurrency, setViewCurrency, activeRate, rateSource, rateFetchedAt, isRateLoading, isRateError, refreshRate } = useCurrency();
+
+  const currentViewLabel =
+    navItems.find(i => i.id === currentView)?.label ||
+    (currentView === 'api-keys' ? 'API Anahtarları' :
+      currentView === 'panel-api' ? 'Panel API' :
+        currentView === 'trendyol' ? 'Trendyol' :
+          currentView === 'settings' ? 'Ayarlar' :
+            currentView === 'activity-logs' ? 'Aktivite Logları' :
+              'Ürün Detayı');
 
   if (isCheckingAuth) {
     return (
@@ -324,6 +334,23 @@ export default function App() {
               <TerminalSquare className={cn("w-5 h-5", (isSidebarOpen || isMobileMenuOpen) ? "mr-3" : "mx-auto")} />
               {(isSidebarOpen || isMobileMenuOpen) && <span>Panel API</span>}
           </button>}
+
+          {!isReadOnly && <button
+              onClick={() => {
+                setCurrentView('trendyol');
+                setIsMobileMenuOpen(false);
+              }}
+              className={cn(
+                "w-full flex items-center px-6 py-3.5 transition-all text-sm font-medium group relative",
+                currentView === 'trendyol'
+                  ? "bg-orange-500/10 text-white border-l-4 border-orange-500"
+                  : "text-[#94a3b8] hover:bg-white/5 hover:text-white"
+              )}
+              title="Trendyol"
+            >
+              <ShoppingCart className={cn("w-5 h-5", (isSidebarOpen || isMobileMenuOpen) ? "mr-3" : "mx-auto")} />
+              {(isSidebarOpen || isMobileMenuOpen) && <span>Trendyol</span>}
+          </button>}
         </nav>
 
         <div className="mt-auto border-t border-white/10 pb-4 pt-2 shrink-0">
@@ -413,7 +440,7 @@ export default function App() {
                   <Menu className="w-6 h-6" />
                </button>
                <h2 className="text-base md:text-lg font-semibold text-text-main truncate">
-                  {navItems.find(i => i.id === currentView)?.label || 'Ürün Detayı'}
+                  {currentViewLabel}
                </h2>
             </div>
 
@@ -599,6 +626,7 @@ export default function App() {
           {!isReadOnly && currentView === 'settings' && <SettingsView onUpdate={loadSettings} />}
           {!isReadOnly && currentView === 'api-keys' && <ApiKeys />}
           {!isReadOnly && currentView === 'panel-api' && <PanelApiKeys />}
+          {!isReadOnly && currentView === 'trendyol' && <TrendyolIntegration />}
         </div>
         {showLogoutConfirm && (
           <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200" onClick={handleCancelLogout}>

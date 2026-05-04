@@ -125,6 +125,21 @@ Not: R2 erişim anahtarlarını DB içinde saklama; sadece sunucudaki `.env` dos
 
 ---
 
+## Trendyol Entegrasyonu
+
+Trendyol bağlantısı **Entegrasyonlar → API Anahtarları** altında `Trendyol` servisi olarak eklenen şifreli API Key/Secret kaydıyla çalışır. Trendyol ekranında bu anahtar seçilir, ortam `Test / Stage` ya da `Canlı / Production` olarak ayarlanır.
+
+İlk aşamada sistem Trendyol sipariş paketlerini `marketplace_orders` ara tablosuna senkronlar. Bu veri otomatik olarak satışa yazılmaz; barkod/SKU eşleşmesi doğrulandıktan sonra satışa aktarma adımı açılmalıdır.
+
+Test ortamı notları:
+
+- Stage endpoint: `https://stageapigw.trendyol.com`
+- Canlı endpoint: `https://apigw.trendyol.com`
+- Stage ortamı için Trendyol tarafında sunucu çıkış IP yetkilendirmesi gerekebilir.
+- Bağlantı isteklerinde Basic Auth ve `User-Agent: <sellerId> - SelfIntegration` kullanılır.
+
+---
+
 ## Veritabanı
 
 - **SQLite** — tek dosya, sıfır konfigürasyon.

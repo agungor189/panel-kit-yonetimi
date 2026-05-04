@@ -3932,6 +3932,443 @@ async function startServer() {
     message: { error: "Çok fazla istek gönderildi, lütfen biraz bekleyin." }
   });
 
+  type TrendyolEnvironment = 'stage' | 'prod';
+
+  const defaultTrendyolConfig = {
+    enabled: false,
+    environment: 'stage' as TrendyolEnvironment,
+    api_key_id: '',
+    sync_window_days: 14,
+    store_front_code: '',
+  };
+
+  const parseJsonSetting = <T,>(key: string, fallback: T): T => {
+    const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as any;
+    if (!row?.value) return fallback;
+    try {
+      const parsed = JSON.parse(row.value);
+      if (
+        fallback &&
+        typeof fallback === 'object' &&
+        !Array.isArray(fallback) &&
+        parsed &&
+        typeof parsed === 'object' &&
+        !Array.isArray(parsed)
+      ) {
+        return { ...(fallback as any), ...parsed };
+      }
+      return parsed;
+    } catch (_) {
+      return fallback;
+    }
+  };
+
+  const saveJsonSetting = (key: string, value: unknown) => {
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
+      .run(key, JSON.stringify(value));
+  };
+
+  const getTrendyolConfig = () => parseJsonSetting("trendyol_config", defaultTrendyolConfig);
+
+  const normalizeTrendyolEnvironment = (value: unknown): TrendyolEnvironment => (
+    value === 'prod' || value === 'production' || value === 'live' ? 'prod' : 'stage'
+  );
+
+  const trendyolBaseUrl = (environment: TrendyolEnvironment) => (
+    environment === 'prod'
+      ? 'https://apigw.trendyol.com'
+      : 'https://stageapigw.trendyol.com'
+  );
+
+  const parseTrendyolDate = (value: unknown): string | null => {
+    if (value === null || value === undefined || value === '') return null;
+    const date = typeof value === 'number' ? new Date(value) : new Date(String(value));
+    if (Number.isNaN(date.getTime())) return null;
+    return date.toISOString();
+  };
+
+  const mapTrendyolStatusToPanel = (status: unknown) => {
+    const normalized = String(status || '').trim();
+    if (['Created', 'Awaiting', 'Picking', 'Invoiced', 'UnPacked'].includes(normalized)) return 'Hazırlanıyor';
+    if (['Shipped', 'AtCollectionPoint'].includes(normalized)) return 'Gönderildi';
+    if (normalized === 'Delivered') return 'Tamamlandı';
+    if (['Cancelled', 'UnSupplied'].includes(normalized)) return 'İptal Edildi';
+    if (['Returned', 'UnDelivered'].includes(normalized)) return 'İade Edildi';
+    return 'Hazırlanıyor';
+  };
+
+  const getTrendyolCredentials = (config = getTrendyolConfig()) => {
+    const key = config.api_key_id
+      ? db.prepare("SELECT * FROM api_keys WHERE id = ? AND service_name = 'Trendyol' AND status = 'active' AND deleted_at IS NULL").get(config.api_key_id) as any
+      : db.prepare("SELECT * FROM api_keys WHERE service_name = 'Trendyol' AND status = 'active' AND deleted_at IS NULL ORDER BY updated_at DESC, created_at DESC LIMIT 1").get() as any;
+
+    if (!key) {
+      const error: any = new Error("Aktif Trendyol API anahtarı bulunamadı. Önce API Anahtarları bölümünden Trendyol anahtarı ekleyin.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const sellerId = String(key.seller_id || key.merchant_id || '').trim();
+    if (!sellerId) {
+      const error: any = new Error("Trendyol için Seller ID zorunludur. API anahtarı kaydındaki Satıcı ID / Mağaza ID alanını doldurun.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const apiKey = decryptText(key.api_key_encrypted);
+    const apiSecret = key.api_secret_encrypted ? decryptText(key.api_secret_encrypted) : '';
+    if (!apiKey || !apiSecret) {
+      const error: any = new Error("Trendyol Basic Auth için API Key ve API Secret zorunludur.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    return { key, sellerId, apiKey, apiSecret };
+  };
+
+  const buildTrendyolHeaders = (
+    credentials: ReturnType<typeof getTrendyolCredentials>,
+    config = getTrendyolConfig(),
+  ) => {
+    const auth = Buffer.from(`${credentials.apiKey}:${credentials.apiSecret}`).toString('base64');
+    const headers: Record<string, string> = {
+      Authorization: `Basic ${auth}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'User-Agent': `${credentials.sellerId} - SelfIntegration`,
+      SellerID: credentials.sellerId,
+    };
+    if (config.store_front_code) headers.storeFrontCode = String(config.store_front_code);
+    return headers;
+  };
+
+  const trendyolFetchJson = async (url: string, headers: Record<string, string>, options: RequestInit = {}) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const response = await fetch(url, { ...options, headers, signal: controller.signal });
+      const text = await response.text();
+      let body: any = null;
+      try {
+        body = text ? JSON.parse(text) : null;
+      } catch (_) {
+        body = text;
+      }
+
+      if (!response.ok) {
+        const error: any = new Error(
+          body?.message ||
+          body?.errors?.[0]?.message ||
+          body?.exception ||
+          `Trendyol API hata kodu: ${response.status}`
+        );
+        error.statusCode = response.status;
+        error.body = body;
+        throw error;
+      }
+
+      return body;
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  const getTrendyolPackageId = (pkg: any) => String(
+    pkg.shipmentPackageId ||
+    pkg.packageId ||
+    pkg.id ||
+    pkg.orderNumber ||
+    pkg.orderNumberText ||
+    ''
+  ).trim();
+
+  const getTrendyolOrderNumber = (pkg: any) => String(pkg.orderNumber || pkg.orderNumberText || pkg.orderId || getTrendyolPackageId(pkg)).trim();
+
+  const getTrendyolCustomerName = (pkg: any) => {
+    const shipmentAddress = pkg.shipmentAddress || {};
+    const invoiceAddress = pkg.invoiceAddress || {};
+    const first = shipmentAddress.firstName || invoiceAddress.firstName || pkg.customerFirstName || '';
+    const last = shipmentAddress.lastName || invoiceAddress.lastName || pkg.customerLastName || '';
+    return String(pkg.customerName || `${first} ${last}`.trim() || shipmentAddress.fullName || invoiceAddress.fullName || '').trim();
+  };
+
+  const getTrendyolCustomerPhone = (pkg: any) => String(
+    pkg.shipmentAddress?.phone ||
+    pkg.invoiceAddress?.phone ||
+    pkg.customerPhone ||
+    ''
+  ).trim();
+
+  const normalizeTrendyolPackage = (pkg: any, environment: TrendyolEnvironment) => {
+    const shipmentPackageId = getTrendyolPackageId(pkg);
+    const externalOrderId = getTrendyolOrderNumber(pkg);
+    const status = String(pkg.status || pkg.packageStatus || pkg.packageItemStatus || pkg.lines?.[0]?.status || '').trim();
+    const totalAmount = Number(
+      pkg.totalPrice ||
+      pkg.grossAmount ||
+      pkg.totalAmount ||
+      pkg.packageGrossAmount ||
+      pkg.packageTotalAmount ||
+      0
+    );
+
+    return {
+      id: uuidv4(),
+      platform: 'Trendyol',
+      environment,
+      external_order_id: externalOrderId || shipmentPackageId,
+      shipment_package_id: shipmentPackageId || externalOrderId,
+      status,
+      panel_status: mapTrendyolStatusToPanel(status),
+      customer_name: getTrendyolCustomerName(pkg),
+      customer_phone: getTrendyolCustomerPhone(pkg),
+      total_amount: totalAmount,
+      currency: String(pkg.currencyCode || pkg.currency || 'TRY'),
+      package_created_at: parseTrendyolDate(pkg.orderDate || pkg.createdDate || pkg.packageCreatedDate),
+      package_last_modified_at: parseTrendyolDate(pkg.lastModifiedDate || pkg.packageLastModifiedDate || pkg.modifiedDate),
+      raw_json: JSON.stringify(pkg),
+    };
+  };
+
+  const upsertMarketplaceOrder = (order: ReturnType<typeof normalizeTrendyolPackage>) => {
+    const existing = db.prepare(`
+      SELECT id, raw_json
+      FROM marketplace_orders
+      WHERE platform = ? AND environment = ? AND shipment_package_id = ?
+    `).get(order.platform, order.environment, order.shipment_package_id) as any;
+
+    if (existing) {
+      db.prepare(`
+        UPDATE marketplace_orders
+        SET external_order_id = ?,
+            status = ?,
+            panel_status = ?,
+            customer_name = ?,
+            customer_phone = ?,
+            total_amount = ?,
+            currency = ?,
+            package_created_at = ?,
+            package_last_modified_at = ?,
+            raw_json = ?,
+            sync_status = 'synced',
+            sync_error = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(
+        order.external_order_id,
+        order.status,
+        order.panel_status,
+        order.customer_name,
+        order.customer_phone,
+        order.total_amount,
+        order.currency,
+        order.package_created_at,
+        order.package_last_modified_at,
+        order.raw_json,
+        existing.id,
+      );
+      return existing.raw_json === order.raw_json ? 'unchanged' : 'updated';
+    }
+
+    db.prepare(`
+      INSERT INTO marketplace_orders (
+        id, platform, environment, external_order_id, shipment_package_id, status, panel_status,
+        customer_name, customer_phone, total_amount, currency, package_created_at,
+        package_last_modified_at, raw_json, sync_status
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')
+    `).run(
+      order.id,
+      order.platform,
+      order.environment,
+      order.external_order_id,
+      order.shipment_package_id,
+      order.status,
+      order.panel_status,
+      order.customer_name,
+      order.customer_phone,
+      order.total_amount,
+      order.currency,
+      order.package_created_at,
+      order.package_last_modified_at,
+      order.raw_json,
+    );
+    return 'created';
+  };
+
+  const syncTrendyolShipmentPackages = async (config = getTrendyolConfig()) => {
+    const environment = normalizeTrendyolEnvironment(config.environment);
+    const credentials = getTrendyolCredentials(config);
+    const headers = buildTrendyolHeaders(credentials, config);
+    const baseUrl = trendyolBaseUrl(environment);
+    const windowDays = Math.min(Math.max(Number(config.sync_window_days || 14), 1), 14);
+    const endDate = Date.now();
+    const startDate = endDate - windowDays * 24 * 60 * 60 * 1000;
+    const summary = { fetched: 0, created: 0, updated: 0, unchanged: 0, environment };
+    let nextCursor = "";
+
+    do {
+      const params = new URLSearchParams({
+        size: '200',
+        lastModifiedStartDate: String(startDate),
+        lastModifiedEndDate: String(endDate),
+      });
+      if (nextCursor) params.set('nextCursor', nextCursor);
+
+      const response = await trendyolFetchJson(
+        `${baseUrl}/integration/order/sellers/${encodeURIComponent(credentials.sellerId)}/orders/stream?${params.toString()}`,
+        headers,
+      );
+
+      const content = Array.isArray(response?.content)
+        ? response.content
+        : Array.isArray(response)
+          ? response
+          : [];
+
+      for (const pkg of content) {
+        const normalized = normalizeTrendyolPackage(pkg, environment);
+        if (!normalized.shipment_package_id || !normalized.external_order_id) continue;
+        const result = upsertMarketplaceOrder(normalized);
+        summary.fetched++;
+        if (result === 'created') summary.created++;
+        if (result === 'updated') summary.updated++;
+        if (result === 'unchanged') summary.unchanged++;
+      }
+
+      nextCursor = response?.hasMore ? String(response.nextCursor || '') : '';
+    } while (nextCursor);
+
+    db.prepare("UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?").run(credentials.key.id);
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('trendyol_last_sync_at', CURRENT_TIMESTAMP)").run();
+    saveJsonSetting("trendyol_last_sync_summary", summary);
+
+    return summary;
+  };
+
+  app.get("/api/integrations/trendyol/status", requireAdmin, apiLimiter, (req, res) => {
+    try {
+      const config = getTrendyolConfig();
+      const keys = db.prepare(`
+        SELECT id, service_name, display_name, key_name, merchant_id, seller_id, status, last4, last_used_at, created_at, updated_at
+        FROM api_keys
+        WHERE service_name = 'Trendyol' AND deleted_at IS NULL
+        ORDER BY status = 'active' DESC, updated_at DESC, created_at DESC
+      `).all() as any[];
+      const stats = db.prepare(`
+        SELECT
+          COUNT(*) as total,
+          SUM(CASE WHEN environment = 'stage' THEN 1 ELSE 0 END) as stage_count,
+          SUM(CASE WHEN environment = 'prod' THEN 1 ELSE 0 END) as prod_count,
+          MAX(package_last_modified_at) as last_package_at,
+          MAX(updated_at) as last_local_update_at
+        FROM marketplace_orders
+        WHERE platform = 'Trendyol'
+      `).get() as any;
+      const lastSyncRow = db.prepare("SELECT value FROM settings WHERE key = 'trendyol_last_sync_at'").get() as any;
+      const lastSummary = parseJsonSetting("trendyol_last_sync_summary", null);
+      res.json({
+        config,
+        keys: keys.map((key) => ({
+          ...key,
+          maskedKey: `********${key.last4 || '----'}`,
+        })),
+        stats,
+        last_sync_at: lastSyncRow?.value || null,
+        last_sync_summary: lastSummary,
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: { code: 'TRENDYOL_STATUS_FAILED', message: err.message } });
+    }
+  });
+
+  app.put("/api/integrations/trendyol/config", requireAdmin, apiLimiter, (req, res) => {
+    try {
+      const current = getTrendyolConfig();
+      const nextConfig = {
+        ...current,
+        enabled: !!req.body.enabled,
+        environment: normalizeTrendyolEnvironment(req.body.environment),
+        api_key_id: String(req.body.api_key_id || ''),
+        sync_window_days: Math.min(Math.max(Number(req.body.sync_window_days || current.sync_window_days || 14), 1), 14),
+        store_front_code: String(req.body.store_front_code || '').trim(),
+      };
+      saveJsonSetting("trendyol_config", nextConfig);
+      logActivity("TRENDYOL_CONFIG_UPDATED", "integration", "Trendyol", { before: current, after: nextConfig }, req.user?.id);
+      res.json({ success: true, config: nextConfig });
+    } catch (err: any) {
+      res.status(400).json({ success: false, error: { code: 'TRENDYOL_CONFIG_FAILED', message: err.message } });
+    }
+  });
+
+  app.post("/api/integrations/trendyol/test", requireAdmin, apiLimiter, async (req, res) => {
+    try {
+      const config = { ...getTrendyolConfig(), ...req.body };
+      config.environment = normalizeTrendyolEnvironment(config.environment);
+      const credentials = getTrendyolCredentials(config);
+      const headers = buildTrendyolHeaders(credentials, config);
+      const baseUrl = trendyolBaseUrl(config.environment);
+      const params = new URLSearchParams({
+        page: '0',
+        size: '1',
+        orderByField: 'PackageLastModifiedDate',
+        orderByDirection: 'DESC',
+      });
+      const data = await trendyolFetchJson(
+        `${baseUrl}/integration/order/sellers/${encodeURIComponent(credentials.sellerId)}/orders?${params.toString()}`,
+        headers,
+      );
+      const count = Array.isArray(data?.content) ? data.content.length : 0;
+      db.prepare("UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?").run(credentials.key.id);
+      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('trendyol_last_test_at', CURRENT_TIMESTAMP)").run();
+      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('trendyol_last_test_status', 'success')").run();
+      logActivity("TRENDYOL_TESTED", "integration", "Trendyol", { after: { status: "success", environment: config.environment, count } }, req.user?.id);
+      res.json({ success: true, status: "success", message: "Trendyol bağlantısı başarılı.", count, environment: config.environment });
+    } catch (err: any) {
+      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('trendyol_last_test_status', 'failed')").run();
+      res.status(err.statusCode || 400).json({
+        success: false,
+        error: {
+          code: 'TRENDYOL_TEST_FAILED',
+          message: err.statusCode === 503
+            ? 'Trendyol test ortamı IP yetkilendirmesi istiyor olabilir. Sunucu çıkış IP adresini Trendyol destek ekibine bildir.'
+            : err.message,
+        },
+      });
+    }
+  });
+
+  app.post("/api/integrations/trendyol/sync", requireAdmin, apiLimiter, async (req, res) => {
+    try {
+      const config = { ...getTrendyolConfig(), ...req.body };
+      config.environment = normalizeTrendyolEnvironment(config.environment);
+      const summary = await syncTrendyolShipmentPackages(config);
+      logActivity("TRENDYOL_SYNCED", "integration", "Trendyol", { after: summary }, req.user?.id);
+      res.json({ success: true, summary });
+    } catch (err: any) {
+      res.status(err.statusCode || 400).json({ success: false, error: { code: 'TRENDYOL_SYNC_FAILED', message: err.message } });
+    }
+  });
+
+  app.get("/api/integrations/trendyol/orders", requireAdmin, apiLimiter, (req, res) => {
+    try {
+      const environment = normalizeTrendyolEnvironment(req.query.environment);
+      const limit = Math.min(Number(req.query.limit) || 100, 500);
+      const orders = db.prepare(`
+        SELECT id, platform, environment, external_order_id, shipment_package_id, status, panel_status,
+               customer_name, customer_phone, total_amount, currency, package_created_at,
+               package_last_modified_at, sale_id, imported_at, sync_status, sync_error, created_at, updated_at
+        FROM marketplace_orders
+        WHERE platform = 'Trendyol' AND environment = ?
+        ORDER BY datetime(COALESCE(package_last_modified_at, updated_at, created_at)) DESC
+        LIMIT ?
+      `).all(environment, limit);
+      res.json(orders);
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: { code: 'TRENDYOL_ORDERS_FAILED', message: err.message } });
+    }
+  });
+
   app.get("/api/integrations/keys", apiLimiter, (req, res) => {
     try {
       const keys = db.prepare("SELECT id, service_name, display_name, key_name, status, last4, notes, last_used_at, created_at, updated_at FROM api_keys WHERE deleted_at IS NULL ORDER BY created_at DESC").all() as any[];
@@ -4067,7 +4504,31 @@ async function startServer() {
       let status = "success";
       let message = "";
 
-      if (current.service_name === 'Hepsiburada') {
+      if (current.service_name === 'Trendyol') {
+        try {
+          const config = { ...getTrendyolConfig(), api_key_id: current.id };
+          const credentials = getTrendyolCredentials(config);
+          const headers = buildTrendyolHeaders(credentials, config);
+          const baseUrl = trendyolBaseUrl(normalizeTrendyolEnvironment(config.environment));
+          const params = new URLSearchParams({
+            page: '0',
+            size: '1',
+            orderByField: 'PackageLastModifiedDate',
+            orderByDirection: 'DESC',
+          });
+          await trendyolFetchJson(
+            `${baseUrl}/integration/order/sellers/${encodeURIComponent(credentials.sellerId)}/orders?${params.toString()}`,
+            headers,
+          );
+          status = "success";
+          message = "Trendyol bağlantısı başarılı";
+        } catch (err: any) {
+          status = "failed";
+          message = err.statusCode === 503
+            ? "Stage ortamı için IP yetkilendirmesi gerekebilir"
+            : err.message || "Trendyol bağlantı hatası";
+        }
+      } else if (current.service_name === 'Hepsiburada') {
         const merchantId = current.merchant_id;
         if (!merchantId) {
            return res.json({ status: "failed", message: "Merchant ID gerekli" });

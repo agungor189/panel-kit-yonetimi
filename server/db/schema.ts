@@ -222,6 +222,31 @@ export function applySchema(db: Database.Database): void {
       deleted_at            DATETIME DEFAULT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS marketplace_orders (
+      id                       TEXT PRIMARY KEY,
+      platform                 TEXT NOT NULL,
+      environment              TEXT NOT NULL DEFAULT 'stage',
+      external_order_id         TEXT NOT NULL,
+      shipment_package_id       TEXT NOT NULL,
+      status                   TEXT,
+      panel_status             TEXT,
+      customer_name            TEXT,
+      customer_phone           TEXT,
+      total_amount             REAL DEFAULT 0,
+      currency                 TEXT DEFAULT 'TRY',
+      package_created_at       DATETIME,
+      package_last_modified_at DATETIME,
+      raw_json                 TEXT NOT NULL,
+      sale_id                  TEXT,
+      imported_at              DATETIME,
+      sync_status              TEXT DEFAULT 'synced',
+      sync_error               TEXT,
+      created_at               DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at               DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(platform, environment, shipment_package_id),
+      FOREIGN KEY(sale_id) REFERENCES sales(id) ON DELETE SET NULL
+    );
+
     CREATE TABLE IF NOT EXISTS panel_api_keys (
       id           TEXT PRIMARY KEY,
       name         TEXT NOT NULL,
@@ -459,6 +484,13 @@ export function applySchema(db: Database.Database): void {
     -- Indexes
     CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_unique_name
       ON api_keys(service_name, display_name) WHERE deleted_at IS NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_marketplace_orders_platform_env
+      ON marketplace_orders(platform, environment, package_last_modified_at);
+    CREATE INDEX IF NOT EXISTS idx_marketplace_orders_external
+      ON marketplace_orders(platform, environment, external_order_id);
+    CREATE INDEX IF NOT EXISTS idx_marketplace_orders_sale
+      ON marketplace_orders(sale_id);
 
     CREATE INDEX IF NOT EXISTS idx_transactions_type_date   ON transactions(type, date);
     CREATE INDEX IF NOT EXISTS idx_transactions_platform    ON transactions(platform);

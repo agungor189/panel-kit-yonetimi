@@ -81,7 +81,7 @@ export default function ApiKeys() {
     if (isReadOnly) return;
     try {
       const newStatus = currentStatus === 'active' ? 'passive' : 'active';
-      await api.put(`/integrations/keys/${id}/status`, { status: newStatus });
+      await api.patch(`/integrations/keys/${id}/status`, { status: newStatus });
       toast.success(`Bağlantı ${newStatus === 'active' ? 'aktif' : 'pasif'} edildi.`);
       fetchKeys();
     } catch (err) {

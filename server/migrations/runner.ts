@@ -762,6 +762,56 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 32,
+    name: "add_marketplace_orders",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS marketplace_orders (
+          id                       TEXT PRIMARY KEY,
+          platform                 TEXT NOT NULL,
+          environment              TEXT NOT NULL DEFAULT 'stage',
+          external_order_id         TEXT NOT NULL,
+          shipment_package_id       TEXT NOT NULL,
+          status                   TEXT,
+          panel_status             TEXT,
+          customer_name            TEXT,
+          customer_phone           TEXT,
+          total_amount             REAL DEFAULT 0,
+          currency                 TEXT DEFAULT 'TRY',
+          package_created_at       DATETIME,
+          package_last_modified_at DATETIME,
+          raw_json                 TEXT NOT NULL,
+          sale_id                  TEXT,
+          imported_at              DATETIME,
+          sync_status              TEXT DEFAULT 'synced',
+          sync_error               TEXT,
+          created_at               DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at               DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(platform, environment, shipment_package_id),
+          FOREIGN KEY(sale_id) REFERENCES sales(id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_marketplace_orders_platform_env
+          ON marketplace_orders(platform, environment, package_last_modified_at);
+        CREATE INDEX IF NOT EXISTS idx_marketplace_orders_external
+          ON marketplace_orders(platform, environment, external_order_id);
+        CREATE INDEX IF NOT EXISTS idx_marketplace_orders_sale
+          ON marketplace_orders(sale_id);
+      `);
+
+      const defaultConfig = {
+        enabled: false,
+        environment: "stage",
+        api_key_id: "",
+        sync_window_days: 14,
+        store_front_code: "",
+      };
+
+      db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)")
+        .run("trendyol_config", JSON.stringify(defaultConfig));
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {
