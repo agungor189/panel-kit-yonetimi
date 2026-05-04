@@ -4,6 +4,7 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
+import { execFile } from "child_process";
 import Database from "better-sqlite3";
 import multer from "multer";
 import { v4 as uuidv4 } from "uuid";
@@ -186,6 +187,17 @@ const DEFAULT_BACKUP_CONFIG: BackupConfig = {
   uploads_strategy: "smart",
   weekly_full_day: 0,
 };
+
+type CloudBackupConfig = {
+  enabled: boolean;
+  provider: "cloudflare-r2" | "rclone";
+  rclone_remote: string;
+  prefix: string;
+  retention_days: number;
+  timeout_seconds: number;
+};
+
+type CloudBackupStatus = "not_configured" | "uploading" | "success" | "failed" | "skipped";
 
 export const AppLogger = {
   info: (category: string, message: string, data?: any) => {
@@ -463,6 +475,65 @@ function saveBackupConfig(config: BackupConfig): void {
     .run("backup_config", JSON.stringify(normalizeBackupConfig(config)));
 }
 
+function envFlag(value: string | undefined, fallback = false): boolean {
+  if (value === undefined || value === null || value === "") return fallback;
+  return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
+}
+
+function envNumber(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(parsed)));
+}
+
+function normalizeCloudPathSegment(value: string): string {
+  return value
+    .trim()
+    .replace(/[^a-zA-Z0-9._=-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^\.+|\.+$/g, "");
+}
+
+function normalizeCloudPrefix(prefix: string): string {
+  return String(prefix || "production")
+    .split(/[\\/]+/)
+    .map(normalizeCloudPathSegment)
+    .filter((segment) => segment && segment !== "." && segment !== "..")
+    .join("/");
+}
+
+function getCloudBackupConfig(): CloudBackupConfig {
+  const provider = String(process.env.CLOUD_BACKUP_PROVIDER || "cloudflare-r2").trim().toLowerCase();
+  return {
+    enabled: envFlag(process.env.CLOUD_BACKUP_ENABLED, false),
+    provider: provider === "rclone" ? "rclone" : "cloudflare-r2",
+    rclone_remote: String(process.env.CLOUD_BACKUP_RCLONE_REMOTE || "").trim().replace(/\/+$/g, ""),
+    prefix: normalizeCloudPrefix(process.env.CLOUD_BACKUP_PREFIX || "production"),
+    retention_days: envNumber(process.env.CLOUD_BACKUP_RETENTION_DAYS, 30, 1, 365),
+    timeout_seconds: envNumber(process.env.CLOUD_BACKUP_TIMEOUT_SECONDS, 900, 30, 3600),
+  };
+}
+
+function getCloudBackupPublicStatus() {
+  const config = getCloudBackupConfig();
+  return {
+    enabled: config.enabled,
+    configured: Boolean(config.enabled && config.rclone_remote),
+    provider: config.provider,
+    rclone_remote: config.rclone_remote || null,
+    prefix: config.prefix,
+    retention_days: config.retention_days,
+  };
+}
+
+function rclonePath(remote: string, ...segments: string[]): string {
+  const suffix = segments
+    .map((segment) => String(segment || "").replace(/^\/+|\/+$/g, ""))
+    .filter(Boolean)
+    .join("/");
+  return suffix ? `${remote.replace(/\/+$/g, "")}/${suffix}` : remote.replace(/\/+$/g, "");
+}
+
 function backupPathIsSafe(filePath: string): boolean {
   const resolvedRoot = path.resolve(BACKUP_DIR);
   const resolvedPath = path.resolve(filePath);
@@ -567,6 +638,141 @@ function failBackupRun(runId: string, err: any): void {
         completed_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(err?.message || String(err), runId);
+}
+
+function execRclone(args: string[], timeoutSeconds: number): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile("rclone", args, {
+      timeout: timeoutSeconds * 1000,
+      maxBuffer: 1024 * 1024,
+    }, (error, stdout, stderr) => {
+      if (error) {
+        const err = error as Error & { code?: string | number; signal?: string };
+        reject(new Error([
+          err.message,
+          stderr ? `stderr: ${stderr.trim()}` : "",
+          err.signal ? `signal: ${err.signal}` : "",
+        ].filter(Boolean).join(" | ")));
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+function updateBackupCloudStatus(
+  runId: string,
+  status: CloudBackupStatus,
+  fields?: { provider?: string | null; cloudPath?: string | null; error?: string | null },
+): void {
+  db.prepare(`
+    UPDATE backup_runs
+    SET cloud_status = ?,
+        cloud_provider = COALESCE(?, cloud_provider),
+        cloud_path = COALESCE(?, cloud_path),
+        cloud_error = ?,
+        cloud_uploaded_at = CASE WHEN ? = 'success' THEN CURRENT_TIMESTAMP ELSE cloud_uploaded_at END,
+        cloud_attempts = CASE WHEN ? = 'uploading' THEN COALESCE(cloud_attempts, 0) + 1 ELSE COALESCE(cloud_attempts, 0) END
+    WHERE id = ?
+  `).run(
+    status,
+    fields?.provider ?? null,
+    fields?.cloudPath ?? null,
+    fields?.error ?? null,
+    status,
+    status,
+    runId,
+  );
+}
+
+function cloudDestinationForRun(run: any, config: CloudBackupConfig): string {
+  const kindFolder = run.backup_kind === "uploads" ? "uploads" : "db";
+  const fileName = normalizeCloudPathSegment(path.basename(run.file_path || run.file_name || `${run.id}.zip`));
+  return rclonePath(config.rclone_remote, config.prefix, kindFolder, fileName);
+}
+
+async function uploadBackupRunToCloud(runId: string, actor?: string | null): Promise<any> {
+  const config = getCloudBackupConfig();
+  const run = db.prepare("SELECT * FROM backup_runs WHERE id = ?").get(runId) as any;
+
+  if (!run) throw new Error("Yedek kaydı bulunamadı.");
+  if (run.status !== "success" || !run.file_path) throw new Error("Sadece başarıyla oluşturulmuş yerel yedekler buluta yüklenebilir.");
+  if (!backupPathIsSafe(run.file_path) || !fs.existsSync(run.file_path)) throw new Error("Yerel yedek dosyası bulunamadı.");
+
+  if (!config.enabled || !config.rclone_remote) {
+    updateBackupCloudStatus(runId, "not_configured", {
+      provider: config.provider,
+      error: config.enabled ? "CLOUD_BACKUP_RCLONE_REMOTE ayarlı değil." : null,
+    });
+    return { runId, cloud_status: "not_configured" };
+  }
+
+  const destination = cloudDestinationForRun(run, config);
+  updateBackupCloudStatus(runId, "uploading", {
+    provider: config.provider,
+    cloudPath: destination,
+    error: null,
+  });
+
+  try {
+    const args = [
+      "copyto",
+      run.file_path,
+      destination,
+      "--retries",
+      "3",
+      "--low-level-retries",
+      "5",
+    ];
+    if (config.provider === "cloudflare-r2") args.push("--s3-no-check-bucket");
+    await execRclone(args, config.timeout_seconds);
+
+    updateBackupCloudStatus(runId, "success", {
+      provider: config.provider,
+      cloudPath: destination,
+      error: null,
+    });
+    logActivity("BACKUP_CLOUD_UPLOADED", "system", "backup", {
+      backup_id: runId,
+      file_name: run.file_name,
+      cloud_path: destination,
+    }, actor || "system");
+    return { runId, cloud_status: "success", cloud_path: destination };
+  } catch (err: any) {
+    updateBackupCloudStatus(runId, "failed", {
+      provider: config.provider,
+      cloudPath: destination,
+      error: err?.message || String(err),
+    });
+    AppLogger.error("BACKUP", "Cloud backup upload failed", err);
+    return { runId, cloud_status: "failed", cloud_path: destination, error: err?.message || String(err) };
+  }
+}
+
+async function uploadBackupRunsToCloud(runs: any[], actor?: string | null): Promise<any[]> {
+  const results: any[] = [];
+  for (const run of runs) {
+    try {
+      results.push(await uploadBackupRunToCloud(run.runId, actor));
+    } catch (err: any) {
+      AppLogger.error("BACKUP", "Cloud backup upload skipped", err);
+      results.push({ runId: run.runId, cloud_status: "failed", error: err?.message || String(err) });
+    }
+  }
+  return results;
+}
+
+async function cleanupOldCloudBackups(): Promise<void> {
+  const config = getCloudBackupConfig();
+  if (!config.enabled || !config.rclone_remote || !config.prefix) return;
+
+  const root = rclonePath(config.rclone_remote, config.prefix);
+  try {
+    await execRclone(["delete", root, "--min-age", `${config.retention_days}d`], config.timeout_seconds);
+    await execRclone(["rmdirs", root, "--leave-root"], config.timeout_seconds);
+  } catch (err) {
+    AppLogger.warn("BACKUP", "Cloud backup retention cleanup failed", err);
+  }
 }
 
 function latestSuccessfulUploadsFullBackup(): Date | null {
@@ -728,7 +934,13 @@ async function runManagedBackup(triggerType: "manual" | "scheduled", createdBy?:
     runs.push(await createUploadsBackupArchive(triggerType, uploadMode, createdBy, since));
   }
 
+  const cloudResults = await uploadBackupRunsToCloud(runs, createdBy);
+  for (const run of runs) {
+    run.cloud = cloudResults.find((result) => result.runId === run.runId) || null;
+  }
+
   cleanupOldBackups(config.retention_days);
+  await cleanupOldCloudBackups();
   return runs;
 }
 
@@ -4177,16 +4389,21 @@ async function startServer() {
       const runs = db.prepare(`
         SELECT id, trigger_type, backup_kind, upload_mode, status, file_name, file_path,
                size_bytes, db_size_bytes, upload_file_count, upload_total_bytes,
-               error_message, created_by, started_at, completed_at
+               error_message, created_by, started_at, completed_at,
+               COALESCE(cloud_status, 'not_configured') AS cloud_status,
+               cloud_provider, cloud_path, cloud_uploaded_at, cloud_error,
+               COALESCE(cloud_attempts, 0) AS cloud_attempts
         FROM backup_runs
         ORDER BY datetime(started_at) DESC
         LIMIT 30
       `).all();
       const storage = backupDirectoryStats();
+      const cloud = getCloudBackupPublicStatus();
       res.json({
         success: true,
         data: {
           config,
+          cloud,
           backup_dir: BACKUP_DIR,
           db_path: DB_PATH,
           uploads_dir: uploadsDir,
@@ -4219,7 +4436,7 @@ async function startServer() {
         : "smart";
       const runs = await runManagedBackup("manual", req.user?.username || null, { uploads_mode: mode });
       logActivity("BACKUP_CREATED", "system", "backup", { runs: runs.map((run) => run.runId), uploads_mode: mode }, req.user?.id);
-      res.json({ success: true, data: { runs: runs.map((run) => ({ id: run.runId, manifest: run.manifest })) } });
+      res.json({ success: true, data: { runs: runs.map((run) => ({ id: run.runId, manifest: run.manifest, cloud: run.cloud || null })) } });
     } catch (err: any) {
       AppLogger.error("BACKUP_ERROR", "Managed backup failed", err);
       res.status(500).json({ success: false, error: { code: 'BACKUP_RUN_FAILED', message: err.message } });
@@ -4240,6 +4457,15 @@ async function startServer() {
       res.download(run.file_path, run.file_name || path.basename(run.file_path));
     } catch (err: any) {
       res.status(500).json({ success: false, error: { code: 'BACKUP_DOWNLOAD_FAILED', message: err.message } });
+    }
+  });
+
+  app.post("/api/backup/files/:id/cloud-upload", requireAdmin, async (req, res) => {
+    try {
+      const result = await uploadBackupRunToCloud(req.params.id, req.user?.id || null);
+      res.json({ success: true, data: result });
+    } catch (err: any) {
+      res.status(400).json({ success: false, error: { code: 'BACKUP_CLOUD_UPLOAD_FAILED', message: err.message } });
     }
   });
 

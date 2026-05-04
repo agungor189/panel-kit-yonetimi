@@ -234,6 +234,12 @@ export interface BackupRun {
   backup_kind: 'database' | 'uploads';
   upload_mode?: 'full' | 'incremental' | null;
   status: 'running' | 'success' | 'failed' | 'expired' | 'deleted';
+  cloud_status?: 'not_configured' | 'uploading' | 'success' | 'failed' | 'skipped' | null;
+  cloud_provider?: string | null;
+  cloud_path?: string | null;
+  cloud_uploaded_at?: string | null;
+  cloud_error?: string | null;
+  cloud_attempts?: number;
   file_name?: string | null;
   file_path?: string | null;
   size_bytes?: number;
@@ -248,6 +254,14 @@ export interface BackupRun {
 
 export interface BackupStatus {
   config: BackupConfig;
+  cloud?: {
+    enabled: boolean;
+    configured: boolean;
+    provider: string;
+    rclone_remote?: string | null;
+    prefix: string;
+    retention_days: number;
+  };
   backup_dir: string;
   db_path: string;
   uploads_dir: string;

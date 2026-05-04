@@ -143,6 +143,12 @@ export function applySchema(db: Database.Database): void {
       manifest_json      TEXT,
       error_message      TEXT,
       created_by         TEXT,
+      cloud_status       TEXT DEFAULT 'not_configured',
+      cloud_provider     TEXT,
+      cloud_path         TEXT,
+      cloud_uploaded_at  DATETIME,
+      cloud_error        TEXT,
+      cloud_attempts     INTEGER DEFAULT 0,
       started_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
       completed_at       DATETIME
     );

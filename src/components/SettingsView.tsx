@@ -19,7 +19,9 @@ import {
   Archive,
   Clock3,
   HardDrive,
-  RefreshCw
+  RefreshCw,
+  Cloud,
+  Upload
 } from 'lucide-react';
 import { useCurrency } from '../CurrencyContext';
 import { api, getToken } from '../lib/api';
@@ -269,6 +271,20 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
     }
   };
 
+  const uploadStoredBackupToCloud = async (run: BackupRun) => {
+    try {
+      setBackupLoading(true);
+      await api.post(`/backup/files/${run.id}/cloud-upload`, {});
+      await loadBackupStatus();
+      alert("Yedek buluta yüklendi.");
+    } catch (err: any) {
+      alert(err.message || "Bulut yükleme başarısız.");
+      await loadBackupStatus();
+    } finally {
+      setBackupLoading(false);
+    }
+  };
+
   const formatBytes = (value?: number) => {
     const bytes = Number(value || 0);
     if (bytes < 1024) return `${bytes} B`;
@@ -276,6 +292,32 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
     if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
     return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
   };
+
+  const cloudStatusLabel = (status?: BackupRun['cloud_status']) => {
+    switch (status) {
+      case 'success':
+        return 'R2 OK';
+      case 'uploading':
+        return 'Yükleniyor';
+      case 'failed':
+        return 'Hata';
+      case 'skipped':
+        return 'Atlandı';
+      default:
+        return 'Kapalı';
+    }
+  };
+
+  const cloudStatusClass = (status?: BackupRun['cloud_status']) => cn(
+    "inline-flex rounded-xl border px-3 py-1 text-[10px] font-black uppercase tracking-widest",
+    status === 'success'
+      ? "border-sky-100 bg-sky-50 text-sky-700"
+      : status === 'failed'
+        ? "border-red-100 bg-red-50 text-red-700"
+        : status === 'uploading'
+          ? "border-blue-100 bg-blue-50 text-blue-700"
+          : "border-gray-200 bg-gray-50 text-gray-500"
+  );
 
   const formatBackupDate = (value?: string | null) => {
     if (!value) return '-';
@@ -804,7 +846,7 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
             </div>
           </div>
 
-          <div className="p-6 lg:p-8 grid grid-cols-1 lg:grid-cols-3 gap-4 border-b border-border-color bg-bg-main/40">
+          <div className="p-6 lg:p-8 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 border-b border-border-color bg-bg-main/40">
             <div className="rounded-2xl border border-border-color bg-white p-4">
               <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-text-muted">
                 <Clock3 className="w-4 h-4 text-primary" />
@@ -829,6 +871,23 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
               <div className="text-[10px] font-black uppercase tracking-widest text-text-muted">Konum</div>
               <div className="mt-2 break-all font-mono text-[11px] font-bold text-text-main">{backupStatus?.backup_dir || '-'}</div>
               <p className="mt-1 text-[10px] font-bold text-text-muted">Docker için dış volume önerilir.</p>
+            </div>
+            <div className="rounded-2xl border border-border-color bg-white p-4">
+              <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-text-muted">
+                <Cloud className="w-4 h-4 text-sky-600" />
+                Cloudflare R2
+              </div>
+              <div className={cn(
+                "mt-2 text-sm font-black",
+                backupStatus?.cloud?.configured ? "text-sky-700" : "text-text-muted"
+              )}>
+                {backupStatus?.cloud?.configured ? 'Aktif' : 'Kapalı / Eksik'}
+              </div>
+              <p className="mt-1 break-all text-[10px] font-bold text-text-muted">
+                {backupStatus?.cloud?.configured
+                  ? `${backupStatus.cloud.rclone_remote}/${backupStatus.cloud.prefix}`
+                  : 'CLOUD_BACKUP_ENABLED + rclone remote gerekir.'}
+              </p>
             </div>
           </div>
 
@@ -952,13 +1011,14 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[900px] text-left">
+            <table className="w-full min-w-[1050px] text-left">
               <thead>
                 <tr className="border-b border-border-color bg-white">
                   <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">Yedek</th>
                   <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">Tür</th>
                   <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">Boyut</th>
                   <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">Durum</th>
+                  <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">Bulut</th>
                   <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">Tarih</th>
                   <th className="px-6 py-4 text-[10px] font-black text-text-muted uppercase tracking-widest">İşlem</th>
                 </tr>
@@ -994,11 +1054,40 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
                         {run.status}
                       </span>
                     </td>
+                    <td className="px-6 py-4">
+                      <span className={cloudStatusClass(run.cloud_status)}>
+                        {cloudStatusLabel(run.cloud_status)}
+                      </span>
+                      {run.cloud_uploaded_at && (
+                        <div className="mt-1 text-[10px] font-bold text-text-muted whitespace-nowrap">
+                          {formatBackupDate(run.cloud_uploaded_at)}
+                        </div>
+                      )}
+                      {run.cloud_error && (
+                        <div className="mt-1 max-w-[240px] truncate text-[10px] font-bold text-danger" title={run.cloud_error}>
+                          {run.cloud_error}
+                        </div>
+                      )}
+                    </td>
                     <td className="px-6 py-4 text-xs font-bold text-text-muted whitespace-nowrap">
                       {formatBackupDate(run.completed_at || run.started_at)}
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => uploadStoredBackupToCloud(run)}
+                          disabled={
+                            backupLoading ||
+                            run.status !== 'success' ||
+                            !run.file_path ||
+                            !backupStatus?.cloud?.configured ||
+                            run.cloud_status === 'uploading'
+                          }
+                          className="p-2 bg-sky-50 text-sky-700 hover:bg-sky-100 rounded-xl transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                          title="Buluta tekrar yükle"
+                        >
+                          <Upload className="w-4 h-4" />
+                        </button>
                         <button
                           onClick={() => downloadStoredBackup(run)}
                           disabled={run.status !== 'success' || !run.file_path}
@@ -1021,7 +1110,7 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
                 ))}
                 {!backupLoading && (!backupStatus?.runs || backupStatus.runs.length === 0) && (
                   <tr>
-                    <td colSpan={6} className="px-6 py-10 text-center text-sm font-bold text-text-muted">Henüz otomatik yedek kaydı yok.</td>
+                    <td colSpan={7} className="px-6 py-10 text-center text-sm font-bold text-text-muted">Henüz otomatik yedek kaydı yok.</td>
                   </tr>
                 )}
               </tbody>

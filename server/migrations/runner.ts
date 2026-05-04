@@ -704,6 +704,12 @@ const migrations: Migration[] = [
           manifest_json      TEXT,
           error_message      TEXT,
           created_by         TEXT,
+          cloud_status       TEXT DEFAULT 'not_configured',
+          cloud_provider     TEXT,
+          cloud_path         TEXT,
+          cloud_uploaded_at  DATETIME,
+          cloud_error        TEXT,
+          cloud_attempts     INTEGER DEFAULT 0,
           started_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
           completed_at       DATETIME
         );
@@ -726,6 +732,34 @@ const migrations: Migration[] = [
 
       db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)")
         .run("backup_config", JSON.stringify(defaultConfig));
+    },
+  },
+  {
+    version: 31,
+    name: "add_cloud_backup_tracking",
+    up(db) {
+      const existingColumns = new Set(
+        (db.prepare("PRAGMA table_info(backup_runs)").all() as { name: string }[]).map((column) => column.name),
+      );
+      const addColumn = (name: string, definition: string) => {
+        if (!existingColumns.has(name)) db.exec(`ALTER TABLE backup_runs ADD COLUMN ${definition}`);
+      };
+
+      addColumn("cloud_status", "cloud_status TEXT DEFAULT 'not_configured'");
+      addColumn("cloud_provider", "cloud_provider TEXT");
+      addColumn("cloud_path", "cloud_path TEXT");
+      addColumn("cloud_uploaded_at", "cloud_uploaded_at DATETIME");
+      addColumn("cloud_error", "cloud_error TEXT");
+      addColumn("cloud_attempts", "cloud_attempts INTEGER DEFAULT 0");
+
+      db.exec(`
+        UPDATE backup_runs
+        SET cloud_status = COALESCE(cloud_status, 'not_configured'),
+            cloud_attempts = COALESCE(cloud_attempts, 0);
+
+        CREATE INDEX IF NOT EXISTS idx_backup_runs_cloud_status
+        ON backup_runs(cloud_status, cloud_uploaded_at);
+      `);
     },
   },
 ];

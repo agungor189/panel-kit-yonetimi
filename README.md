@@ -75,9 +75,53 @@ npm run dev        # Vite + Express birlikte localhost:3000
 | `PANEL_DATA_DIR` | — | docker-compose için host DB klasörü veya named volume adı. Varsayılan: `panel_data` |
 | `PANEL_UPLOADS_DIR` | — | docker-compose için host uploads klasörü veya named volume adı. Varsayılan: `panel_uploads` |
 | `PANEL_BACKUP_DIR` | — | docker-compose için host backup klasörü. Varsayılan: `./backups` |
+| `CLOUD_BACKUP_ENABLED` | — | `true` olursa otomatik yedek arşivleri rclone ile buluta yüklenir |
+| `CLOUD_BACKUP_RCLONE_REMOTE` | — | rclone hedefi. Cloudflare R2 örneği: `dsdstr2:dsdst-panel-backups` |
+| `CLOUD_BACKUP_PREFIX` | — | Bucket içi klasör/prefix. Öneri: `production` |
+| `CLOUD_BACKUP_RETENTION_DAYS` | — | Bulutta eski yedeklerin tutulacağı gün sayısı. Varsayılan: `30` |
 | `APP_URL` | — | Uygulamanın dışarıdan erişilen URL'i |
 | `ALLOWED_ORIGINS` | — | İzin verilen CORS origin'leri (virgülle ayrılmış). Boş bırakılırsa hepsi izinli |
 | `GEMINI_API_KEY` | — | Google Gemini AI entegrasyonu için |
+
+---
+
+## Cloudflare R2 Backup
+
+Gelişmiş backup sistemi önce yerel `/backups` klasörüne ZIP arşivi yazar. Cloud backup açıksa aynı arşiv daha sonra rclone üzerinden Cloudflare R2 bucket içine yüklenir. Bulut yükleme hatası yerel yedeği bozmaz; durum Ayarlar > Gelişmiş Yedekleme tablosunda ayrı görünür.
+
+Önerilen bucket yapısı:
+
+```text
+dsdst-panel-backups/
+└── production/
+    ├── db/
+    └── uploads/
+```
+
+`.env` örneği:
+
+```bash
+CLOUD_BACKUP_ENABLED=true
+CLOUD_BACKUP_PROVIDER=cloudflare-r2
+CLOUD_BACKUP_RCLONE_REMOTE=dsdstr2:dsdst-panel-backups
+CLOUD_BACKUP_PREFIX=production
+CLOUD_BACKUP_RETENTION_DAYS=30
+
+RCLONE_CONFIG_DSDSTR2_TYPE=s3
+RCLONE_CONFIG_DSDSTR2_PROVIDER=Cloudflare
+RCLONE_CONFIG_DSDSTR2_ACCESS_KEY_ID=...
+RCLONE_CONFIG_DSDSTR2_SECRET_ACCESS_KEY=...
+RCLONE_CONFIG_DSDSTR2_ENDPOINT=https://<cloudflare-account-id>.r2.cloudflarestorage.com
+```
+
+Kurulumdan sonra container içinden bağlantıyı test edebilirsin:
+
+```bash
+docker compose exec panel rclone lsd dsdstr2:
+docker compose exec panel rclone lsf dsdstr2:dsdst-panel-backups
+```
+
+Not: R2 erişim anahtarlarını DB içinde saklama; sadece sunucudaki `.env` dosyasında tut.
 
 ---
 
