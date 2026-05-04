@@ -4586,7 +4586,13 @@ async function startServer() {
 
   app.get("/api/integrations/keys", apiLimiter, (req, res) => {
     try {
-      const keys = db.prepare("SELECT id, service_name, display_name, key_name, status, last4, notes, last_used_at, created_at, updated_at FROM api_keys WHERE deleted_at IS NULL ORDER BY created_at DESC").all() as any[];
+      const keys = db.prepare(`
+        SELECT id, service_name, display_name, key_name, merchant_id, seller_id,
+               status, last4, notes, last_used_at, created_at, updated_at
+        FROM api_keys
+        WHERE deleted_at IS NULL
+        ORDER BY created_at DESC
+      `).all() as any[];
       
       const safeKeys = keys.map(k => {
         const testStatusRow = db.prepare("SELECT value FROM settings WHERE key = ?").get(`last_test_status_${k.id}`) as any;
@@ -4669,11 +4675,14 @@ async function startServer() {
         apiSecretEncrypted = null;
       }
 
+      const nextMerchantId = merchant_id === undefined ? current.merchant_id : (merchant_id || null);
+      const nextSellerId = seller_id === undefined ? current.seller_id : (seller_id || null);
+
       db.prepare(`
         UPDATE api_keys 
         SET display_name = ?, key_name = ?, api_key_encrypted = ?, api_secret_encrypted = ?, merchant_id = ?, seller_id = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
-      `).run(display_name, key_name || null, apiKeyEncrypted, apiSecretEncrypted, merchant_id || null, seller_id || null, notes || null, id);
+      `).run(display_name, key_name || null, apiKeyEncrypted, apiSecretEncrypted, nextMerchantId, nextSellerId, notes || null, id);
 
       logActivity("API_KEY_UPDATED", "integration", id, { 
          before: { display_name: current.display_name, service_name: current.service_name }, 
