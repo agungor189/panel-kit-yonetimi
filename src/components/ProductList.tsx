@@ -91,7 +91,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
 
   const loadProducts = async () => {
     try {
-      const data = await api.get('/products?include_bom=1');
+      const data = await api.get('/products?include_bom=1&include_components=1');
       setProducts(data);
     } catch (err) {
       console.error(err);
