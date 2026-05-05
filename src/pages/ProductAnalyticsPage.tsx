@@ -37,6 +37,7 @@ type ViewTab =
   | "dashboard"
   | "cross"
   | "material"
+  | "series"
   | "model"
   | "size"
   | "reorder"
@@ -66,9 +67,10 @@ export default function ProductAnalyticsPage() {
   const [suggestions, setSuggestions] = useState<any[]>([]);
   const [reports, setReports] = useState<{
     material: any[];
+    series: any[];
     model: any[];
     size: any[];
-  }>({ material: [], model: [], size: [] });
+  }>({ material: [], series: [], model: [], size: [] });
   const [charts, setCharts] = useState<any>({
     materialShare: [],
     modelShare: [],
@@ -372,6 +374,12 @@ export default function ProductAnalyticsPage() {
           label="Materyal Raporu"
         />
         <TabBtn
+          active={activeTab === "series"}
+          onClick={() => setActiveTab("series")}
+          icon={<Layers />}
+          label="Seri Raporu"
+        />
+        <TabBtn
           active={activeTab === "model"}
           onClick={() => setActiveTab("model")}
           icon={<Activity />}
@@ -448,6 +456,12 @@ export default function ProductAnalyticsPage() {
                   value={summary.topModel}
                   icon={<ArrowUpRight />}
                   bg="bg-emerald-50 text-emerald-800"
+                />
+                <StatusCard
+                  title="En Çok Satan Seri"
+                  value={summary.topSeries}
+                  icon={<ArrowUpRight />}
+                  bg="bg-cyan-50 text-cyan-800"
                 />
                 <StatusCard
                   title="En Çok Satan Ölçü"
@@ -692,6 +706,7 @@ export default function ProductAnalyticsPage() {
               onDownload={downloadCSV}
               columns={[
                 { key: "material", label: "Materyal" },
+                { key: "series", label: "Seri" },
                 { key: "model", label: "Model" },
                 { key: "tubeType", label: "Boru Tipi" },
                 { key: "size", label: "Ölçü", isMono: true },
@@ -730,6 +745,44 @@ export default function ProductAnalyticsPage() {
                 {
                   key: "name",
                   label: "Materyal Adı",
+                  isBold: true,
+                  color: "text-gray-900",
+                },
+                { key: "skuCount", label: "Bğl. SKU", align: "center" },
+                {
+                  key: "soldQty",
+                  label: "Satılan Adet",
+                  align: "right",
+                  isBold: true,
+                  color: "text-emerald-600",
+                },
+                {
+                  key: "currentStock",
+                  label: "Toplam Stok",
+                  align: "right",
+                  isBold: true,
+                },
+                {
+                  key: "revenue",
+                  label: "Satış Geliri",
+                  align: "right",
+                  isMoney: true,
+                },
+              ]}
+            />
+          )}
+
+          {/* SERIES TAB */}
+          {activeTab === "series" && (
+            <DataGridCard
+              title="Seri Raporu"
+              data={reports.series}
+              filename="seri_raporu"
+              onDownload={downloadCSV}
+              columns={[
+                {
+                  key: "name",
+                  label: "Seri",
                   isBold: true,
                   color: "text-gray-900",
                 },

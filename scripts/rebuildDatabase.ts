@@ -137,7 +137,7 @@ function importProducts(db: Database.Database): Map<string, string> {
       const sizeLabel = (row["ölçü"] || parsedSku.size_label || "").trim();
       const supplierCode = (row["Urun kodu"] || "").trim();
       const csvName = (row["Urun adi"] || "").trim();
-      const csvMaterial = (row.Malzeme || parsedSku.material || "").trim();
+      const normalizedMaterial = parsedSku.material || (row.Malzeme || "").trim();
 
       const isComponent = parsedSku.is_component;
       const isAccessory = parsedSku.is_accessory;
@@ -159,7 +159,7 @@ function importProducts(db: Database.Database): Map<string, string> {
         category: tubeText ? `${tubeText} Boru Kelepçesi` : "Boru Kelepçesi",
         model: parsedSku.form,
         description: null,
-        material: csvMaterial,
+        material: normalizedMaterial,
         product_series: parsedSku.series,
         tube_type_code: parsedSku.tube_type_code,
         size: sizeLabel || null,
@@ -181,7 +181,7 @@ function importProducts(db: Database.Database): Map<string, string> {
         weight: weight,
         weight_grams: weight,
         status: "Active",
-        normalized_material: csvMaterial,
+        normalized_material: normalizedMaterial,
         normalized_model: parsedSku.form,
         normalized_size: sizeLabel,
         normalized_tube_type: tubeText,
@@ -380,7 +380,13 @@ function seedFakeSales(db: Database.Database, days = 180) {
   let saleCount = 0;
   let itemCount = 0;
   let cancelCount = 0;
+  let skippedNoStock = 0;
   const usdTry = 33;
+
+  // Track running stock for both standalone products and components.
+  const stockMap = new Map<string, number>();
+  const allProducts = db.prepare("SELECT id, central_stock FROM products").all() as any[];
+  for (const p of allProducts) stockMap.set(p.id, Number(p.central_stock) || 0);
 
   db.transaction(() => {
     for (let dayOffset = 0; dayOffset < days; dayOffset++) {
@@ -392,16 +398,33 @@ function seedFakeSales(db: Database.Database, days = 180) {
 
       for (const profile of profiles) {
         if (profile.velocity === "dead") continue;
-        const baseRate = profile.velocity === "fast" ? 1.5 : profile.velocity === "medium" ? 0.5 : 0.15;
+        const baseRate = profile.velocity === "fast" ? 0.45 : profile.velocity === "medium" ? 0.18 : 0.05;
         const dayRate = baseRate * (isWeekend ? 0.4 : 1.0) * (isMonthEnd ? 1.3 : 1.0) * recencyMultiplier;
         if (rand() > dayRate) continue;
 
         const product = profile.product;
-        const qty = profile.velocity === "fast"
-          ? 1 + Math.floor(rand() * 5)
+        let qty = profile.velocity === "fast"
+          ? 1 + Math.floor(rand() * 4)
           : profile.velocity === "medium"
-          ? 1 + Math.floor(rand() * 3)
+          ? 1 + Math.floor(rand() * 2)
           : 1;
+
+        // Stock-aware: skip if not enough stock (BOM-aware).
+        const bom = bomMap.get(product.id);
+        if (bom && bom.length > 0) {
+          let maxQty = qty;
+          for (const line of bom) {
+            const compStock = stockMap.get(line.component_id) ?? 0;
+            const possible = Math.floor(compStock / line.qty);
+            if (possible < maxQty) maxQty = possible;
+          }
+          if (maxQty <= 0) { skippedNoStock++; continue; }
+          qty = Math.min(qty, maxQty);
+        } else {
+          const stock = stockMap.get(product.id) ?? 0;
+          if (stock <= 0) { skippedNoStock++; continue; }
+          qty = Math.min(qty, stock);
+        }
 
         const platform = pickWeighted(rand, PLATFORMS);
         const customer = CUSTOMER_NAMES[Math.floor(rand() * CUSTOMER_NAMES.length)];
@@ -434,15 +457,16 @@ function seedFakeSales(db: Database.Database, days = 180) {
         itemCount++;
 
         if (!isCancelled) {
-          const bom = bomMap.get(product.id);
           if (bom && bom.length > 0) {
             for (const line of bom) {
               const consume = Math.round(line.qty * qty);
               updateStock.run(consume, line.component_id);
+              stockMap.set(line.component_id, (stockMap.get(line.component_id) ?? 0) - consume);
               insertMovement.run(uuidv4(), line.component_id, -consume, `BOM tüketimi: ${product.sku} satışı`, "BOM_CONSUMPTION", tsIso);
             }
           } else {
             updateStock.run(qty, product.id);
+            stockMap.set(product.id, (stockMap.get(product.id) ?? 0) - qty);
             insertMovement.run(uuidv4(), product.id, -qty, `Satış: ${customer}`, "SALE", tsIso);
           }
           insertTrans.run(uuidv4(), tsIso, platform.name, totalAmount, product.id, `Satış #${saleId.slice(0, 8)}`);
@@ -455,7 +479,7 @@ function seedFakeSales(db: Database.Database, days = 180) {
     }
   })();
 
-  console.log(`[Fake] ${saleCount} sales (${cancelCount} cancelled/returned), ${itemCount} items over ${days} days`);
+  console.log(`[Fake] ${saleCount} sales (${cancelCount} cancelled/returned, ${skippedNoStock} skipped: no stock), ${itemCount} items over ${days} days`);
 }
 
 // --- Main ------------------------------------------------------------------

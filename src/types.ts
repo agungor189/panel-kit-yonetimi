@@ -22,6 +22,10 @@ export interface Product {
   category: string;
   model: string;
   material?: string;
+  product_series?: string;
+  tube_type_code?: string;
+  size_code?: string;
+  form_code?: string;
   size?: string;
   pipe_size?: string;
   connection_type?: string;

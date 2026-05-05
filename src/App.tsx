@@ -33,6 +33,7 @@ import Transactions from './components/Transactions';
 import Expenses from './components/Expenses';
 import Analytics from './components/Analytics';
 import ProductAnalyticsPage from './pages/ProductAnalyticsPage';
+import InsightsPage from './pages/InsightsPage';
 import RecurringPayments from './components/RecurringPayments';
 import SettingsView from './components/SettingsView';
 import ActivityLogs from './components/ActivityLogs';
@@ -65,7 +66,7 @@ function normalizeRole(role: unknown): UserRole {
   return role === 'admin' || role === 'user' || role === 'readonly' ? role : 'admin';
 }
 
-type View = 'dashboard' | 'products' | 'product-detail' | 'product-wizard' | 'stock' | 'income' | 'expense' | 'recurring' | 'analytics' | 'product-analytics' | 'settings' | 'activity-logs' | 'b2b' | 'sales' | 'api-keys' | 'panel-api' | 'trendyol' | 'cash';
+type View = 'dashboard' | 'products' | 'product-detail' | 'product-wizard' | 'stock' | 'income' | 'expense' | 'recurring' | 'analytics' | 'product-analytics' | 'insights' | 'settings' | 'activity-logs' | 'b2b' | 'sales' | 'api-keys' | 'panel-api' | 'trendyol' | 'cash';
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
@@ -198,6 +199,7 @@ export default function App() {
     { id: 'recurring', label: 'Periyodikler', icon: Repeat },
     { id: 'analytics', label: 'Genel Analizler', icon: BarChart3 },
     { id: 'product-analytics', label: 'Ürün Analizi', icon: BarChart2 },
+    { id: 'insights', label: 'Stok & Sipariş Analizi', icon: BarChart3 },
   ];
   const isReadOnly = userRole === 'readonly';
   const restrictedReadonlyViews: View[] = ['settings', 'api-keys', 'panel-api', 'trendyol', 'product-wizard', 'b2b'];
@@ -622,6 +624,7 @@ export default function App() {
           {currentView === 'recurring' && <RecurringPayments settings={settings} />}
           {currentView === 'analytics' && <Analytics settings={settings} initialTab={analyticsTab} />}
           {currentView === 'product-analytics' && <ProductAnalyticsPage />}
+          {currentView === 'insights' && <InsightsPage />}
           {currentView === 'activity-logs' && <ActivityLogs />}
           {!isReadOnly && currentView === 'settings' && <SettingsView onUpdate={loadSettings} />}
           {!isReadOnly && currentView === 'api-keys' && <ApiKeys />}

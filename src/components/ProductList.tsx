@@ -64,7 +64,8 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
       (p.name?.toLowerCase().includes(searchLower)) ||
       (p.title?.toLowerCase().includes(searchLower)) ||
       (p.sku?.toLowerCase().includes(searchLower)) ||
-      (p.barcode?.toLowerCase().includes(searchLower));
+      (p.barcode?.toLowerCase().includes(searchLower)) ||
+      (p.product_series?.toLowerCase().includes(searchLower));
     const matchesCategory = filterCategory === 'Hepsi' || p.category === filterCategory;
     const matchesStatus = filterStatus === 'Hepsi' || p.status === filterStatus;
     return matchesSearch && matchesCategory && matchesStatus;
@@ -90,7 +91,8 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
     weight: 'Ağırlık',
     location: 'Lokasyon',
     notes: 'Notlar',
-    pipe_size: 'Boru Ölçüsü'
+    pipe_size: 'Boru Ölçüsü',
+    series: 'Seri'
   });
 
   const exportToCsv = () => {
@@ -98,6 +100,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
       'Sıra No': index + 1,
       'Ürün Kodu': p.sku,
       'Malzeme': p.category,
+      'Seri': p.product_series || '',
       'Ürün Adı': p.name || p.title,
       'Boru Ölçüsü': p.pipe_size || '',
       'Merkez Depo Stoğu': p.total_stock || 0,
@@ -153,6 +156,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
         newMapping.location = findMatch(['lokasyon', 'konum', 'location', 'raf']) || headers[8] || '';
         newMapping.notes = findMatch(['not', 'notes', 'bilgi']) || headers[9] || '';
         newMapping.pipe_size = findMatch(['boru ölçüsü', 'boru olcusu', 'ölçü', 'olcu', 'size', 'pipe size', 'diameter', 'çap', 'cap', 'nominal size', 'nominal bore', 'outside diameter', 'tube size', 'profil ölçüsü', 'profil olcusu']) || '';
+        newMapping.series = findMatch(['seri', 'series', 'product series', 'ürün serisi', 'urun serisi', 'oya', 'prm']) || '';
 
         setMapping(newMapping);
         setShowMappingModal(true);
@@ -196,6 +200,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
         const location = row[mapping.location] || '';
         const notes = row[mapping.notes] || '';
         const pipe_size = row[mapping.pipe_size] || '';
+        const product_series = row[mapping.series] || '';
 
         await api.post('/products', {
           name: name,
@@ -203,6 +208,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
           sku: sku,
           barcode: barcode,
           category: category,
+          product_series,
           pipe_size: pipe_size,
           description: description,
           notes: notes,
@@ -351,6 +357,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                 'Ürün Kodu': 'URUN-001',
                 'Ürün Adı': 'Örnek Ürün',
                 'Malzeme': 'Aliminyum',
+                'Seri': 'OYA',
                 'Merkez Depo Stoğu': '100',
                 'Satış Fiyatı': '250',
                 'Barkod': '8690000000001',
@@ -514,6 +521,11 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                 <p className="text-[9px] lg:text-[10px] font-bold text-text-muted uppercase tracking-widest mb-1">{p.category}</p>
                 <h3 className="font-bold text-text-main text-sm group-hover:text-primary transition-colors line-clamp-1 h-5">{p.name || p.title}</h3>
                 <p className="text-[10px] text-text-muted font-mono mt-1">{p.sku}</p>
+                {p.product_series && (
+                  <p className="text-[9px] font-black text-primary uppercase tracking-widest mt-2">
+                    Seri: {p.product_series}
+                  </p>
+                )}
 
                 <div className="mt-3 lg:mt-4 pt-3 lg:pt-4 border-t border-border-color flex items-center justify-between">
                    <p className="font-bold text-base text-text-main"><FormatAmount amount={p.sale_price || 0} /></p>
@@ -574,6 +586,11 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                           <p className="text-sm font-bold text-text-main group-hover:text-primary transition-colors line-clamp-1">{p.name || p.title}</p>
                           <div className="flex items-center gap-2 mt-0.5">
                             <p className="text-[10px] text-text-muted font-mono uppercase tracking-tighter truncate">{p.sku}</p>
+                            {p.product_series && (
+                              <span className="text-[9px] font-black text-primary bg-blue-50 border border-blue-100 px-1.5 py-0.5 rounded uppercase tracking-widest">
+                                {p.product_series}
+                              </span>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -586,6 +603,11 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                         {p.pipe_size && p.pipe_size !== 'Bilinmiyor' && (
                           <span className="inline-block whitespace-normal break-words text-[10px] font-bold text-primary bg-blue-50 px-2 py-1 rounded border border-blue-100 max-w-[150px]">
                             Ölçü: {p.pipe_size}
+                          </span>
+                        )}
+                        {p.product_series && (
+                          <span className="inline-block whitespace-normal break-words text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-1 rounded border border-emerald-100 max-w-[150px]">
+                            Seri: {p.product_series}
                           </span>
                         )}
                       </div>
@@ -682,6 +704,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                           {field === 'location' && 'Raf Lokasyonu'}
                           {field === 'notes' && 'Dahili Notlar'}
                           {field === 'pipe_size' && 'Boru Ölçüsü (Önerilen)'}
+                          {field === 'series' && 'Seri'}
                         </label>
                         <div className="relative">
                            <select

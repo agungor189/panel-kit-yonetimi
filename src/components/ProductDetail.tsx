@@ -98,6 +98,7 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
   const bufferedCostTRY = product.purchase_cost * (1 + (product.buffer_percentage || 0) / 100);
   const profit = product.sale_price - bufferedCostTRY;
   const centralStock = product.total_stock ?? product.central_stock ?? 0;
+  const seriesLabel = product.product_series?.trim();
 
   return (
     <div className="space-y-8 animate-in slide-in-from-bottom-4 duration-500">
@@ -189,7 +190,9 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
         <div className="lg:col-span-2 space-y-6">
            <section className="card p-8 space-y-6">
               <div>
-                <p className="text-[10px] font-bold text-primary uppercase tracking-widest mb-1">{product.category} / {product.model}</p>
+                <p className="text-[10px] font-bold text-primary uppercase tracking-widest mb-1">
+                  {[product.category, seriesLabel ? `${seriesLabel} Seri` : null, product.model].filter(Boolean).join(' / ')}
+                </p>
                 <div className="flex items-center space-x-2">
                    <h1 className="text-3xl font-extrabold text-text-main tracking-tight">{product.name}</h1>
                    <span className="text-text-muted mt-1.5 font-medium">| {product.title}</span>
@@ -206,12 +209,18 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
                       LOKASYON: <span className="text-primary ml-1.5">{product.warehouse_location}</span>
                     </div>
                   )}
+                  {seriesLabel && (
+                    <div className="flex items-center bg-emerald-50 px-3 py-1 rounded border border-emerald-100 text-[10px] font-bold text-emerald-700 uppercase">
+                      SERİ: <span className="ml-1.5">{seriesLabel}</span>
+                    </div>
+                  )}
                 </div>
               </div>
 
               <div className="grid grid-cols-2 md:grid-cols-4 gap-6 py-6 border-y border-border-color">
                 <DetailStat label="Satış Fiyatı" value={<FormatAmount amount={product.sale_price} />} color="text-primary font-black" />
                 <DetailStat label="Merkez Depo Stoğu" value={`${centralStock} Adet`} color={centralStock <= (product.min_stock_level || 0) ? "text-danger" : "text-success"} />
+                <DetailStat label="Seri" value={seriesLabel || 'Bilinmiyor'} color="text-text-muted font-mono text-sm" />
                 <DetailStat label="Ağırlık" value={`${product.weight} gr`} color="text-text-muted" />
                 <DetailStat label="Boru Ölçüsü" value={product.pipe_size || 'Bilinmiyor'} color="text-text-muted font-mono text-sm" />
                 <DetailStat label="Alış ($)" value={`$${product.purchase_price_usd.toFixed(2)}`} color="text-text-muted" subLabel={`₺${product.exchange_rate_used} kur ile`} />

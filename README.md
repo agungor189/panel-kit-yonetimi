@@ -152,6 +152,8 @@ Stok modeli tek merkezi depo stoğudur. Platform bazlı stok fiziksel stok deği
 
 Karbon çelik demonte ürünlerde müşteri final ürün SKU'sunu görür; depo stoğu ise H komponentleri ve aksesuar parçaları olarak tutulur. `product_bom` reçetesi final üründen hangi H parçasının kaç adet kullanılacağını belirler; satışta final ürün kaydedilirken stok hareketi otomatik olarak komponentlerden düşer. H parçaları ve vidalar satış kataloğunda/ürün analizlerinde görünmez.
 
+Ürün sınıflandırmasında `product_series` alanı seri/ürün ailesi için kullanılır. Cast iron standart seri `OYA`, premium seri `PRM` olarak tutulur; SKU yapısı değişse bile analiz ve sipariş önerileri bu ayrı seri alanından beslenir.
+
 ### Yedek & Geri Yükleme
 
 Panelden **Ayarlar → Gelişmiş Yedekleme Sistemi** ile otomatik yedekleri yönet.

@@ -15,18 +15,18 @@ export type ParsedSku = {
 };
 
 const MATERIAL_MAP: Record<string, string> = {
-  AL: "Aluminum",
-  CI: "Cast Iron",
-  CS: "Carbon Steel",
+  AL: "Alüminyum",
+  CI: "Demir Döküm",
+  CS: "Karbon Çelik",
   PPR: "PPR",
 };
 
 const SERIES_MAP: Record<string, string> = {
-  ALY: "Alloy",
+  ALY: "ALY",
   OYA: "OYA",
-  PRM: "Premium",
-  STD: "Standart",
-  DRL: "Drilling",
+  PRM: "PRM",
+  STD: "STD",
+  DRL: "DRL",
 };
 
 const TUBE_MAP: Record<string, string> = {

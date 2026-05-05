@@ -1237,6 +1237,85 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 36,
+    name: "backfill_product_series",
+    up(db) {
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(products)").all() as { name: string }[]).map((c) => c.name),
+      );
+      if (!columns.has("product_series")) {
+        db.exec("ALTER TABLE products ADD COLUMN product_series TEXT");
+      }
+
+      db.exec(`
+        UPDATE products
+        SET product_series = CASE
+          WHEN UPPER(COALESCE(sku, '')) LIKE '%-PRM-%'
+            OR LOWER(COALESCE(title, '')) LIKE '%premium%'
+            OR LOWER(COALESCE(name, '')) LIKE '%premium%'
+            THEN 'PRM'
+          WHEN UPPER(COALESCE(sku, '')) LIKE '%-OYA-%'
+            THEN 'OYA'
+          WHEN UPPER(COALESCE(sku, '')) LIKE '%-ALY-%'
+            THEN 'ALY'
+          WHEN UPPER(COALESCE(sku, '')) LIKE '%-DRL-%'
+            THEN 'DRL'
+          WHEN UPPER(COALESCE(sku, '')) LIKE '%-STD-%'
+            THEN 'STD'
+          ELSE product_series
+        END
+        WHERE COALESCE(product_series, '') = '';
+
+        UPDATE products
+        SET product_series = CASE
+          WHEN LOWER(COALESCE(title, '')) LIKE '%premium%'
+            OR LOWER(COALESCE(name, '')) LIKE '%premium%'
+            OR UPPER(COALESCE(sku, '')) LIKE '%PRM%'
+            THEN 'PRM'
+          ELSE 'OYA'
+        END
+        WHERE COALESCE(product_series, '') = ''
+          AND (
+            LOWER(COALESCE(material, '')) LIKE '%demir%'
+            OR LOWER(COALESCE(material, '')) LIKE '%cast iron%'
+            OR LOWER(COALESCE(category, '')) LIKE '%demir%'
+            OR LOWER(COALESCE(title, '')) LIKE '%cast iron%'
+            OR LOWER(COALESCE(name, '')) LIKE '%cast iron%'
+            OR UPPER(COALESCE(sku, '')) GLOB 'H-[0-9]*'
+            OR UPPER(COALESCE(sku, '')) GLOB 'F-[0-9]*'
+          );
+
+        CREATE INDEX IF NOT EXISTS idx_products_series ON products(product_series);
+      `);
+    },
+  },
+  {
+    version: 37,
+    name: "normalize_product_series_codes",
+    up(db) {
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(products)").all() as { name: string }[]).map((c) => c.name),
+      );
+      if (!columns.has("product_series")) {
+        db.exec("ALTER TABLE products ADD COLUMN product_series TEXT");
+      }
+
+      db.exec(`
+        UPDATE products SET product_series = 'PRM'
+        WHERE LOWER(TRIM(COALESCE(product_series, ''))) IN ('premium', 'prm');
+
+        UPDATE products SET product_series = 'ALY'
+        WHERE LOWER(TRIM(COALESCE(product_series, ''))) IN ('alloy', 'aly');
+
+        UPDATE products SET product_series = 'STD'
+        WHERE LOWER(TRIM(COALESCE(product_series, ''))) IN ('standart', 'standard', 'std');
+
+        UPDATE products SET product_series = 'DRL'
+        WHERE LOWER(TRIM(COALESCE(product_series, ''))) IN ('drilling', 'drl');
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

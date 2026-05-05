@@ -37,6 +37,7 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
     barcode: '',
     category: '',
     model: 'Standart',
+    product_series: '',
     pipe_size: '',
     description: '',
     purchase_price_usd: 0,
@@ -318,6 +319,15 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                     onChange={handleInputChange} 
                     placeholder="Örn: Standart, XL, M vb."
                     className="form-input" 
+                 />
+              </Field>
+              <Field label="Seri">
+                 <input
+                    name="product_series"
+                    value={formData.product_series || ''}
+                    onChange={handleInputChange}
+                    placeholder="Örn: OYA, PRM, STD, DRL"
+                    className="form-input font-bold uppercase"
                  />
               </Field>
               <Field label="Boru Ölçüsü">
