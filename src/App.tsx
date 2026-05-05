@@ -1,4 +1,4 @@
-import { useState, useEffect, createContext, useContext } from 'react';
+import { useState, useEffect, createContext, useContext, type ComponentType } from 'react';
 import {
   LayoutDashboard,
   Package,
@@ -67,6 +67,7 @@ function normalizeRole(role: unknown): UserRole {
 }
 
 type View = 'dashboard' | 'products' | 'product-detail' | 'product-wizard' | 'stock' | 'income' | 'expense' | 'recurring' | 'analytics' | 'product-analytics' | 'insights' | 'settings' | 'activity-logs' | 'b2b' | 'sales' | 'api-keys' | 'panel-api' | 'trendyol' | 'cash';
+type NavItem = { id: View; label: string; icon: ComponentType<{ className?: string }> };
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
@@ -188,7 +189,7 @@ export default function App() {
     setCurrentView('analytics');
   };
 
-  const mainNavItems = [
+  const mainNavItems: NavItem[] = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'products', label: 'Ürünler', icon: Package },
     { id: 'sales', label: 'Satışlar', icon: ShoppingCart },
@@ -198,16 +199,18 @@ export default function App() {
     { id: 'expense', label: 'Giderler', icon: TrendingDown },
     { id: 'recurring', label: 'Periyodikler', icon: Repeat },
   ];
-  const analyticsNavItems = [
-    { id: 'analytics', label: 'Genel', icon: BarChart3 },
-    { id: 'product-analytics', label: 'Ürün', icon: BarChart2 },
-    { id: 'insights', label: 'Stok & Sipariş', icon: BarChart3 },
+  const analyticsNavItems: NavItem[] = [
+    { id: 'analytics', label: 'Genel Analizler', icon: BarChart3 },
+    { id: 'product-analytics', label: 'Ürün Analizi', icon: BarChart2 },
+    { id: 'insights', label: 'Stok & Sipariş Analizi', icon: BarChart3 },
   ];
   const navItems = [...mainNavItems, ...analyticsNavItems];
   const isReadOnly = userRole === 'readonly';
   const restrictedReadonlyViews: View[] = ['settings', 'api-keys', 'panel-api', 'trendyol', 'product-wizard', 'b2b'];
   const visibleMainNavItems = mainNavItems.filter(item => !isReadOnly || item.id !== 'b2b');
   const visibleAnalyticsNavItems = analyticsNavItems;
+  const primaryNavItems = visibleMainNavItems.filter(item => ['dashboard', 'products', 'sales', 'b2b', 'cash'].includes(item.id));
+  const financeNavItems = visibleMainNavItems.filter(item => ['income', 'expense', 'recurring'].includes(item.id));
 
   useEffect(() => {
     if (!isReadOnly) return;
@@ -226,8 +229,54 @@ export default function App() {
       currentView === 'panel-api' ? 'Panel API' :
         currentView === 'trendyol' ? 'Trendyol' :
           currentView === 'settings' ? 'Ayarlar' :
-            currentView === 'activity-logs' ? 'Aktivite Logları' :
+          currentView === 'activity-logs' ? 'Aktivite Logları' :
               'Ürün Detayı');
+
+  const sidebarExpanded = isSidebarOpen || isMobileMenuOpen;
+  const isNavActive = (id: View) =>
+    currentView === id || (id === 'products' && (currentView === 'product-detail' || currentView === 'product-wizard'));
+  const selectView = (id: View) => {
+    setCurrentView(id);
+    if (id === 'b2b') {
+      setSelectedFirmId(null);
+    }
+    setIsMobileMenuOpen(false);
+  };
+
+  const renderSectionLabel = (label: string) => (
+    sidebarExpanded && (
+      <div className="px-6 pb-2 pt-4">
+        <p className="text-[10px] font-black uppercase tracking-[0.17em] text-slate-400">{label}</p>
+      </div>
+    )
+  );
+
+  const renderNavItem = (item: NavItem, tone: 'teal' | 'purple' | 'orange' = 'teal') => {
+    const Icon = item.icon;
+    const active = isNavActive(item.id);
+    const activeClass =
+      tone === 'purple'
+        ? 'border-violet-300/20 bg-[#15263f] text-white shadow-[0_10px_24px_rgba(2,12,27,0.2)]'
+        : tone === 'orange'
+          ? 'border-amber-300/20 bg-[#1f2a38] text-white shadow-[0_10px_24px_rgba(2,12,27,0.2)]'
+          : 'border-cyan-300/20 bg-[#12324a] text-white shadow-[0_10px_24px_rgba(2,12,27,0.22)]';
+
+    return (
+      <button
+        key={item.id}
+        onClick={() => selectView(item.id)}
+        title={!sidebarExpanded ? item.label : undefined}
+        className={cn(
+          'group relative flex h-11 items-center rounded-xl border text-sm font-bold transition-all duration-200',
+          sidebarExpanded ? 'mx-3 w-[calc(100%-1.5rem)] px-3.5' : 'mx-auto w-11 justify-center px-0',
+          active ? activeClass : 'border-transparent text-slate-300 hover:bg-white/[0.07] hover:text-white'
+        )}
+      >
+        <Icon className={cn('h-5 w-5 shrink-0 transition-colors', sidebarExpanded && 'mr-3', active ? 'text-white' : 'text-slate-300 group-hover:text-white')} />
+        {sidebarExpanded && <span className="min-w-0 truncate">{item.label}</span>}
+      </button>
+    );
+  };
 
   if (isCheckingAuth) {
     return (
@@ -246,204 +295,95 @@ export default function App() {
       <div className="min-h-screen bg-bg-main text-text-main font-sans selection:bg-primary/10" data-role={userRole} data-readonly={isReadOnly ? 'true' : 'false'}>
       {/* Sidebar */}
       <aside className={cn(
-        "fixed left-0 top-0 h-full border-r border-border-color bg-sidebar-bg text-white transition-all duration-300 z-50 flex flex-col",
-        isSidebarOpen ? "w-64" : "w-20",
-        "md:translate-x-0",
-        isMobileMenuOpen ? "translate-x-0 w-64" : "-translate-x-full md:translate-x-0"
+        'fixed left-0 top-0 z-50 flex h-full flex-col border-r border-white/10 bg-[#1e2a3d] text-white shadow-[18px_0_45px_rgba(8,24,43,0.18)] transition-all duration-300',
+        isSidebarOpen ? 'w-64' : 'w-20',
+        'md:translate-x-0',
+        isMobileMenuOpen ? 'w-64 translate-x-0' : '-translate-x-full md:translate-x-0'
       )}>
-        <div className="flex h-16 items-center px-4 border-b border-white/10 shrink-0">
-          {(isSidebarOpen || isMobileMenuOpen) ? (
-            <div className="flex items-center justify-between w-full">
-              <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
-                <img src="/logo.svg" alt="DSDST Logo" className="w-8 h-8 shrink-0" />
-                <div className="flex min-w-0 flex-1 items-center gap-2">
-                  <h1 className="min-w-0 truncate whitespace-nowrap text-[18px] font-black leading-none tracking-tight text-white">
-                    {settings?.company_name || 'DSDST Panel'}
-                  </h1>
-                  <span className="shrink-0 rounded-full border border-white/15 bg-white/10 px-2 py-0.5 text-[10px] font-black tracking-wide text-cyan-200">
-                    {APP_VERSION}
-                  </span>
-                </div>
+        <div className={cn(
+          'flex h-20 shrink-0 items-center border-b border-white/10 px-4',
+          sidebarExpanded ? 'justify-between' : 'justify-center px-0'
+        )}>
+          <div className={cn('flex min-w-0 items-center', sidebarExpanded ? 'gap-2' : 'justify-center')}>
+            <img src="/logo.svg" alt="DSDST Logo" className="h-9 w-9 shrink-0 drop-shadow-[0_0_14px_rgba(20,225,205,0.2)]" />
+            {sidebarExpanded && (
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                <h1 className="min-w-0 flex-1 whitespace-nowrap text-[17px] font-black leading-none tracking-normal text-white">
+                  DSDST Panel
+                </h1>
+                <span className="shrink-0 rounded-full border border-white/10 bg-white/10 px-2 py-1 text-[10px] font-black tracking-normal text-cyan-200 shadow-inner">
+                  {APP_VERSION}
+                </span>
               </div>
-              <button
-                onClick={() => setIsMobileMenuOpen(false)}
-                className="md:hidden p-1 text-white/50 hover:text-white"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-          ) : (
-             <div className="w-full flex justify-center">
-               <img src="/logo.svg" alt="DSDST" className="w-8 h-8" />
-             </div>
+            )}
+          </div>
+
+          {sidebarExpanded && (
+            <button
+              onClick={() => setIsMobileMenuOpen(false)}
+              className="rounded-xl p-2 text-slate-400 transition-colors hover:bg-white/10 hover:text-white md:hidden"
+              aria-label="Menüyü kapat"
+            >
+              <X className="h-5 w-5" />
+            </button>
           )}
         </div>
 
-        <nav className="mt-4 px-0 space-y-0.5 overflow-y-auto flex-1">
-          {visibleMainNavItems.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => {
-                setCurrentView(item.id as View);
-                if (item.id === 'b2b') {
-                  setSelectedFirmId(null);
-                }
-                setIsMobileMenuOpen(false);
-              }}
-              className={cn(
-                "w-full flex items-center px-6 py-3.5 transition-all text-sm font-medium group relative",
-                currentView === item.id || (item.id === 'products' && (currentView === 'product-detail' || currentView === 'product-wizard'))
-                  ? "bg-primary/10 text-white border-l-4 border-primary"
-                  : "text-[#94a3b8] hover:bg-white/5 hover:text-white"
-              )}
-            >
-              <item.icon className={cn("w-5 h-5", (isSidebarOpen || isMobileMenuOpen) ? "mr-3" : "mx-auto")} />
-              {(isSidebarOpen || isMobileMenuOpen) && <span>{item.label}</span>}
-            </button>
-          ))}
+        <nav className="flex-1 space-y-1 overflow-y-auto py-3">
+          {renderSectionLabel('Ana Menü')}
+          {primaryNavItems.map(item => renderNavItem(item))}
 
-          {(isSidebarOpen || isMobileMenuOpen) && (
-            <div className="pt-4 pb-2 px-6">
-              <p className="text-white/40 text-xs font-bold uppercase tracking-wider">Analizler</p>
-            </div>
+          <div className={cn('my-3 h-px bg-white/10', sidebarExpanded ? 'mx-4' : 'mx-4')} />
+          {renderSectionLabel('Finans & Raporlama')}
+          {financeNavItems.map(item => renderNavItem(item))}
+          {visibleAnalyticsNavItems.map(item => renderNavItem(item))}
+
+          {!isReadOnly && (
+            <>
+              <div className={cn('my-3 h-px bg-white/10', sidebarExpanded ? 'mx-4' : 'mx-4')} />
+              {renderSectionLabel('Entegrasyonlar')}
+              {renderNavItem({ id: 'api-keys', label: 'API Anahtarları', icon: Key })}
+              {renderNavItem({ id: 'panel-api', label: 'Panel API', icon: TerminalSquare }, 'purple')}
+              {renderNavItem({ id: 'trendyol', label: 'Trendyol', icon: ShoppingCart }, 'orange')}
+            </>
           )}
-          {visibleAnalyticsNavItems.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => {
-                setCurrentView(item.id as View);
-                setIsMobileMenuOpen(false);
-              }}
-              className={cn(
-                "w-full flex items-center px-6 py-3.5 transition-all text-sm font-medium group relative",
-                currentView === item.id
-                  ? "bg-primary/10 text-white border-l-4 border-primary"
-                  : "text-[#94a3b8] hover:bg-white/5 hover:text-white"
-              )}
-              title={item.label}
-            >
-              <item.icon className={cn("w-5 h-5", (isSidebarOpen || isMobileMenuOpen) ? "mr-3" : "mx-auto")} />
-              {(isSidebarOpen || isMobileMenuOpen) && <span>{item.label}</span>}
-            </button>
-          ))}
 
-          {!isReadOnly && (isSidebarOpen || isMobileMenuOpen) && (
-            <div className="pt-4 pb-2 px-6">
-              <p className="text-white/40 text-xs font-bold uppercase tracking-wider">Entegrasyonlar</p>
-            </div>
-          )}
-          {!isReadOnly && <button
-              onClick={() => {
-                setCurrentView('api-keys');
-                setIsMobileMenuOpen(false);
-              }}
-              className={cn(
-                "w-full flex items-center px-6 py-3.5 transition-all text-sm font-medium group relative",
-                currentView === 'api-keys'
-                  ? "bg-primary/10 text-white border-l-4 border-primary"
-                  : "text-[#94a3b8] hover:bg-white/5 hover:text-white"
-              )}
-              title="API Anahtarları"
-            >
-              <Key className={cn("w-5 h-5", (isSidebarOpen || isMobileMenuOpen) ? "mr-3" : "mx-auto")} />
-              {(isSidebarOpen || isMobileMenuOpen) && <span>API Anahtarları</span>}
-          </button>}
-
-          {!isReadOnly && <button
-              onClick={() => {
-                setCurrentView('panel-api');
-                setIsMobileMenuOpen(false);
-              }}
-              className={cn(
-                "w-full flex items-center px-6 py-3.5 transition-all text-sm font-medium group relative",
-                currentView === 'panel-api'
-                  ? "bg-purple-500/10 text-white border-l-4 border-purple-500"
-                  : "text-[#94a3b8] hover:bg-white/5 hover:text-white"
-              )}
-              title="Panel API"
-            >
-              <TerminalSquare className={cn("w-5 h-5", (isSidebarOpen || isMobileMenuOpen) ? "mr-3" : "mx-auto")} />
-              {(isSidebarOpen || isMobileMenuOpen) && <span>Panel API</span>}
-          </button>}
-
-          {!isReadOnly && <button
-              onClick={() => {
-                setCurrentView('trendyol');
-                setIsMobileMenuOpen(false);
-              }}
-              className={cn(
-                "w-full flex items-center px-6 py-3.5 transition-all text-sm font-medium group relative",
-                currentView === 'trendyol'
-                  ? "bg-orange-500/10 text-white border-l-4 border-orange-500"
-                  : "text-[#94a3b8] hover:bg-white/5 hover:text-white"
-              )}
-              title="Trendyol"
-            >
-              <ShoppingCart className={cn("w-5 h-5", (isSidebarOpen || isMobileMenuOpen) ? "mr-3" : "mx-auto")} />
-              {(isSidebarOpen || isMobileMenuOpen) && <span>Trendyol</span>}
-          </button>}
+          <div className={cn('my-3 h-px bg-white/10', sidebarExpanded ? 'mx-4' : 'mx-4')} />
+          {renderSectionLabel('Sistem')}
+          {renderNavItem({ id: 'activity-logs', label: 'Aktivite Logları', icon: Activity })}
+          {!isReadOnly && renderNavItem({ id: 'settings', label: 'Ayarlar', icon: SettingsIcon })}
         </nav>
 
-        <div className="mt-auto border-t border-white/10 pb-4 pt-2 shrink-0">
-            <button
-              onClick={() => {
-                setCurrentView('activity-logs');
-                setIsMobileMenuOpen(false);
-              }}
-              className={cn(
-                "w-full flex items-center px-6 py-3.5 transition-all text-sm font-medium group relative",
-                currentView === 'activity-logs'
-                  ? "bg-primary/10 text-white border-l-4 border-primary"
-                  : "text-[#94a3b8] hover:bg-white/5 hover:text-white"
-              )}
-            >
-              <Activity className={cn("w-5 h-5", (isSidebarOpen || isMobileMenuOpen) ? "mr-3" : "mx-auto")} />
-              {(isSidebarOpen || isMobileMenuOpen) && <span>Aktivite Logları</span>}
-            </button>
-            {!isReadOnly && <button
-              onClick={() => {
-                setCurrentView('settings');
-                setIsMobileMenuOpen(false);
-              }}
-              className={cn(
-                "w-full flex items-center px-6 py-3.5 transition-all text-sm font-medium group relative",
-                currentView === 'settings'
-                  ? "bg-primary/10 text-white border-l-4 border-primary"
-                  : "text-[#94a3b8] hover:bg-white/5 hover:text-white"
-              )}
-            >
-              <SettingsIcon className={cn("w-5 h-5", (isSidebarOpen || isMobileMenuOpen) ? "mr-3" : "mx-auto")} />
-              {(isSidebarOpen || isMobileMenuOpen) && <span>Ayarlar</span>}
-            </button>}
-
-            {(isSidebarOpen || isMobileMenuOpen) ? (
-              <div className="px-4 mt-2 pt-2 border-t border-white/10 text-center">
-                <button
-                  onClick={handleLogoutClick}
-                  className="w-full flex items-center space-x-3 px-4 py-2.5 rounded-xl bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white transition-all text-sm font-bold logout-override-ignore"
-                >
-                    <LogOut className="w-5 h-5" />
-                    <span>Çıkış Yap</span>
-                </button>
-              </div>
-            ) : (
-              <div className="mt-2 pt-2 border-t border-white/10 flex justify-center">
-                 <button
-                  onClick={handleLogoutClick}
-                  className="p-2.5 rounded-xl bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white transition-all logout-override-ignore"
-                  title="Çıkış Yap"
-                >
-                    <LogOut className="w-5 h-5" />
-                </button>
-              </div>
-            )}
+        <div className="shrink-0 border-t border-white/10 pb-4 pt-3">
+          {sidebarExpanded ? (
+            <div className="mx-3 mt-4 rounded-xl border border-white/10 bg-white/[0.03] p-2 shadow-inner">
+              <button
+                onClick={handleLogoutClick}
+                className="logout-override-ignore flex h-11 w-full items-center rounded-lg px-3.5 text-sm font-black text-red-400 transition-all hover:bg-red-500 hover:text-white"
+              >
+                <LogOut className="mr-3 h-5 w-5" />
+                <span>Çıkış Yap</span>
+              </button>
+            </div>
+          ) : (
+            <div className="mt-4 flex justify-center">
+              <button
+                onClick={handleLogoutClick}
+                className="logout-override-ignore flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.03] text-red-400 transition-all hover:bg-red-500 hover:text-white"
+                title="Çıkış Yap"
+              >
+                <LogOut className="h-5 w-5" />
+              </button>
+            </div>
+          )}
         </div>
 
         <button
           onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-          className="hidden md:flex absolute bottom-4 right-[-12px] w-6 h-6 bg-white border border-border-color text-sidebar-bg rounded-full items-center justify-center hover:bg-bg-main shadow-md cursor-pointer transition-transform"
+          className="hidden absolute bottom-5 right-[-13px] h-7 w-7 items-center justify-center rounded-full border border-white/10 bg-[#25344a] text-slate-300 shadow-lg transition-all hover:bg-[#2d3d55] hover:text-white md:flex"
+          aria-label={isSidebarOpen ? 'Menüyü daralt' : 'Menüyü genişlet'}
         >
-          <ChevronRight className={cn("w-3.5 h-3.5 transition-transform", isSidebarOpen && "rotate-180")} />
+          <ChevronRight className={cn('h-4 w-4 transition-transform', isSidebarOpen && 'rotate-180')} />
         </button>
       </aside>
 
