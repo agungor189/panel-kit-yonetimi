@@ -5,7 +5,10 @@
  * scripts/initial-products.csv, seeds Carbon Steel BOM relations, and fills
  * the database with 180 days of synthetic sales for analytics testing.
  *
- * Usage:  npm run rebuild-db
+ * Usage:  npm run rebuild-db:local
+ *
+ * Safety: this script refuses to run unless ALLOW_LOCAL_DB_REBUILD=true and
+ * NODE_ENV is not production.
  */
 
 import path from "node:path";
@@ -20,6 +23,17 @@ import { parseSku, buildProductName, type ParsedSku } from "../server/utils/pars
 
 const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), "dsdst_panel.db");
 const CSV_PATH = path.join(process.cwd(), "scripts", "initial-products.csv");
+const ALLOW_REBUILD = process.env.ALLOW_LOCAL_DB_REBUILD === "true";
+
+if (!ALLOW_REBUILD) {
+  console.error("[Rebuild] Refusing to run. Set ALLOW_LOCAL_DB_REBUILD=true or use npm run rebuild-db:local.");
+  process.exit(1);
+}
+
+if (process.env.NODE_ENV === "production") {
+  console.error("[Rebuild] Refusing to run while NODE_ENV=production.");
+  process.exit(1);
+}
 
 type CsvRow = {
   "Sira no": string;

@@ -11,7 +11,7 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "rebuild-db": "tsx scripts/rebuildDatabase.ts"
+    "rebuild-db:local": "ALLOW_LOCAL_DB_REBUILD=true tsx scripts/rebuildDatabase.ts"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",

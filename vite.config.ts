@@ -16,7 +16,7 @@ export default defineConfig(({mode}) => {
       },
     },
     server: {
-      port: 3010,
+      port: 3000,
       hmr: process.env.DISABLE_HMR !== 'true',
     },
   };
