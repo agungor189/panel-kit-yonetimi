@@ -30,6 +30,46 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+const PRODUCT_KIND_STYLE: Record<string, string> = {
+  assembly: "bg-blue-50 text-blue-700 border-blue-100",
+  component: "bg-amber-50 text-amber-700 border-amber-100",
+  accessory: "bg-violet-50 text-violet-700 border-violet-100",
+  normal: "bg-slate-50 text-slate-600 border-slate-200",
+};
+
+function getProductKind(product: Product) {
+  if (product.stock_source === 'bom' || product.product_type === 'assembly') {
+    return { key: 'assembly', label: 'Assembly' };
+  }
+  if (product.product_type === 'component') {
+    return { key: 'component', label: 'Component' };
+  }
+  if (product.product_type === 'accessory') {
+    return { key: 'accessory', label: 'Accessory' };
+  }
+  return { key: 'normal', label: 'Normal ürün' };
+}
+
+function ProductKindBadge({ product }: { product: Product }) {
+  const kind = getProductKind(product);
+  return (
+    <span className={cn(
+      "inline-flex items-center rounded-full border px-2 py-0.5 text-[9px] font-black uppercase tracking-widest",
+      PRODUCT_KIND_STYLE[kind.key] || PRODUCT_KIND_STYLE.normal
+    )}>
+      {kind.label}
+    </span>
+  );
+}
+
+function getBottleneckComponent(product: Product) {
+  return product.bom_components?.reduce((min, component) => {
+    const current = Number(component.available_for_parent ?? 0);
+    const minValue = Number(min?.available_for_parent ?? Number.POSITIVE_INFINITY);
+    return current < minValue ? component : min;
+  }, product.bom_components?.[0]);
+}
+
 interface ProductListProps {
   onAddProduct: () => void;
   onProductClick: (id: string) => void;
@@ -51,7 +91,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
 
   const loadProducts = async () => {
     try {
-      const data = await api.get('/products');
+      const data = await api.get('/products?include_bom=1');
       setProducts(data);
     } catch (err) {
       console.error(err);
@@ -526,16 +566,31 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                     Seri: {p.product_series}
                   </p>
                 )}
+                <div className="mt-2">
+                  <ProductKindBadge product={p} />
+                </div>
 
                 <div className="mt-3 lg:mt-4 pt-3 lg:pt-4 border-t border-border-color flex items-center justify-between">
                    <p className="font-bold text-base text-text-main"><FormatAmount amount={p.sale_price || 0} /></p>
                    <div className="text-right">
-                     <p className={cn(
-                       "text-xs font-bold",
-                       (p.total_stock || 0) < 10 ? "text-danger" : "text-success"
-                     )}>
-                       {p.total_stock || 0} Adet
-                     </p>
+                     {p.stock_source === 'bom' ? (
+                       <div className="space-y-0.5">
+                         <p className={cn("text-xs font-black", (p.total_stock || 0) < 10 ? "text-danger" : "text-success")}>
+                           Üretilebilir {p.total_stock || 0}
+                         </p>
+                         <p className="text-[10px] font-bold text-text-muted">Fiziksel {p.physical_stock ?? p.central_stock ?? 0}</p>
+                         <p className="text-[9px] font-bold text-amber-600 truncate max-w-[120px]">
+                           Darboğaz {getBottleneckComponent(p)?.sku || '—'}
+                         </p>
+                       </div>
+                     ) : (
+                       <p className={cn(
+                         "text-xs font-bold",
+                         (p.total_stock || 0) < 10 ? "text-danger" : "text-success"
+                       )}>
+                         {p.total_stock || 0} Adet
+                       </p>
+                     )}
                    </div>
                 </div>
               </div>
@@ -586,6 +641,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                           <p className="text-sm font-bold text-text-main group-hover:text-primary transition-colors line-clamp-1">{p.name || p.title}</p>
                           <div className="flex items-center gap-2 mt-0.5">
                             <p className="text-[10px] text-text-muted font-mono uppercase tracking-tighter truncate">{p.sku}</p>
+                            <ProductKindBadge product={p} />
                             {p.product_series && (
                               <span className="text-[9px] font-black text-primary bg-blue-50 border border-blue-100 px-1.5 py-0.5 rounded uppercase tracking-widest">
                                 {p.product_series}
@@ -630,12 +686,29 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                       </span>
                     </td>
                     <td className="px-4 py-4 text-center">
-                      <span className={cn(
-                        "font-bold text-sm px-2 py-1 rounded-lg",
-                        (p.total_stock || 0) < 10 ? "text-danger bg-red-50" : "text-text-main bg-bg-main"
-                      )}>
-                        {p.total_stock}
-                      </span>
+                      {p.stock_source === 'bom' ? (
+                        <div className="inline-flex flex-col items-end gap-1 text-right">
+                          <span className={cn(
+                            "font-black text-sm px-2 py-1 rounded-lg",
+                            (p.total_stock || 0) < 10 ? "text-danger bg-red-50" : "text-blue-700 bg-blue-50"
+                          )}>
+                            Üretilebilir: {p.total_stock || 0}
+                          </span>
+                          <span className="text-[10px] font-bold text-text-muted">
+                            Fiziksel final: {p.physical_stock ?? p.central_stock ?? 0}
+                          </span>
+                          <span className="text-[10px] font-bold text-amber-600">
+                            Darboğaz: {getBottleneckComponent(p)?.sku || '—'}
+                          </span>
+                        </div>
+                      ) : (
+                        <span className={cn(
+                          "font-bold text-sm px-2 py-1 rounded-lg",
+                          (p.total_stock || 0) < 10 ? "text-danger bg-red-50" : "text-text-main bg-bg-main"
+                        )}>
+                          {p.total_stock}
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-4 text-sm font-bold text-gray-700 text-right">
                       <FormatAmount align="right" amount={stockValue} />

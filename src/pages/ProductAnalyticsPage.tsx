@@ -52,14 +52,30 @@ export default function ProductAnalyticsPage() {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [materialFilter, setMaterialFilter] = useState("Tümü");
+  const [seriesFilter, setSeriesFilter] = useState("Tümü");
   const [modelFilter, setModelFilter] = useState("Tümü");
+  const [formFilter, setFormFilter] = useState("Tümü");
+  const [supplierFilter, setSupplierFilter] = useState("Tümü");
   const [pipeSizeFilter, setPipeSizeFilter] = useState("Tümü");
   const [tubeTypeFilter, setTubeTypeFilter] = useState("Tümü");
 
-  const [pipeSizeOptions, setPipeSizeOptions] = useState<string[]>([
-    "Tümü",
-    "Bilinmiyor",
-  ]);
+  const [filterOptions, setFilterOptions] = useState<{
+    materials: string[];
+    series: string[];
+    models: string[];
+    forms: string[];
+    tubeTypes: string[];
+    pipeSizes: string[];
+    supplierCodes: string[];
+  }>({
+    materials: ["Tümü", "Bilinmiyor"],
+    series: ["Tümü", "Bilinmiyor"],
+    models: ["Tümü", "Bilinmiyor"],
+    forms: ["Tümü", "Bilinmiyor"],
+    tubeTypes: ["Tümü", "Bilinmiyor"],
+    pipeSizes: ["Tümü", "Bilinmiyor"],
+    supplierCodes: ["Tümü", "Bilinmiyor"],
+  });
 
   // Data State
   const [summary, setSummary] = useState<any>({});
@@ -82,7 +98,15 @@ export default function ProductAnalyticsPage() {
   const fetchFilters = async () => {
     try {
       const res = await api.get("/analytics/products/filter-options");
-      if (res.pipeSizes) setPipeSizeOptions(res.pipeSizes);
+      setFilterOptions((prev) => ({
+        materials: res.materials ?? prev.materials,
+        series: res.series ?? prev.series,
+        models: res.models ?? prev.models,
+        forms: res.forms ?? prev.forms,
+        tubeTypes: res.tubeTypes ?? prev.tubeTypes,
+        pipeSizes: res.pipeSizes ?? prev.pipeSizes,
+        supplierCodes: res.supplierCodes ?? prev.supplierCodes,
+      }));
     } catch (e) {}
   };
 
@@ -93,7 +117,10 @@ export default function ProductAnalyticsPage() {
       if (startDate) q.append("startDate", startDate);
       if (endDate) q.append("endDate", endDate);
       if (materialFilter !== "Tümü") q.append("material", materialFilter);
+      if (seriesFilter !== "Tümü") q.append("series", seriesFilter);
       if (modelFilter !== "Tümü") q.append("model", modelFilter);
+      if (formFilter !== "Tümü") q.append("formCode", formFilter);
+      if (supplierFilter !== "Tümü") q.append("supplierCode", supplierFilter);
       if (pipeSizeFilter !== "Tümü") q.append("pipeSize", pipeSizeFilter);
       if (tubeTypeFilter !== "Tümü") q.append("tubeType", tubeTypeFilter);
 
@@ -113,7 +140,7 @@ export default function ProductAnalyticsPage() {
       setCharts(chartRes);
 
       const loadedSuggestions = sugRes.map((s: any) => {
-        const dailyAvg = s.soldQty / 30;
+        const dailyAvg = Number(s.avg_daily ?? 0);
         let priority = "Talep Yok";
         let action = "İzle";
         if (s.soldQty > 0) {
@@ -134,7 +161,13 @@ export default function ProductAnalyticsPage() {
           priority = "Ölü Stok";
           action = "Eritilmesi Gerek";
         }
-        return { ...s, dailyAvg: dailyAvg.toFixed(2), priority, action };
+        return {
+          ...s,
+          dailyAvg: dailyAvg.toFixed(2),
+          periodDays: s.period_days ?? sumRes.period_days ?? 30,
+          priority,
+          action,
+        };
       });
       setSuggestions(
         loadedSuggestions.sort((a: any, b: any) => b.soldQty - a.soldQty),
@@ -274,12 +307,28 @@ export default function ProductAnalyticsPage() {
             className="w-[130px] text-sm border-gray-200 rounded-lg px-3 py-2 bg-gray-50 font-medium"
           >
             <option>Tümü</option>
-            <option>Alüminyum</option>
-            <option>Demir Döküm</option>
-            <option>Bambu</option>
-            <option>Karbon Çelik</option>
-            <option>PPR</option>
-            <option>Bilinmiyor</option>
+            {filterOptions.materials.filter((opt) => opt !== "Tümü").map((opt) => (
+              <option key={opt} value={opt}>
+                {opt}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5 ml-1">
+            Seri
+          </label>
+          <select
+            value={seriesFilter}
+            onChange={(e) => setSeriesFilter(e.target.value)}
+            className="w-[120px] text-sm border-gray-200 rounded-lg px-3 py-2 bg-gray-50 font-medium"
+          >
+            <option>Tümü</option>
+            {filterOptions.series.filter((opt) => opt !== "Tümü").map((opt) => (
+              <option key={opt} value={opt}>
+                {opt}
+              </option>
+            ))}
           </select>
         </div>
         <div>
@@ -292,13 +341,28 @@ export default function ProductAnalyticsPage() {
             className="w-[130px] text-sm border-gray-200 rounded-lg px-3 py-2 bg-gray-50 font-medium"
           >
             <option>Tümü</option>
-            <option>Tee</option>
-            <option>Dirsek</option>
-            <option>Base</option>
-            <option>Cross</option>
-            <option>5 Way</option>
-            <option>6 Way</option>
-            <option>Bilinmiyor</option>
+            {filterOptions.models.filter((opt) => opt !== "Tümü").map((opt) => (
+              <option key={opt} value={opt}>
+                {opt}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5 ml-1">
+            Form
+          </label>
+          <select
+            value={formFilter}
+            onChange={(e) => setFormFilter(e.target.value)}
+            className="w-[120px] text-sm border-gray-200 rounded-lg px-3 py-2 bg-gray-50 font-mono"
+          >
+            <option>Tümü</option>
+            {filterOptions.forms.filter((opt) => opt !== "Tümü").map((opt) => (
+              <option key={opt} value={opt}>
+                {opt}
+              </option>
+            ))}
           </select>
         </div>
         <div>
@@ -311,9 +375,11 @@ export default function ProductAnalyticsPage() {
             className="w-[120px] text-sm border-gray-200 rounded-lg px-3 py-2 bg-gray-50 font-medium"
           >
             <option>Tümü</option>
-            <option>Yuvarlak</option>
-            <option>Kare</option>
-            <option>Bilinmiyor</option>
+            {filterOptions.tubeTypes.filter((opt) => opt !== "Tümü").map((opt) => (
+              <option key={opt} value={opt}>
+                {opt}
+              </option>
+            ))}
           </select>
         </div>
         <div>
@@ -325,7 +391,24 @@ export default function ProductAnalyticsPage() {
             onChange={(e) => setPipeSizeFilter(e.target.value)}
             className="w-[120px] text-sm border-gray-200 rounded-lg px-3 py-2 bg-gray-50 font-mono"
           >
-            {pipeSizeOptions.map((opt) => (
+            {filterOptions.pipeSizes.map((opt) => (
+              <option key={opt} value={opt}>
+                {opt}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5 ml-1">
+            Tedarikçi Kodu
+          </label>
+          <select
+            value={supplierFilter}
+            onChange={(e) => setSupplierFilter(e.target.value)}
+            className="w-[150px] text-sm border-gray-200 rounded-lg px-3 py-2 bg-gray-50 font-mono"
+          >
+            <option>Tümü</option>
+            {filterOptions.supplierCodes.filter((opt) => opt !== "Tümü").map((opt) => (
               <option key={opt} value={opt}>
                 {opt}
               </option>
@@ -912,6 +995,9 @@ export default function ProductAnalyticsPage() {
                         <th className="py-3 text-right">Satış (Dönem)</th>
                         <th className="py-3 text-right">Mevcut Stok</th>
                         <th className="py-3 text-center">Günlük Ort.</th>
+                        <th className="py-3 text-right">Stok Günü</th>
+                        <th className="py-3 text-right">Öneri</th>
+                        <th className="py-3 text-right">Tah. Maliyet</th>
                         <th className="py-3 text-center">Durum</th>
                         <th className="py-3">Aksiyon</th>
                       </tr>
@@ -946,6 +1032,15 @@ export default function ProductAnalyticsPage() {
                           </td>
                           <td className="py-3 text-center font-mono text-xs">
                             {s.dailyAvg}
+                          </td>
+                          <td className="py-3 text-right font-mono text-xs text-gray-600">
+                            {s.days_until_stockout ?? "∞"}
+                          </td>
+                          <td className="py-3 text-right font-black text-blue-600">
+                            {s.recommended_qty ?? 0}
+                          </td>
+                          <td className="py-3 text-right font-mono text-xs text-emerald-700">
+                            ${(s.estimated_cost_usd || 0).toLocaleString("tr-TR", { maximumFractionDigits: 0 })}
                           </td>
                           <td className="py-3 text-center">
                             <span

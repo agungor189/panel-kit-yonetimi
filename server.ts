@@ -394,6 +394,49 @@ function getProductStockProfile(product: any) {
   };
 }
 
+function getProductBomUsage(componentProductId: string): any[] {
+  if (!componentProductId) return [];
+
+  const rows = db.prepare(`
+    SELECT
+      b.parent_product_id,
+      b.quantity_per_unit,
+      b.component_role,
+      p.*
+    FROM product_bom b
+    JOIN products p ON p.id = b.parent_product_id
+    WHERE b.component_product_id = ?
+      AND COALESCE(p.status, 'Active') != 'deleted'
+    ORDER BY p.sku ASC
+  `).all(componentProductId) as any[];
+
+  return rows.map((row) => {
+    const stockProfile = getProductStockProfile(row);
+    const bottleneck = stockProfile.components.reduce(
+      (min: any, component: any) => (!min || component.available_for_parent < min.available_for_parent ? component : min),
+      null
+    );
+
+    return {
+      parent_product_id: row.parent_product_id,
+      quantity_per_unit: Number(row.quantity_per_unit) || 0,
+      component_role: row.component_role,
+      sku: row.sku,
+      name: row.name,
+      title: row.title,
+      available_stock: stockProfile.available_stock,
+      physical_stock: stockProfile.physical_stock,
+      bottleneck_component: bottleneck ? {
+        sku: bottleneck.sku,
+        name: bottleneck.name || bottleneck.title,
+        quantity_per_unit: bottleneck.quantity_per_unit,
+        central_stock: bottleneck.central_stock,
+        available_for_parent: bottleneck.available_for_parent,
+      } : null,
+    };
+  });
+}
+
 function hydrateProductStock(product: any, includeBom = false) {
   const stockProfile = getProductStockProfile(product);
   return {
@@ -460,6 +503,13 @@ function saleStockMovementReasons(sale: any): string[] {
   if (sale?.id) reasons.add(`Satış No: ${sale.id}`);
   if (sale?.order_code) reasons.add(`Satış No: ${sale.order_code}`);
   return [...reasons];
+}
+
+function saleStockMovementLikePatterns(sale: any): string[] {
+  const patterns = new Set<string>();
+  if (sale?.id) patterns.add(`%Sipariş: ${sale.id}%`);
+  if (sale?.order_code) patterns.add(`%Sipariş: ${sale.order_code}%`);
+  return [...patterns];
 }
 
 function readJsonSetting<T>(key: string, fallback: T): T {
@@ -2577,13 +2627,14 @@ async function startServer() {
 
   app.get("/api/products", (req, res) => {
     const includeComponents = req.query.include_components === '1' || req.query.include_components === 'true';
+    const includeBom = req.query.include_bom === '1' || req.query.include_bom === 'true';
     const products = (db.prepare(`
       SELECT p.*,
         (SELECT path FROM product_images WHERE product_id = p.id ORDER BY sort_order ASC LIMIT 1) as cover_image
       FROM products p
       WHERE ${catalogVisibilityWhere(includeComponents)}
       ORDER BY p.created_at DESC
-    `).all() as any[]).map((product) => hydrateProductStock(product));
+    `).all() as any[]).map((product) => hydrateProductStock(product, includeBom));
     res.json(products);
   });
 
@@ -2594,7 +2645,7 @@ async function startServer() {
     const images = db.prepare("SELECT * FROM product_images WHERE product_id = ? ORDER BY sort_order ASC").all(req.params.id);
     const platforms = db.prepare("SELECT * FROM product_platforms WHERE product_id = ?").all(req.params.id);
 
-    res.json({ ...hydrateProductStock(product, true), images, platforms });
+    res.json({ ...hydrateProductStock(product, true), images, platforms, bom_usage: getProductBomUsage(req.params.id) });
   });
 
 
@@ -3772,6 +3823,7 @@ async function startServer() {
           quantity_required: quantity,
           available_stock: stockProfile.available_stock,
           component_role: null,
+          movement_type: 'OUT',
         }],
       };
     }
@@ -3788,6 +3840,10 @@ async function startServer() {
         quantity_required: component.quantity_per_unit * quantity,
         available_stock: stockQuantity(component.central_stock),
         component_role: component.component_role,
+        final_product_id: product.id,
+        final_sku: product.sku,
+        final_title: product.title || product.name,
+        movement_type: 'BOM_CONSUMPTION',
       })),
     };
   };
@@ -3812,29 +3868,40 @@ async function startServer() {
         );
       }
 
+      const isBomConsumption = movement.movement_type === 'BOM_CONSUMPTION';
+      const movementReason = isBomConsumption
+        ? `BOM Tüketimi | Final SKU: ${movement.final_sku || item.product_sku || item.product_id} | Component SKU: ${movement.sku || movement.product_id} | Sipariş: ${sale.order_code}`
+        : `Satış No: ${sale.order_code}`;
+
       db.prepare("INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type) VALUES (?, ?, ?, ?, ?, ?)")
         .run(
           uuidv4(),
           movement.product_id,
           centralStockChannel(sale.platform),
           -requiredQuantity,
-          `Satış No: ${sale.order_code}`,
-          'OUT'
+          movementReason,
+          isBomConsumption ? 'BOM_CONSUMPTION' : 'OUT'
         );
     }
   };
 
   const restoreSaleStock = (sale: any, finalStatus: string) => {
     const originalMovementReasons = saleStockMovementReasons(sale);
+    const originalMovementLikePatterns = saleStockMovementLikePatterns(sale);
     const restoredByProduct = new Map<string, number>();
     const placeholders = originalMovementReasons.map(() => "?").join(",");
+    const likeClauses = originalMovementLikePatterns.map(() => "reason LIKE ?").join(" OR ");
+    const reasonClauses = [
+      originalMovementReasons.length > 0 ? `reason IN (${placeholders})` : null,
+      likeClauses ? `(${likeClauses})` : null,
+    ].filter(Boolean).join(" OR ");
 
     const originalMovements = db.prepare(`
       SELECT product_id, platform_name, SUM(ABS(change_amount)) as quantity
       FROM stock_movements
-      WHERE reason IN (${placeholders}) AND type = 'OUT' AND change_amount < 0
+      WHERE (${reasonClauses}) AND type IN ('OUT', 'BOM_CONSUMPTION') AND change_amount < 0
       GROUP BY product_id, platform_name
-    `).all(...originalMovementReasons) as any[];
+    `).all(...originalMovementReasons, ...originalMovementLikePatterns) as any[];
 
     const restoreToCentralStock = (productId: string, saleChannel: string | null | undefined, quantity: number) => {
       if (!productId || quantity <= 0) return;
@@ -4106,9 +4173,10 @@ async function startServer() {
             price: item.price || 0,
             available_stock: stockPlan.available_stock,
             weight: item.weight || stockPlan.unit_weight,
-            stock_plan: stockPlan,
-          };
-        });
+          stock_plan: stockPlan,
+          product_sku: product.sku,
+        };
+      });
 
         // 1. Central warehouse stock validation for all items
         for (const item of processedItems) {

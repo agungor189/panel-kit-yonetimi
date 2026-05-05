@@ -188,7 +188,7 @@ export default function App() {
     setCurrentView('analytics');
   };
 
-  const navItems = [
+  const mainNavItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'products', label: 'Ürünler', icon: Package },
     { id: 'sales', label: 'Satışlar', icon: ShoppingCart },
@@ -197,13 +197,17 @@ export default function App() {
     { id: 'income', label: 'Gelirler', icon: TrendingUp },
     { id: 'expense', label: 'Giderler', icon: TrendingDown },
     { id: 'recurring', label: 'Periyodikler', icon: Repeat },
-    { id: 'analytics', label: 'Genel Analizler', icon: BarChart3 },
-    { id: 'product-analytics', label: 'Ürün Analizi', icon: BarChart2 },
-    { id: 'insights', label: 'Stok & Sipariş Analizi', icon: BarChart3 },
   ];
+  const analyticsNavItems = [
+    { id: 'analytics', label: 'Genel', icon: BarChart3 },
+    { id: 'product-analytics', label: 'Ürün', icon: BarChart2 },
+    { id: 'insights', label: 'Stok & Sipariş', icon: BarChart3 },
+  ];
+  const navItems = [...mainNavItems, ...analyticsNavItems];
   const isReadOnly = userRole === 'readonly';
   const restrictedReadonlyViews: View[] = ['settings', 'api-keys', 'panel-api', 'trendyol', 'product-wizard', 'b2b'];
-  const visibleNavItems = navItems.filter(item => !isReadOnly || item.id !== 'b2b');
+  const visibleMainNavItems = mainNavItems.filter(item => !isReadOnly || item.id !== 'b2b');
+  const visibleAnalyticsNavItems = analyticsNavItems;
 
   useEffect(() => {
     if (!isReadOnly) return;
@@ -276,7 +280,7 @@ export default function App() {
         </div>
 
         <nav className="mt-4 px-0 space-y-0.5 overflow-y-auto flex-1">
-          {visibleNavItems.map((item) => (
+          {visibleMainNavItems.map((item) => (
             <button
               key={item.id}
               onClick={() => {
@@ -292,6 +296,31 @@ export default function App() {
                   ? "bg-primary/10 text-white border-l-4 border-primary"
                   : "text-[#94a3b8] hover:bg-white/5 hover:text-white"
               )}
+            >
+              <item.icon className={cn("w-5 h-5", (isSidebarOpen || isMobileMenuOpen) ? "mr-3" : "mx-auto")} />
+              {(isSidebarOpen || isMobileMenuOpen) && <span>{item.label}</span>}
+            </button>
+          ))}
+
+          {(isSidebarOpen || isMobileMenuOpen) && (
+            <div className="pt-4 pb-2 px-6">
+              <p className="text-white/40 text-xs font-bold uppercase tracking-wider">Analizler</p>
+            </div>
+          )}
+          {visibleAnalyticsNavItems.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => {
+                setCurrentView(item.id as View);
+                setIsMobileMenuOpen(false);
+              }}
+              className={cn(
+                "w-full flex items-center px-6 py-3.5 transition-all text-sm font-medium group relative",
+                currentView === item.id
+                  ? "bg-primary/10 text-white border-l-4 border-primary"
+                  : "text-[#94a3b8] hover:bg-white/5 hover:text-white"
+              )}
+              title={item.label}
             >
               <item.icon className={cn("w-5 h-5", (isSidebarOpen || isMobileMenuOpen) ? "mr-3" : "mx-auto")} />
               {(isSidebarOpen || isMobileMenuOpen) && <span>{item.label}</span>}

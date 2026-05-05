@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { dashboardApi } from '../dashboardApi';
+import { api } from '../../../lib/api';
 import { useCurrency } from '../../../CurrencyContext';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 
@@ -14,21 +14,37 @@ export function ProductAnalysisChartWidget({ widgetKey, refreshKey, type, period
     loadData();
   }, [refreshKey, widgetKey, periodParams?.dateFrom, periodParams?.dateTo]);
 
+  const getPeriodDays = () => {
+    if (!periodParams?.dateFrom || !periodParams?.dateTo) return 30;
+    const start = new Date(periodParams.dateFrom);
+    const end = new Date(periodParams.dateTo);
+    const diff = Math.ceil((end.getTime() - start.getTime()) / 86400000) + 1;
+    return Number.isFinite(diff) && diff > 0 ? diff : 30;
+  };
+
   const loadData = async () => {
     setLoading(true);
     try {
+      const period = getPeriodDays();
       if (widgetKey === 'product_total_sold' || widgetKey === 'product_total_revenue') {
-        const res = await dashboardApi.getProductSummary(periodParams);
-        setData(res);
+        const res = await api.get(`/insights/overview?period=${period}`);
+        setData({
+          total_sold: res?.sales?.units_sold || 0,
+          total_revenue: res?.sales?.revenue_try || 0,
+        });
       } else if (widgetKey === 'product_top_material' || widgetKey === 'product_material_pie') {
-        const res = await dashboardApi.getProductMaterialShare({ ...periodParams, limit: 10 });
-        setData(res);
+        const res = await api.get(`/insights/breakdown?dimension=material&metric=qty&period=${period}`);
+        setData((res?.items || []).map((item: any) => ({ name: item.bucket, value: item.value })));
       } else if (widgetKey === 'product_top_model' || widgetKey === 'product_model_pie') {
-        const res = await dashboardApi.getProductModelShare({ ...periodParams, limit: 10 });
-        setData(res);
+        const res = await api.get(`/insights/breakdown?dimension=model&metric=qty&period=${period}`);
+        setData((res?.items || []).map((item: any) => ({ name: item.bucket, value: item.value })));
       } else if (widgetKey === 'product_reorder_summary') {
-        const res = await dashboardApi.getProductReorderSummary();
-        setData(res);
+        const res = await api.get(`/insights/reorder?period=${Math.max(period, 90)}`);
+        const actionable = (res?.items || []).filter((item: any) => item.priority === 'acil' || item.priority === 'yakında');
+        setData({
+          critical_count: actionable.length,
+          suggested_order_qty: actionable.reduce((sum: number, item: any) => sum + (Number(item.recommended_qty) || 0), 0),
+        });
       }
     } catch (e) {
     } finally {

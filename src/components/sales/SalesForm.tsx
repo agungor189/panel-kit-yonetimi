@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../../lib/api';
-import { ArrowLeft, User, Phone, MapPin, Truck, Hash, Search, Plus, Trash2, Package } from 'lucide-react';
+import { ArrowLeft, User, Phone, MapPin, Truck, Hash, Search, Plus, Trash2, Package, AlertTriangle, CheckCircle2, Layers } from 'lucide-react';
 
 const DEFAULT_SALES_CHANNELS = ['Satış Sistemi', 'Website', 'Trendyol', 'Hepsiburada', 'Amazon', 'N11'];
 const DEFAULT_PENDING_CHANNELS = ['Trendyol', 'Hepsiburada', 'Amazon', 'N11'];
@@ -126,7 +126,7 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
 
   const loadProducts = async () => {
     try {
-      const data = await api.get('/products');
+      const data = await api.get('/products?include_bom=1');
       setProducts(data);
     } catch (err) {
       console.error(err);
@@ -161,11 +161,15 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
       }
       return [...prev, {
         product_id: product.id,
+        product_sku: product.sku,
         product_name: product.name || product.title,
         quantity: 1,
         weight_per_unit: product.weight || 0,
         sale_price: product.sale_price || 0,
-        total_stock: product.total_stock || 0
+        total_stock: product.total_stock || 0,
+        physical_stock: product.physical_stock ?? product.central_stock ?? 0,
+        stock_source: product.stock_source,
+        bom_components: product.bom_components || []
       }];
     });
     setSearchQuery('');
@@ -206,6 +210,33 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
   const totalQuantity = selectedItems.reduce((sum, item) => sum + item.quantity, 0);
   const totalWeight = selectedItems.reduce((sum, item) => sum + (item.weight_per_unit * item.quantity), 0);
   const totalAmount = selectedItems.reduce((sum, item) => sum + (parseFloat(item.sale_price) * item.quantity), 0);
+  const bomConsumptionPreview = Array.from(selectedItems.reduce((map, item) => {
+    if (item.stock_source !== 'bom' || !Array.isArray(item.bom_components)) return map;
+
+    for (const component of item.bom_components) {
+      const key = component.component_product_id || component.sku;
+      if (!key) continue;
+      const required = (Number(component.quantity_per_unit) || 0) * (Number(item.quantity) || 0);
+      const existing = map.get(key) || {
+        key,
+        component_sku: component.sku,
+        component_name: component.name || component.title || component.component_role,
+        current_stock: Number(component.central_stock) || 0,
+        required: 0,
+        final_products: [] as string[],
+      };
+      existing.required += required;
+      existing.final_products.push(`${item.product_sku || item.product_name} x${item.quantity}`);
+      map.set(key, existing);
+    }
+
+    return map;
+  }, new Map<string, any>()).values()).map((item: any) => ({
+    ...item,
+    missing: Math.max(0, item.required - item.current_stock),
+    sufficient: item.current_stock >= item.required,
+  }));
+  const hasBomShortage = bomConsumptionPreview.some((item: any) => !item.sufficient);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -219,6 +250,10 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
       if (item.quantity > item.total_stock) {
         return alert(`Yetersiz stok: ${item.product_name} için mevcut stok ${item.total_stock} adet. Lütfen miktarı düşürün.`);
       }
+    }
+    const bomShortage = bomConsumptionPreview.find((item: any) => !item.sufficient);
+    if (bomShortage) {
+      return alert(`BOM komponent stoğu yetersiz: ${bomShortage.component_sku} için gerekli ${bomShortage.required}, mevcut ${bomShortage.current_stock}.`);
     }
     
     setSaving(true);
@@ -462,10 +497,14 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
                                 {p.name || p.title}
                                 {p.total_stock <= 0 && <span className="text-[10px] bg-red-100 text-red-600 px-2 py-0.5 rounded uppercase font-bold">Stok Yok</span>}
                                 {p.total_stock > 0 && p.total_stock <= 10 && <span className="text-[10px] bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded uppercase font-bold">Son {p.total_stock}</span>}
+                                {p.stock_source === 'bom' && <span className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded uppercase font-bold">Assembly</span>}
                               </div>
                               <div className="text-xs text-text-muted mt-1 flex items-center gap-3">
                                 {p.sku && <span>SKU: {p.sku}</span>}
-                                <span className={p.total_stock > 0 ? "font-semibold text-primary" : "text-gray-400"}>Stok: {p.total_stock || 0}</span>
+                                <span className={p.total_stock > 0 ? "font-semibold text-primary" : "text-gray-400"}>
+                                  {p.stock_source === 'bom' ? 'Üretilebilir' : 'Stok'}: {p.total_stock || 0}
+                                </span>
+                                {p.stock_source === 'bom' && <span>Fiziksel final: {p.physical_stock ?? p.central_stock ?? 0}</span>}
                                 <span className="font-bold text-gray-700">{p.sale_price ? p.sale_price.toLocaleString('tr-TR', { style: 'currency', currency: 'TRY' }) : '0,00 ₺'}</span>
                               </div>
                             </div>
@@ -539,6 +578,71 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
                 </div>
               </div>
             )}
+
+            {bomConsumptionPreview.length > 0 && (
+              <div className={hasBomShortage ? "mt-4 rounded-2xl border border-red-200 bg-red-50 p-4" : "mt-4 rounded-2xl border border-blue-100 bg-blue-50 p-4"}>
+                <div className="flex items-start justify-between gap-3 mb-3">
+                  <div>
+                    <h4 className={hasBomShortage ? "text-sm font-black text-red-700 uppercase tracking-wider flex items-center gap-2" : "text-sm font-black text-blue-700 uppercase tracking-wider flex items-center gap-2"}>
+                      <Layers className="w-4 h-4" /> Bu satışta düşecek komponentler
+                    </h4>
+                    <p className={hasBomShortage ? "text-xs text-red-700/80 mt-1" : "text-xs text-blue-700/80 mt-1"}>
+                      Assembly ürünler satıldığında final ürün değil, aşağıdaki H component stokları düşer.
+                    </p>
+                  </div>
+                  {hasBomShortage ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-white border border-red-200 px-3 py-1 text-[11px] font-black text-red-700">
+                      <AlertTriangle className="w-3 h-3" /> Eksik var
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-white border border-blue-100 px-3 py-1 text-[11px] font-black text-blue-700">
+                      <CheckCircle2 className="w-3 h-3" /> Stok yeterli
+                    </span>
+                  )}
+                </div>
+                <div className="overflow-x-auto rounded-xl bg-white border border-white/70">
+                  <table className="w-full text-sm min-w-[720px]">
+                    <thead className="text-[10px] uppercase tracking-widest text-slate-500 bg-slate-50 font-black">
+                      <tr>
+                        <th className="px-3 py-2 text-left">Component</th>
+                        <th className="px-3 py-2 text-left">Final Ürünler</th>
+                        <th className="px-3 py-2 text-right">Gerekli</th>
+                        <th className="px-3 py-2 text-right">Mevcut</th>
+                        <th className="px-3 py-2 text-right">Kalan/Eksik</th>
+                        <th className="px-3 py-2 text-center">Durum</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {bomConsumptionPreview.map((component: any) => (
+                        <tr key={component.key}>
+                          <td className="px-3 py-2">
+                            <p className="font-mono text-xs font-bold text-slate-800">{component.component_sku}</p>
+                            <p className="text-[10px] text-slate-500">{component.component_name || '—'}</p>
+                          </td>
+                          <td className="px-3 py-2 text-xs text-slate-600">{component.final_products.join(', ')}</td>
+                          <td className="px-3 py-2 text-right font-black text-slate-800">{component.required}</td>
+                          <td className="px-3 py-2 text-right font-bold text-slate-700">{component.current_stock}</td>
+                          <td className={component.sufficient ? "px-3 py-2 text-right font-bold text-emerald-600" : "px-3 py-2 text-right font-bold text-red-600"}>
+                            {component.sufficient ? component.current_stock - component.required : `-${component.missing}`}
+                          </td>
+                          <td className="px-3 py-2 text-center">
+                            {component.sufficient ? (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-100 px-2 py-1 text-[10px] font-black text-emerald-700">
+                                <CheckCircle2 className="w-3 h-3" /> Yeterli
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-red-50 border border-red-100 px-2 py-1 text-[10px] font-black text-red-700">
+                                <AlertTriangle className="w-3 h-3" /> Yetersiz
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
             
             {/* HESAPLANAN TOPLAMLAR */}
             {selectedItems.length > 0 && (
@@ -560,7 +664,7 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
                İptal
              </button>
              <button 
-               disabled={saving || selectedItems.some(i => i.quantity > i.total_stock) || selectedItems.length === 0} 
+               disabled={saving || selectedItems.some(i => i.quantity > i.total_stock) || hasBomShortage || selectedItems.length === 0}
                type="submit" 
                className="px-8 py-3 font-bold text-white bg-primary hover:bg-primary-hover rounded-xl shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
              >

@@ -162,7 +162,7 @@ export function createDashboardDataRouter(db: Database) {
     return { q, params, productJoin, productWhere };
   };
 
-  const activeSalesFilter = "s.status NOT IN ('İptal Edildi', 'İade Edildi')";
+  const activeSalesFilter = "s.status NOT IN ('İptal', 'İptal Edildi', 'İade', 'İade Edildi')";
   const modelDisplayExpr = `
     CASE
       WHEN TRIM(COALESCE(p.normalized_model, '')) NOT IN ('', 'Bilinmiyor', 'Standart') THEN TRIM(p.normalized_model)

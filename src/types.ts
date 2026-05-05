@@ -55,6 +55,7 @@ export interface Product {
   is_assembly?: boolean | number;
   stock_source?: 'central' | 'bom';
   bom_components?: ProductBomComponent[];
+  bom_usage?: ProductBomUsage[];
   images?: ProductImage[];
   platforms?: ProductPlatform[];
 }
@@ -68,6 +69,24 @@ export interface ProductBomComponent {
   name?: string;
   central_stock?: number;
   available_for_parent?: number;
+}
+
+export interface ProductBomUsage {
+  parent_product_id: string;
+  quantity_per_unit: number;
+  component_role?: string;
+  sku?: string;
+  title?: string;
+  name?: string;
+  available_stock?: number;
+  physical_stock?: number;
+  bottleneck_component?: {
+    sku?: string;
+    name?: string;
+    quantity_per_unit?: number;
+    central_stock?: number;
+    available_for_parent?: number;
+  } | null;
 }
 
 export interface ProductImage {

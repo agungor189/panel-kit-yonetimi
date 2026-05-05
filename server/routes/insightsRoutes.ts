@@ -1,7 +1,14 @@
 import { Router } from "express";
 import Database from "better-sqlite3";
 
-const ACTIVE_SALES = "s.status NOT IN ('İptal', 'İade Edildi', 'İade', 'İptal Edildi')";
+const INACTIVE_SALE_STATUSES = ["İptal", "İptal Edildi", "İade", "İade Edildi"];
+
+function activeSales(alias = "s"): string {
+  const quoted = INACTIVE_SALE_STATUSES.map((status) => `'${status.replace(/'/g, "''")}'`).join(", ");
+  return `${alias}.status NOT IN (${quoted})`;
+}
+
+const ACTIVE_SALES = activeSales("s");
 
 function periodCutoff(days: number): string {
   const d = new Date();
@@ -13,6 +20,25 @@ function num(v: unknown, fallback: number): number {
   if (v === undefined || v === null) return fallback;
   const n = Number(Array.isArray(v) ? v[0] : v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function productSalesCte(extraWhere = ""): string {
+  return `
+    WITH product_sales AS (
+      SELECT
+        si.product_id,
+        SUM(si.quantity) AS sold_qty,
+        SUM(si.quantity * si.unit_price) AS revenue,
+        SUM(COALESCE(si.net_profit, 0)) AS profit,
+        COUNT(DISTINCT s.id) AS order_count,
+        MAX(s.created_at) AS last_sale_date
+      FROM sale_items si
+      JOIN sales s ON s.id = si.sale_id
+      WHERE ${ACTIVE_SALES}
+        ${extraWhere}
+      GROUP BY si.product_id
+    )
+  `;
 }
 
 function str(v: unknown): string | undefined {
@@ -175,14 +201,14 @@ export function createInsightsRouter(db: Database.Database) {
     const limit = num(req.query.limit, 20);
     const cutoff = periodCutoff(period);
     const rows = db.prepare(`
+      ${productSalesCte("AND s.created_at >= ?")}
       SELECT
         p.id, p.sku, p.name, p.material, p.product_series, p.size,
         ${STOCK_EXPR} AS stock,
-        COALESCE(SUM(si.quantity), 0) AS qty,
-        COALESCE(SUM(si.quantity * si.unit_price), 0) AS revenue
+        COALESCE(ps.sold_qty, 0) AS qty,
+        COALESCE(ps.revenue, 0) AS revenue
       FROM products p
-      LEFT JOIN sale_items si ON si.product_id = p.id
-      LEFT JOIN sales s ON s.id = si.sale_id AND ${ACTIVE_SALES} AND s.created_at >= ?
+      LEFT JOIN product_sales ps ON ps.product_id = p.id
       WHERE ${SELLABLE_PRODUCT_FILTER}
       GROUP BY p.id
       HAVING qty > 0
@@ -265,25 +291,25 @@ export function createInsightsRouter(db: Database.Database) {
     const period = num(req.query.period, 30);
     const cutoff = periodCutoff(period);
     const rows = db.prepare(`
+      ${productSalesCte("AND s.created_at >= ?")}
       SELECT p.id, p.sku, p.name, p.material, p.product_series, p.size,
              ${STOCK_EXPR} AS stock,
              COALESCE(p.min_stock_level, 50) AS min_stock,
-             COALESCE(SUM(si.quantity), 0) AS sold_in_period,
-             COALESCE(SUM(si.quantity), 0) * 1.0 / ? AS avg_daily,
+             COALESCE(ps.sold_qty, 0) AS sold_in_period,
+             COALESCE(ps.sold_qty, 0) * 1.0 / ? AS avg_daily,
              CASE
-               WHEN COALESCE(SUM(si.quantity), 0) <= 0 THEN NULL
-               ELSE CAST(${STOCK_EXPR} / (COALESCE(SUM(si.quantity), 0) * 1.0 / ?) AS INTEGER)
+               WHEN COALESCE(ps.sold_qty, 0) <= 0 THEN NULL
+               ELSE CAST(${STOCK_EXPR} / (COALESCE(ps.sold_qty, 0) * 1.0 / ?) AS INTEGER)
              END AS days_until_stockout
       FROM products p
-      LEFT JOIN sale_items si ON si.product_id = p.id
-      LEFT JOIN sales s ON s.id = si.sale_id AND ${ACTIVE_SALES} AND s.created_at >= ?
+      LEFT JOIN product_sales ps ON ps.product_id = p.id
       WHERE ${SELLABLE_PRODUCT_FILTER}
       GROUP BY p.id
       HAVING stock <= COALESCE(p.min_stock_level, 50)
           OR (avg_daily > 0 AND days_until_stockout <= ?)
       ORDER BY (CASE WHEN avg_daily > 0 THEN days_until_stockout ELSE 999999 END) ASC
-    `).all(period, period, cutoff, safetyDays);
-    res.json({ items: rows });
+    `).all(cutoff, period, period, safetyDays);
+    res.json({ period_days: period, items: rows });
   });
 
   router.get("/stock/excess", (req, res) => {
@@ -291,24 +317,24 @@ export function createInsightsRouter(db: Database.Database) {
     const period = num(req.query.period, 30);
     const cutoff = periodCutoff(period);
     const rows = db.prepare(`
+      ${productSalesCte("AND s.created_at >= ?")}
       SELECT p.id, p.sku, p.name, p.material, p.product_series, p.size,
              ${STOCK_EXPR} AS stock,
              (${STOCK_EXPR}) * COALESCE(p.purchase_price_usd, 0) AS tied_capital_usd,
-             COALESCE(SUM(si.quantity), 0) AS sold_in_period,
-             COALESCE(SUM(si.quantity), 0) * 1.0 / ? AS avg_daily,
+             COALESCE(ps.sold_qty, 0) AS sold_in_period,
+             COALESCE(ps.sold_qty, 0) * 1.0 / ? AS avg_daily,
              CASE
-               WHEN COALESCE(SUM(si.quantity), 0) <= 0 THEN 999999
-               ELSE CAST(${STOCK_EXPR} / (COALESCE(SUM(si.quantity), 0) * 1.0 / ?) AS INTEGER)
+               WHEN COALESCE(ps.sold_qty, 0) <= 0 THEN 999999
+               ELSE CAST(${STOCK_EXPR} / (COALESCE(ps.sold_qty, 0) * 1.0 / ?) AS INTEGER)
              END AS days_of_stock
       FROM products p
-      LEFT JOIN sale_items si ON si.product_id = p.id
-      LEFT JOIN sales s ON s.id = si.sale_id AND ${ACTIVE_SALES} AND s.created_at >= ?
+      LEFT JOIN product_sales ps ON ps.product_id = p.id
       WHERE ${SELLABLE_PRODUCT_FILTER}
       GROUP BY p.id
       HAVING stock > 0 AND days_of_stock >= ?
       ORDER BY tied_capital_usd DESC
-    `).all(period, period, cutoff, coverDays);
-    res.json({ items: rows });
+    `).all(cutoff, period, period, coverDays);
+    res.json({ period_days: period, cover_days: coverDays, items: rows });
   });
 
   // -------- Reorder suggestions --------------------------------------------
@@ -316,33 +342,68 @@ export function createInsightsRouter(db: Database.Database) {
     const leadTime = num(req.query.leadTime, 45);
     const safetyDays = num(req.query.safetyDays, 30);
     const period = num(req.query.period, 90);
-    const cutoff = periodCutoff(period);
+    const cutoff7 = periodCutoff(7);
+    const cutoff30 = periodCutoff(30);
+    const cutoff90 = periodCutoff(90);
+    const cutoff = periodCutoff(Math.max(period, 90));
 
     const rows = db.prepare(`
+      WITH product_sales AS (
+        SELECT
+          si.product_id,
+          SUM(CASE WHEN s.created_at >= ? THEN si.quantity ELSE 0 END) AS sold_7d,
+          SUM(CASE WHEN s.created_at >= ? THEN si.quantity ELSE 0 END) AS sold_30d,
+          SUM(CASE WHEN s.created_at >= ? THEN si.quantity ELSE 0 END) AS sold_90d,
+          SUM(CASE WHEN s.created_at >= ? THEN si.quantity ELSE 0 END) AS sold_in_period,
+          MAX(s.created_at) AS last_sale_date
+        FROM sale_items si
+        JOIN sales s ON s.id = si.sale_id
+        WHERE ${ACTIVE_SALES}
+          AND s.created_at >= ?
+        GROUP BY si.product_id
+      )
       SELECT
         p.id, p.sku, p.supplier_code, p.name, p.material, p.product_series,
         p.tube_type_code, p.size, p.form_code,
         p.purchase_price_usd, p.weight_grams,
         ${STOCK_EXPR} AS stock,
         COALESCE(p.min_stock_level, 50) AS min_stock,
-        COALESCE(SUM(si.quantity), 0) AS sold_in_period,
-        COALESCE(SUM(si.quantity), 0) * 1.0 / ? AS avg_daily,
+        COALESCE(ps.sold_7d, 0) AS sold_7d,
+        COALESCE(ps.sold_30d, 0) AS sold_30d,
+        COALESCE(ps.sold_90d, 0) AS sold_90d,
+        COALESCE(ps.sold_in_period, 0) AS sold_in_period,
+        COALESCE(ps.sold_30d, 0) * 1.0 / 30 AS avg_daily_30d,
+        (
+          COALESCE(ps.sold_7d, 0) * 1.0 / 7 * 0.50 +
+          COALESCE(ps.sold_30d, 0) * 1.0 / 30 * 0.30 +
+          COALESCE(ps.sold_90d, 0) * 1.0 / 90 * 0.20
+        ) AS weighted_daily_demand,
         CASE
-          WHEN COALESCE(SUM(si.quantity), 0) <= 0 THEN NULL
-          ELSE CAST(${STOCK_EXPR} / (COALESCE(SUM(si.quantity), 0) * 1.0 / ?) AS INTEGER)
-        END AS days_until_stockout
+          WHEN (
+            COALESCE(ps.sold_7d, 0) * 1.0 / 7 * 0.50 +
+            COALESCE(ps.sold_30d, 0) * 1.0 / 30 * 0.30 +
+            COALESCE(ps.sold_90d, 0) * 1.0 / 90 * 0.20
+          ) <= 0 THEN NULL
+          ELSE CAST(${STOCK_EXPR} / (
+            COALESCE(ps.sold_7d, 0) * 1.0 / 7 * 0.50 +
+            COALESCE(ps.sold_30d, 0) * 1.0 / 30 * 0.30 +
+            COALESCE(ps.sold_90d, 0) * 1.0 / 90 * 0.20
+          ) AS INTEGER)
+        END AS days_until_stockout,
+        ps.last_sale_date
       FROM products p
-      LEFT JOIN sale_items si ON si.product_id = p.id
-      LEFT JOIN sales s ON s.id = si.sale_id AND ${ACTIVE_SALES} AND s.created_at >= ?
+      LEFT JOIN product_sales ps ON ps.product_id = p.id
       WHERE ${SELLABLE_PRODUCT_FILTER}
       GROUP BY p.id
-    `).all(period, period, cutoff) as any[];
+    `).all(cutoff7, cutoff30, cutoff90, cutoff, cutoff) as any[];
 
     const enriched = rows.map((r) => {
       const targetCover = leadTime + safetyDays;
-      const dailyDemand = r.avg_daily || 0;
+      const dailyDemand = r.weighted_daily_demand || 0;
       const targetStock = Math.ceil(dailyDemand * targetCover);
       const recommendedQty = Math.max(0, targetStock - r.stock);
+      const estimatedCostUsd = recommendedQty * (Number(r.purchase_price_usd) || 0);
+      const estimatedWeightKg = recommendedQty * (Number(r.weight_grams) || 0) / 1000;
       let priority: "acil" | "yakında" | "normal" | "gereksiz";
       if (dailyDemand <= 0 && r.stock > 0) priority = "gereksiz";
       else if (r.days_until_stockout !== null && r.days_until_stockout <= leadTime / 2) priority = "acil";
@@ -356,8 +417,11 @@ export function createInsightsRouter(db: Database.Database) {
       if (priority === "normal") reasonParts.push("Stok yeterli");
       return {
         ...r,
+        avg_daily: r.avg_daily_30d,
         target_stock: targetStock,
         recommended_qty: recommendedQty,
+        estimated_cost_usd: estimatedCostUsd,
+        estimated_weight_kg: estimatedWeightKg,
         priority,
         reason: reasonParts.join(" — "),
       };
@@ -381,19 +445,21 @@ export function createInsightsRouter(db: Database.Database) {
       series: "COALESCE(p.product_series, 'Bilinmiyor')",
       tube_type: "COALESCE(p.tube_type_code, 'NA')",
       size: "COALESCE(p.size, p.size_code, 'Bilinmiyor')",
+      model: "COALESCE(NULLIF(TRIM(p.normalized_model), ''), NULLIF(TRIM(p.model), ''), NULLIF(TRIM(p.title), ''), NULLIF(TRIM(p.name), ''), 'Bilinmiyor')",
       form: "COALESCE(p.form_code, 'NA')",
       supplier_code: "COALESCE(p.supplier_code, 'Bilinmiyor')",
     };
     const groupCol = colMap[dimension] || colMap.material;
 
     const metricMap: Record<string, string> = {
-      qty: "COALESCE(SUM(si.quantity), 0)",
-      revenue: "COALESCE(SUM(si.quantity * si.unit_price), 0)",
-      profit: "COALESCE(SUM(si.net_profit), 0)",
+      qty: "COALESCE(SUM(ps.sold_qty), 0)",
+      revenue: "COALESCE(SUM(ps.revenue), 0)",
+      profit: "COALESCE(SUM(ps.profit), 0)",
     };
     const metricExpr = metricMap[metric] || metricMap.qty;
 
     const rows = db.prepare(`
+      ${productSalesCte("AND s.created_at >= ?")}
       SELECT
         ${groupCol} AS bucket,
         COUNT(DISTINCT p.id) AS product_count,
@@ -401,8 +467,7 @@ export function createInsightsRouter(db: Database.Database) {
         SUM(${STOCK_EXPR}) AS stock_units,
         SUM(${STOCK_EXPR} * COALESCE(p.purchase_price_usd, 0)) AS stock_value_usd
       FROM products p
-      LEFT JOIN sale_items si ON si.product_id = p.id
-      LEFT JOIN sales s ON s.id = si.sale_id AND ${ACTIVE_SALES} AND s.created_at >= ?
+      LEFT JOIN product_sales ps ON ps.product_id = p.id
       WHERE ${SELLABLE_PRODUCT_FILTER}
       GROUP BY bucket
       ORDER BY value DESC
@@ -440,15 +505,33 @@ export function createInsightsRouter(db: Database.Database) {
 
   router.get("/components/runway", (req, res) => {
     const period = num(req.query.period, 30);
+    const horizon = num(req.query.horizon, 60);
     const cutoff = periodCutoff(period);
     const rows = db.prepare(`
       SELECT comp.id, comp.sku, comp.name, comp.central_stock,
+             comp.purchase_price_usd,
              COALESCE(consumed.units, 0) AS units_consumed,
              COALESCE(consumed.units, 0) * 1.0 / ? AS daily_consumption,
              CASE
                WHEN COALESCE(consumed.units, 0) <= 0 THEN NULL
                ELSE CAST(comp.central_stock / (COALESCE(consumed.units, 0) * 1.0 / ?) AS INTEGER)
-             END AS days_left
+             END AS days_left,
+             CASE
+               WHEN COALESCE(consumed.units, 0) <= 0 THEN NULL
+               ELSE CAST(comp.central_stock / (COALESCE(consumed.units, 0) * 1.0 / ?) AS INTEGER)
+             END AS component_runway,
+             CAST(COALESCE(consumed.units, 0) * 1.0 / ? * ? AS INTEGER) AS component_forecast,
+             MAX(0, CAST(COALESCE(consumed.units, 0) * 1.0 / ? * ? - comp.central_stock AS INTEGER)) AS component_order_qty,
+             MAX(0, CAST(COALESCE(consumed.units, 0) * 1.0 / ? * ? - comp.central_stock AS INTEGER)) * COALESCE(comp.purchase_price_usd, 0) AS estimated_component_cost_usd,
+             (
+               SELECT COUNT(DISTINCT b2.parent_product_id)
+               FROM product_bom b2
+               JOIN products fp ON fp.id = b2.parent_product_id
+               WHERE b2.component_product_id = comp.id
+                 AND fp.status != 'deleted'
+                 AND COALESCE(fp.exclude_from_analysis, 0) = 0
+                 AND COALESCE(fp.is_sellable, 1) = 1
+             ) AS affected_final_products
       FROM products comp
       LEFT JOIN (
         SELECT b.component_product_id, SUM(b.quantity_per_unit * si.quantity) AS units
@@ -460,8 +543,8 @@ export function createInsightsRouter(db: Database.Database) {
       ) consumed ON consumed.component_product_id = comp.id
       WHERE comp.product_type IN ('component', 'accessory')
       ORDER BY (CASE WHEN COALESCE(consumed.units, 0) > 0 THEN days_left ELSE 999999 END) ASC
-    `).all(period, period, cutoff);
-    res.json({ period_days: period, items: rows });
+    `).all(period, period, period, period, horizon, period, horizon, period, horizon, cutoff);
+    res.json({ period_days: period, horizon_days: horizon, items: rows });
   });
 
   router.get("/components/blocking", (_req, res) => {
@@ -485,7 +568,18 @@ export function createInsightsRouter(db: Database.Database) {
       HAVING available <= 5
       ORDER BY available ASC
     `).all() as any[];
-    res.json({ items: rows.map((r) => ({ ...r, components: JSON.parse(r.components_json) })) });
+    res.json({
+      items: rows.map((r) => {
+        const components = JSON.parse(r.components_json);
+        const bottleneck = components.reduce((min: any, c: any) => (!min || c.possible < min.possible ? c : min), null);
+        return {
+          ...r,
+          components,
+          affected_final_products: 1,
+          bottleneck_component: bottleneck,
+        };
+      }),
+    });
   });
 
   router.get("/components/forecast", (req, res) => {
@@ -497,7 +591,19 @@ export function createInsightsRouter(db: Database.Database) {
              COALESCE(consumed.units, 0) AS recent_consumption,
              COALESCE(consumed.units, 0) * 1.0 / ? AS daily,
              CAST(COALESCE(consumed.units, 0) * 1.0 / ? * ? AS INTEGER) AS forecast_demand,
-             MAX(0, CAST(COALESCE(consumed.units, 0) * 1.0 / ? * ? - comp.central_stock AS INTEGER)) AS need_to_order
+             MAX(0, CAST(COALESCE(consumed.units, 0) * 1.0 / ? * ? - comp.central_stock AS INTEGER)) AS need_to_order,
+             MAX(0, CAST(COALESCE(consumed.units, 0) * 1.0 / ? * ? - comp.central_stock AS INTEGER)) AS component_order_qty,
+             MAX(0, CAST(COALESCE(consumed.units, 0) * 1.0 / ? * ? - comp.central_stock AS INTEGER)) * COALESCE(comp.purchase_price_usd, 0) AS estimated_component_cost_usd,
+             CAST(COALESCE(consumed.units, 0) * 1.0 / ? * ? AS INTEGER) AS component_forecast,
+             (
+               SELECT COUNT(DISTINCT b2.parent_product_id)
+               FROM product_bom b2
+               JOIN products fp ON fp.id = b2.parent_product_id
+               WHERE b2.component_product_id = comp.id
+                 AND fp.status != 'deleted'
+                 AND COALESCE(fp.exclude_from_analysis, 0) = 0
+                 AND COALESCE(fp.is_sellable, 1) = 1
+             ) AS affected_final_products
       FROM products comp
       LEFT JOIN (
         SELECT b.component_product_id, SUM(b.quantity_per_unit * si.quantity) AS units
@@ -509,7 +615,7 @@ export function createInsightsRouter(db: Database.Database) {
       ) consumed ON consumed.component_product_id = comp.id
       WHERE comp.product_type IN ('component', 'accessory')
       ORDER BY need_to_order DESC
-    `).all(period, period, horizon, period, horizon, cutoff);
+    `).all(period, period, horizon, period, horizon, period, horizon, period, horizon, period, horizon, cutoff);
     res.json({ horizon_days: horizon, period_days: period, items: rows });
   });
 
@@ -523,9 +629,11 @@ export function createInsightsRouter(db: Database.Database) {
     res.json({
       materials: distinct("p.material"),
       series: distinct("p.product_series"),
+      models: distinct("p.model"),
       tube_types: distinct("p.tube_type_code"),
       sizes: distinct("p.size"),
       forms: distinct("p.form_code"),
+      supplier_codes: distinct("p.supplier_code"),
     });
   });
 

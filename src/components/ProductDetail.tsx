@@ -13,6 +13,8 @@ import {
   ExternalLink,
   History,
   Info,
+  AlertTriangle,
+  Layers,
 } from 'lucide-react';
 import { api, PLATFORMS } from '../lib/api';
 import { useCurrency } from '../CurrencyContext';
@@ -23,6 +25,45 @@ import { useAuth } from '../App';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
+}
+
+const productKindStyles: Record<string, string> = {
+  assembly: "bg-blue-50 text-blue-700 border-blue-100",
+  component: "bg-amber-50 text-amber-700 border-amber-100",
+  accessory: "bg-violet-50 text-violet-700 border-violet-100",
+  normal: "bg-slate-50 text-slate-600 border-slate-200",
+};
+
+function getProductKind(product: Product) {
+  if (product.stock_source === 'bom' || product.product_type === 'assembly') return { key: 'assembly', label: 'Assembly' };
+  if (product.product_type === 'component') return { key: 'component', label: 'Component' };
+  if (product.product_type === 'accessory') return { key: 'accessory', label: 'Accessory' };
+  return { key: 'normal', label: 'Normal ürün' };
+}
+
+function ProductKindBadge({ product }: { product: Product }) {
+  const kind = getProductKind(product);
+  return (
+    <span className={cn(
+      "inline-flex items-center rounded-full border px-3 py-1 text-[10px] font-black uppercase tracking-widest",
+      productKindStyles[kind.key] || productKindStyles.normal
+    )}>
+      {kind.label}
+    </span>
+  );
+}
+
+function getBottleneckComponent(product: Product) {
+  return product.bom_components?.reduce((min, component) => {
+    const current = Number(component.available_for_parent ?? 0);
+    const minValue = Number(min?.available_for_parent ?? Number.POSITIVE_INFINITY);
+    return current < minValue ? component : min;
+  }, product.bom_components?.[0]);
+}
+
+function detailFromReason(reason: string | undefined, label: string) {
+  const match = String(reason || '').match(new RegExp(`${label}:\\s*([^|]+)`));
+  return match?.[1]?.trim() || '';
 }
 
 interface ProductDetailProps {
@@ -99,6 +140,7 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
   const profit = product.sale_price - bufferedCostTRY;
   const centralStock = product.total_stock ?? product.central_stock ?? 0;
   const seriesLabel = product.product_series?.trim();
+  const bottleneckComponent = getBottleneckComponent(product);
 
   return (
     <div className="space-y-8 animate-in slide-in-from-bottom-4 duration-500">
@@ -214,6 +256,7 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
                       SERİ: <span className="ml-1.5">{seriesLabel}</span>
                     </div>
                   )}
+                  <ProductKindBadge product={product} />
                 </div>
               </div>
 
@@ -240,29 +283,95 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
               </div>
 
               {product.stock_source === 'bom' && product.bom_components && product.bom_components.length > 0 && (
-                <div className="rounded-2xl border border-blue-100 bg-blue-50/60 p-5 space-y-3">
+                <div className="rounded-2xl border border-blue-100 bg-blue-50/60 p-5 space-y-4">
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <h3 className="text-xs font-black text-blue-700 uppercase tracking-widest">Demonte Ürün Reçetesi</h3>
+                      <h3 className="text-xs font-black text-blue-700 uppercase tracking-widest flex items-center gap-2">
+                        <Layers className="w-4 h-4" /> BOM Reçetesi
+                      </h3>
                       <p className="text-xs text-blue-700/80 mt-1">Satışta final ürün görünür; stok H parçalarından otomatik düşer.</p>
                     </div>
-                    <span className="text-[11px] font-black text-blue-700 bg-white border border-blue-100 px-3 py-1 rounded-full">
-                      Üretilebilir: {centralStock} Adet
-                    </span>
+                    <div className="flex flex-wrap justify-end gap-2 text-[11px] font-black">
+                      <span className="text-blue-700 bg-white border border-blue-100 px-3 py-1 rounded-full">Üretilebilir: {centralStock}</span>
+                      <span className="text-slate-700 bg-white border border-slate-200 px-3 py-1 rounded-full">Fiziksel final: {product.physical_stock ?? product.central_stock ?? 0}</span>
+                      <span className="text-amber-700 bg-amber-50 border border-amber-100 px-3 py-1 rounded-full">Darboğaz: {bottleneckComponent?.sku || '—'}</span>
+                    </div>
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                    {product.bom_components.map((component) => (
-                      <div key={component.component_product_id} className="flex items-center justify-between gap-3 rounded-xl bg-white border border-blue-100 px-3 py-2">
-                        <div className="min-w-0">
-                          <p className="text-xs font-bold text-text-main truncate">{component.component_role || component.sku}</p>
-                          <p className="text-[10px] text-text-muted font-mono truncate">{component.sku}</p>
-                        </div>
-                        <div className="text-right shrink-0">
-                          <p className="text-xs font-black text-blue-700">x{component.quantity_per_unit}</p>
-                          <p className="text-[10px] text-text-muted">Stok {component.central_stock ?? 0}</p>
-                        </div>
-                      </div>
-                    ))}
+                  <div className="overflow-x-auto rounded-xl border border-blue-100 bg-white">
+                    <table className="w-full text-sm min-w-[720px]">
+                      <thead className="bg-blue-50/70 text-[10px] uppercase tracking-widest text-blue-700 font-black">
+                        <tr>
+                          <th className="px-3 py-3 text-left">Component SKU</th>
+                          <th className="px-3 py-3 text-left">Component Adı</th>
+                          <th className="px-3 py-3 text-right">1 Ürün İçin</th>
+                          <th className="px-3 py-3 text-right">Mevcut Stok</th>
+                          <th className="px-3 py-3 text-right">Üretilebilir</th>
+                          <th className="px-3 py-3 text-center">Darboğaz</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-blue-50">
+                        {product.bom_components.map((component) => {
+                          const isBottleneck = component.component_product_id === bottleneckComponent?.component_product_id;
+                          return (
+                            <tr key={component.component_product_id}>
+                              <td className="px-3 py-3 font-mono text-xs font-bold text-slate-700">{component.sku}</td>
+                              <td className="px-3 py-3 text-xs font-bold text-text-main">{component.name || component.title || component.component_role || '—'}</td>
+                              <td className="px-3 py-3 text-right font-black text-blue-700">x{component.quantity_per_unit}</td>
+                              <td className="px-3 py-3 text-right font-bold text-slate-700">{component.central_stock ?? 0}</td>
+                              <td className="px-3 py-3 text-right font-bold text-slate-700">{component.available_for_parent ?? 0}</td>
+                              <td className="px-3 py-3 text-center">
+                                {isBottleneck ? (
+                                  <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 border border-amber-100 px-2 py-1 text-[10px] font-black text-amber-700">
+                                    <AlertTriangle className="w-3 h-3" /> Darboğaz
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] font-bold text-slate-400">—</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {product.bom_usage && product.bom_usage.length > 0 && (
+                <div className="rounded-2xl border border-amber-100 bg-amber-50/60 p-5 space-y-4">
+                  <div>
+                    <h3 className="text-xs font-black text-amber-700 uppercase tracking-widest flex items-center gap-2">
+                      <Layers className="w-4 h-4" /> Bu Component Hangi Final Ürünlerde Kullanılıyor?
+                    </h3>
+                    <p className="text-xs text-amber-700/80 mt-1">Bu parça satılan final ürünlerin reçetesinde kullanılıyorsa burada görünür.</p>
+                  </div>
+                  <div className="overflow-x-auto rounded-xl border border-amber-100 bg-white">
+                    <table className="w-full text-sm min-w-[680px]">
+                      <thead className="bg-amber-50 text-[10px] uppercase tracking-widest text-amber-700 font-black">
+                        <tr>
+                          <th className="px-3 py-3 text-left">Final SKU</th>
+                          <th className="px-3 py-3 text-left">Final Ürün</th>
+                          <th className="px-3 py-3 text-right">1 Ürün İçin</th>
+                          <th className="px-3 py-3 text-right">Üretilebilir</th>
+                          <th className="px-3 py-3 text-left">Darboğaz</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-amber-50">
+                        {product.bom_usage.map((usage) => (
+                          <tr key={usage.parent_product_id}>
+                            <td className="px-3 py-3 font-mono text-xs font-bold text-slate-700">{usage.sku}</td>
+                            <td className="px-3 py-3 text-xs font-bold text-text-main">{usage.name || usage.title}</td>
+                            <td className="px-3 py-3 text-right font-black text-amber-700">x{usage.quantity_per_unit}</td>
+                            <td className="px-3 py-3 text-right font-bold text-slate-700">{usage.available_stock ?? 0}</td>
+                            <td className="px-3 py-3 text-xs text-slate-600">
+                              {usage.bottleneck_component?.sku
+                                ? `${usage.bottleneck_component.sku} (${usage.bottleneck_component.available_for_parent ?? 0} adet)`
+                                : '—'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
               )}
@@ -289,23 +398,43 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
                 <h3 className="font-bold text-text-main text-sm">Stok Hareket Geçmişi</h3>
               </div>
               <div className="divide-y divide-border-color max-h-[300px] overflow-y-auto">
-                 {stockLogs.map((log) => (
-                   <div key={log.id} className="flex items-center justify-between p-4 hover:bg-bg-main transition-colors">
-                      <div className="flex items-center space-x-4">
-                        <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center", log.change_amount > 0 ? "bg-green-50 text-success border border-green-100" : "bg-red-50 text-danger border border-red-100")}>
-                           {log.change_amount > 0 ? <Plus className="w-4 h-4" /> : <Minus className="w-4 h-4" />}
+                 {stockLogs.map((log) => {
+                   const isBomMovement = log.type === 'BOM_CONSUMPTION' || String(log.reason || '').includes('BOM Tüketimi');
+                   const finalSku = detailFromReason(log.reason, 'Final SKU');
+                   const componentSku = detailFromReason(log.reason, 'Component SKU') || product.sku;
+                   const orderRef = detailFromReason(log.reason, 'Sipariş');
+                   return (
+                     <div key={log.id} className="flex items-center justify-between gap-4 p-4 hover:bg-bg-main transition-colors">
+                        <div className="flex items-center space-x-4 min-w-0">
+                          <div className={cn(
+                            "w-8 h-8 rounded-lg flex items-center justify-center shrink-0",
+                            isBomMovement ? "bg-blue-50 text-blue-700 border border-blue-100" : log.change_amount > 0 ? "bg-green-50 text-success border border-green-100" : "bg-red-50 text-danger border border-red-100"
+                          )}>
+                             {log.change_amount > 0 ? <Plus className="w-4 h-4" /> : <Minus className="w-4 h-4" />}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-sm font-bold text-text-main">
+                              {isBomMovement ? 'BOM Tüketimi' : log.platform_name}:
+                              <span className={log.change_amount > 0 ? 'text-success ml-1' : 'text-danger ml-1'}>{log.change_amount > 0 ? '+' : ''}{log.change_amount} Adet</span>
+                            </p>
+                            {isBomMovement ? (
+                              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] font-black uppercase tracking-tight">
+                                <span className="rounded bg-blue-50 border border-blue-100 px-2 py-0.5 text-blue-700">Final: {finalSku || '—'}</span>
+                                <span className="rounded bg-slate-50 border border-slate-200 px-2 py-0.5 text-slate-600">Component: {componentSku}</span>
+                                <span className="rounded bg-amber-50 border border-amber-100 px-2 py-0.5 text-amber-700">Sipariş: {orderRef || '—'}</span>
+                              </div>
+                            ) : (
+                              <p className="text-[10px] text-text-muted font-bold uppercase tracking-tight truncate">{log.reason}</p>
+                            )}
+                          </div>
                         </div>
-                        <div>
-                          <p className="text-sm font-bold text-text-main">{log.platform_name}: <span className={log.change_amount > 0 ? 'text-success' : 'text-danger'}>{log.change_amount > 0 ? '+' : ''}{log.change_amount} Adet</span></p>
-                          <p className="text-[10px] text-text-muted font-bold uppercase tracking-tight">{log.reason}</p>
+                        <div className="text-right shrink-0">
+                          <p className="text-[10px] uppercase font-bold text-text-muted tracking-widest">{new Date(log.created_at).toLocaleDateString('tr-TR')}</p>
+                          <p className="text-[10px] uppercase font-bold text-text-muted tracking-widest opacity-60">{new Date(log.created_at).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}</p>
                         </div>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-[10px] uppercase font-bold text-text-muted tracking-widest">{new Date(log.created_at).toLocaleDateString('tr-TR')}</p>
-                        <p className="text-[10px] uppercase font-bold text-text-muted tracking-widest opacity-60">{new Date(log.created_at).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}</p>
-                      </div>
-                   </div>
-                 ))}
+                     </div>
+                   );
+                 })}
                  {stockLogs.length === 0 && <div className="py-12 text-center italic text-text-muted text-sm px-6">Henüz bir hareket kaydı yok.</div>}
               </div>
            </section>
