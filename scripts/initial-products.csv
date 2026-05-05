@@ -1,0 +1,108 @@
+Sira no,SKU,Urun kodu,Malzeme,Urun adi,ölçü,Stok sayisi,Fiyat,Agirlik (gr)
+1,AL-ALY-RD-1IN-ELB,AL-125-B,Alüminyum,Aluminum Alloy Round Tube Clamp Elbow,1 inch,300,0.79,127.3
+2,AL-ALY-RD-1IN-BAS,AL-131-B,Alüminyum,Aluminum Alloy Round Tube Clamp Base,1 inch,160,1.26,245
+3,AL-ALY-RD-1IN-TEE,AL-101-B,Alüminyum,Aluminum Alloy Round Tube Clamp Tee,1 inch,200,0.79,158
+4,AL-ALY-RD-1IN-W3,AL-128-B,Alüminyum,Aluminum Alloy Round Tube Clamp 3 Way,1 inch,200,0.88,155
+5,AL-ALY-RD-1IN-W4,AL-116-B,Alüminyum,Aluminum Alloy Round Tube Clamp 4 Way,1 inch,200,0.88,165
+6,AL-ALY-RD-1IN-W5,AL-176-B,Alüminyum,Aluminum Alloy Round Tube Clamp 5 Way,1 inch,120,1.23,210
+7,AL-ALY-RD-1IN-BW4,Big-4 way-B,Alüminyum,Aluminum Alloy Round Tube Clamp Big 4 Way,1 inch,200,1.23,215
+8,AL-ALY-RD-1IN-LTEE,AL-104-B,Alüminyum,Aluminum Alloy Round Tube Clamp Long Tee,1 inch,200,0.9,165
+9,AL-ALY-RD-1IN-CRS,AL-119-B,Alüminyum,Aluminum Alloy Round Tube Clamp Cross,1 inch,200,0.88,155
+10,AL-ALY-RD-1IN-CPL,AL-149-B,Alüminyum,Aluminum Alloy Round Tube Clamp Coupling,1 inch,75,0.88,123.3
+11,AL-ALY-RD-1IN-CPH,AL-149M8-B,Alüminyum,Aluminum Alloy Round Tube Clamp Coupling With Screw Hole,1 inch,225,1.05,143.3
+12,AL-ALY-RD-1IN-T45,AL-129-B,Alüminyum,Aluminum Alloy Round Tube Clamp 45° Tee,1 inch,300,0.8,145
+13,AL-ALY-SQ-20-ELB,AL-125F-20*20,Alüminyum,Aluminum Alloy Square Tube Clamp Elbow,20x20 mm,250,0.35,55
+14,AL-ALY-SQ-20-BAS,AL-131F-20*20,Alüminyum,Aluminum Alloy Square Tube Clamp Base,20x20 mm,200,0.71,105
+15,AL-ALY-SQ-20-TEE,AL-101F-20*20,Alüminyum,Aluminum Alloy Square Tube Clamp Tee,20x20 mm,200,0.26,45
+16,AL-ALY-SQ-20-W3,AL-128F-20*20,Alüminyum,Aluminum Alloy Square Tube Clamp 3 Way,20x20 mm,250,0.44,59
+17,AL-ALY-SQ-20-W4,AL-116F-20*20,Alüminyum,Aluminum Alloy Square Tube Clamp 4 Way,20x20 mm,250,0.44,58
+18,AL-ALY-SQ-20-W5,AL-176F-20*20,Alüminyum,Aluminum Alloy Square Tube Clamp 5 Way,20x20 mm,100,0.53,70
+19,AL-ALY-SQ-20-BW4,AL-BIG-4WAY-20*20,Alüminyum,Aluminum Alloy Square Tube Clamp Big 4 Way 20*20,20x20 mm,200,0.53,70
+20,AL-ALY-SQ-20-LTEE,AL-104F-20*20,Alüminyum,Aluminum Alloy Square Tube Clamp Long Tee,20x20 mm,250,0.44,60
+21,AL-ALY-SQ-20-CRS,AL-119F-20*20,Alüminyum,Aluminum Alloy Square Tube Clamp Cross,20x20 mm,250,0.44,58
+22,AL-ALY-SQ-20-CPL,AL-149F-20*20,Alüminyum,Aluminum Alloy Square Tube Clamp Coupling,20x20 mm,175,0.35,45.7
+23,AL-ALY-SQ-20-CPH,AL-149-M8F,Alüminyum,Aluminum Alloy Square Tube Clamp Coupling With Screw Hole,20x20 mm,350,0.44,55.7
+24,AL-ALY-SQ-20-T45,AL-129F-20*20,Alüminyum,Aluminum Alloy Square Tube Clamp 45° Tee,20x20 mm,250,0.35,50
+25,AL-ALY-SQ-30-ELB,AL-125F-30*30,Alüminyum,Aluminum Alloy Square Tube Clamp Elbow,30x30 mm,180,0.83,131.7
+26,AL-ALY-SQ-30-BAS,AL-131F-30*30,Alüminyum,Aluminum Alloy Square Tube Clamp Base,30x30 mm,200,1.05,170
+27,AL-ALY-SQ-30-TEE,AL-101F-30*30,Alüminyum,Aluminum Alloy Square Tube Clamp Tee,30x30 mm,240,0.79,116.7
+28,AL-ALY-SQ-30-W3,AL-128F-30*30,Alüminyum,Aluminum Alloy Square Tube Clamp 3 Way,30x30 mm,240,0.88,152.7
+29,AL-ALY-SQ-30-W4,AL-116F-30*30,Alüminyum,Aluminum Alloy Square Tube Clamp 4 Way,30x30 mm,240,0.84,146.7
+30,AL-ALY-SQ-30-W5,AL-176F-30*30,Alüminyum,Aluminum Alloy Square Tube Clamp 5 Way,30x30 mm,80,1.14,215
+31,AL-ALY-SQ-30-BW4,AL-BIG-4WAY-30*30,Alüminyum,Aluminum Alloy Square Tube Clamp Big 4 Way 30*30,30x30 mm,200,1.14,162
+32,AL-ALY-SQ-30-LTEE,AL-104F-30*30,Alüminyum,Aluminum Alloy Square Tube Clamp Long Tee,30x30 mm,200,0.91,140
+33,AL-ALY-SQ-30-CRS,AL-119F-30*30,Alüminyum,Aluminum Alloy Square Tube Clamp Cross,30x30 mm,200,0.88,130
+34,AL-ALY-SQ-30-CPL,AL-149F-30*30,Alüminyum,Aluminum Alloy Square Tube Clamp Coupling,30x30 mm,75,0.62,98.3
+35,AL-ALY-SQ-30-CPH,AL-149F-M8,Alüminyum,Aluminum Alloy Square Tube Clamp Coupling With Screw Hole 30*30,30x30 mm,150,0.8,123.3
+36,AL-ALY-SQ-30-T45,AL-129F-30*30,Alüminyum,Aluminum Alloy Square Tube Clamp 45° Tee,30x30 mm,240,0.88,141.7
+37,CI-OYA-SQ-25-TEE,F-101,Demir Döküm,Cast Iron Square Tube Clamp Tee,25x25 mm,100,0.26,203
+38,CI-OYA-SQ-25-W4,F-116,Demir Döküm,Cast Iron Square Tube Clamp 4 Way,25x25 mm,120,0.29,334.3
+39,CI-OYA-SQ-25-W5,F-176,Demir Döküm,Cast Iron Square Tube Clamp 5 Way,25x25 mm,100,0.45,469
+40,CI-OYA-SQ-25-CRS,F-119,Demir Döküm,Cast Iron Square Tube Clamp Cross,25x25 mm,120,0.48,324.3
+41,CI-OYA-SQ-25-W6,F-158,Demir Döküm,Cast Iron Square Tube Clamp 6 Way,25x25 mm,105,0.44,624.7
+42,CI-OYA-SQ-25-ELB,F-125,Demir Döküm,Cast Iron Square Tube Clamp Elbow,25x25 mm,100,0.47,211
+43,CI-OYA-SQ-25-W3,F-128,Demir Döküm,Cast Iron Square Tube Clamp 3 Way,25x25 mm,120,0.63,340.3
+44,CI-OYA-SQ-25-BW4,F-177,Demir Döküm,Cast Iron Square Tube Clamp Big 4 Way,25x25 mm,100,0.66,476
+45,CI-OYA-SQ-25-LTEE,F-104,Demir Döküm,Cast Iron Square Tube Clamp Long Tee,25x25 mm,120,0.83,333.3
+46,CI-OYA-RD-25-TEE,H-101,Demir Döküm,Cast Iron Round Tube Clamp Tee,25 mm ,100,0.29,220
+47,CI-OYA-RD-25-W4,H-116,Demir Döküm,Cast Iron Round Tube Clamp 4 Way,25 mm ,120,0.31,423.3
+48,CI-OYA-RD-25-W5,H-176,Demir Döküm,Cast Iron Round Tube Clamp 5 Way,25 mm ,100,0.59,620
+49,CI-OYA-RD-25-CRS,H-119,Demir Döküm,Cast Iron Round Tube Clamp Cross,25 mm,120,0.6,448.3
+50,CI-OYA-RD-25-W6,H-158,Demir Döküm,Cast Iron Round Tube Clamp 6 Way,25 mm,105,0.6,716.7
+51,CI-OYA-RD-25-ELB,H-125,Demir Döküm,Cast Iron Round Tube Clamp Elbow,25 mm,100,0.62,230
+52,CI-OYA-RD-25-W3,H-128,Demir Döküm,Cast Iron Round Tube Clamp 3 Way,25 mm,120,0.84,433.3
+53,CI-OYA-RD-25-BW4,H-177,Demir Döküm,Cast Iron Round Tube Clamp Big 4 Way,25 mm,100,0.87,630
+54,CI-OYA-RD-25-LTEE,H-104,Demir Döküm,Cast Iron Round Tube Clamp Long Tee,25 mm,120,0.98,463.3
+55,CS-STD-RD-25-H01,CS25-Round H1,Karbon Çelik,Carbon Steel Round Tube Clamp,25 mm,400,0.05,46.5
+56,CS-STD-RD-25-H02,CS25-Round H2,Karbon Çelik,Carbon Steel Round Tube Clamp,25 mm,1400,0.08,90
+57,CS-STD-RD-25-H03,CS25-Round H3,Karbon Çelik,Carbon Steel Round Tube Clamp,25 mm,200,0.08,68
+58,CS-STD-RD-25-H04,CS25-Round H4,Karbon Çelik,Carbon Steel Round Tube Clamp,25 mm,750,0.1,74
+59,CS-STD-RD-25-H05,CS25-Round H5,Karbon Çelik,Carbon Steel Round Tube Clamp,25 mm,400,0.12,52.5
+60,CS-STD-RD-25-H06,CS25-Round H6,Karbon Çelik,Carbon Steel Round Tube Clamp,25 mm,400,0.12,47.5
+61,CS-STD-RD-25-H16,CS25-Round H16,Karbon Çelik,Carbon Steel Round Tube Clamp,25 mm,250,0.13,77
+62,CS-STD-RD-25-SWA,CS25-Round-Swivel-A,Karbon Çelik,Carbon Steel Round Tube Clamp Swivel A,25 mm,500,0.11,47
+63,CS-STD-RD-25-SWB,CS25-Round-Swivel-B,Karbon Çelik,Carbon Steel Round Tube Clamp Swivel B,25 mm,500,0.05,47
+64,CS-STD-RD-25-H13,CS25-Round H13,Karbon Çelik,Carbon Steel Round Tube Clamp,25 mm ,200,0.05,48
+65,CS-STD-RD-25-SCR625,CS25-Round-Screw-6*25,Karbon Çelik,Carbon Steel Round Tube Clamp,25 mm ,4600,0.02,10.2
+66,CS-STD-SQ-25-H01,CS25-Square H1,Karbon Çelik,Carbon Steel Square Tube Clamp,25x25 mm,300,0.11,63.3
+67,CS-STD-SQ-25-H02,CS25-Square H2,Karbon Çelik,Carbon Steel Square Tube Clamp,25x25 mm,1400,0.17,105
+68,CS-STD-SQ-25-H03,CS25-Square H3,Karbon Çelik,Carbon Steel Square Tube Clamp,25x25 mm,250,0.18,118
+69,CS-STD-SQ-25-H04,CS25-Square H4,Karbon Çelik,Carbon Steel Square Tube Clamp,25x25 mm,600,0.2,105
+70,CS-STD-SQ-25-SCR628,CS25-Square,Karbon Çelik,Carbon Steel Square Tube Clamp Screw 6*28,25x25 mm,2450,0.01,10.2
+71,CS-DRL-SQ-40-H01,CS40-Square H1,Karbon Çelik,Carbon Steel Square Tube Clamp,40x40 mm,500,0.15,75
+72,CS-DRL-SQ-40-H02,CS40-Square H2,Karbon Çelik,Carbon Steel Square Tube Clamp,40x40 mm,1250,0.2,82
+73,CS-DRL-SQ-40-H03,CS40-Square H3,Karbon Çelik,Carbon Steel Square Tube Clamp,40x40 mm,240,0.57,310
+74,CS-DRL-SQ-40-H04,CS40-Square H4,Karbon Çelik,Carbon Steel Square Tube Clamp,40x40 mm,500,0.35,153
+75,CS-DRL-SQ-40-SCR855,CS40-Square,Karbon Çelik,Carbon Steel Square Tube Clamp Screw 8*55,40x40 mm,2250,0.01,27.4
+76,PPR-STD-RD-34IN-ELB,PPR-125,PPR,PPR Round Tube Clamp Elbow,3/4 inch,500,0.17,64
+77,PPR-STD-RD-34IN-W3,PPR-128,PPR,PPR Round Tube Clamp 3 Way,3/4 inch,600,0.25,65
+78,PPR-STD-RD-34IN-BAS,PPR-131,PPR,PPR Round Tube Clamp Base,3/4 inch,500,0.25,74
+79,PPR-STD-RD-34IN-W4,PPR-116,PPR,PPR Round Tube Clamp 4 Way,3/4 inch,400,0.25,65
+80,PPR-STD-RD-34IN-CRS,PPR-119,PPR,PPR Round Tube Clamp Cross,3/4 inch,500,0.25,64
+81,PPR-STD-RD-34IN-TEE,PPR-101,PPR,PPR Round Tube Clamp Tee,3/4 inch,500,0.17,64
+82,PPR-STD-RD-34IN-LTEE,PPR-104,PPR,PPR Round Tube Clamp Long Tee,3/4 inch,500,0.25,64
+83,PPR-STD-RD-34IN-W5,PPR-176,PPR,PPR Round Tube Clamp 5 Way,3/4 inch,300,0.33,96.7
+84,PPR-STD-RD-34IN-BW4,PPR-Big,PPR,PPR Round Tube Clamp Big 4 Way,3/4 inch,500,0.25,96
+85,CI-PRM-SQ-40-TEE,A101F (40*40),Demir Döküm,Cast Iron Square Tube Clamp Tee,40x40 mm,6,1.38,706.7
+86,CI-PRM-SQ-40-BAS,A131F (40*40),Demir Döküm,Cast Iron Square Tube Clamp Base,40x40 mm,6,2.76,916.7
+87,CI-PRM-SQ-40-RFE,A185F (40*40),Demir Döküm,Cast Iron Square Tube Clamp Roof Eaves,40x40 mm,6,4.45,1406.7
+88,CI-PRM-SQ-40-RFR,A191F (40*40),Demir Döküm,Cast Iron Square Tube Clamp Roof Ridge,40x40 mm,6,4.45,1366.7
+89,CI-PRM-SQ-40-CRS,A119F (40*40),Demir Döküm,Cast Iron Square Tube Clamp Cross,40x40 mm,6,1.92,746.7
+90,CI-PRM-SQ-40-W5,A176F (40*40),Demir Döküm,Cast Iron Square Tube Clamp 5 Way,40x40 mm,6,2.52,1130
+91,CI-PRM-SQ-40-LTEE,A104F (40*40),Demir Döküm,Cast Iron Square Tube Clamp Long Tee,40x40 mm,6,2.54,1083.3
+92,CI-PRM-SQ-40-T45,A129F (40*40),Demir Döküm,Cast Iron Square Tube Clamp 45° Tee,40x40 mm,6,2.86,1116.7
+93,CI-PRM-SQ-40-CPH,A149MF (40*40),Demir Döküm,Cast Iron Square Tube Clamp Coupling With Screw Hole,40x40 mm,6,2,900
+94,CI-PRM-SQ-40-ELB,A125F (40*40),Demir Döküm,Cast Iron Square Tube Clamp Elbow,40x40 mm,6,2.07,950
+95,CI-PRM-RD-60-TEE,A101-E60,Demir Döküm,Cast Iron Round Tube Clamp Tee,60 mm,6,2.3,1016.7
+96,CI-PRM-RD-60-W4,A116-E60,Demir Döküm,Cast Iron Round Tube Clamp 4 Way,60 mm,6,3.45,1333.3
+97,CI-PRM-RD-60-CPL,A149-E60,Demir Döküm,Cast Iron Round Tube Clamp Coupling,60 mm,6,2.08,1041.7
+98,CI-PRM-RD-60-W5,A176-E60,Demir Döküm,Cast Iron Round Tube Clamp 5 Way,60 mm,6,4.42,1600
+99,CI-PRM-RD-60-STSW,A148-E60,Demir Döküm,Cast Iron Round Tube Clamp Short Tee Swivel,60 mm,6,2.79,1083.3
+100,CI-PRM-RD-60-CRS,A119-E60,Demir Döküm,Cast Iron Round Tube Clamp Cross,60 mm,6,3.5,1313.3
+101,CI-PRM-RD-60-LTEE,A104-E60,Demir Döküm,Cast Iron Round Tube Clamp Long Tee,60 mm,6,4.21,1675
+102,CI-PRM-RD-60-BAS,A131-E60,Demir Döküm,Cast Iron Round Tube Clamp Base,60 mm,6,3,1150
+103,CI-PRM-RD-60-M173,173M-E60,Demir Döküm,Cast Iron Round Tube Clamp,60 mm,6,1.42,631.7
+104,CI-PRM-RD-34IN-RFE,A185-D48,Demir Döküm,Cast Iron Round Tube Clamp,3/4 inch,6,3.5,1456.7
+105,CI-PRM-RD-34IN-RFR,A191-D48,Demir Döküm,Cast Iron Round Tube Clamp,3/4 inch,6,2.79,1300
+106,CI-PRM-RD-34IN-M173,A173-D48,Demir Döküm,Cast Iron Round Tube Clamp,3/4 inch,6,1.91,508.3
+107,CI-PRM-RD-34IN-W6,A158-D48,Demir Döküm,Cast Iron Round Tube Clamp,3/4 inch,6,4.61,1400

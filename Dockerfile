@@ -44,14 +44,14 @@ RUN npm prune --omit=dev --ignore-scripts
 RUN mkdir -p /data /app/uploads /backups
 
 ENV NODE_ENV=production
-ENV PORT=3000
+ENV PORT=3010
 ENV DB_PATH=/data/dsdst_panel.db
 ENV BACKUP_DIR=/backups
 
-EXPOSE 3000
+EXPOSE 3010
 
 # /api/public/health requires no auth and always responds with 200.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD wget -qO- http://localhost:3000/api/public/health || exit 1
+  CMD wget -qO- http://localhost:3010/api/public/health || exit 1
 
 CMD ["npx", "tsx", "server.ts"]

@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "rebuild-db": "tsx scripts/rebuildDatabase.ts"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",

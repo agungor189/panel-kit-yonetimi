@@ -1210,6 +1210,33 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 35,
+    name: "add_sku_taxonomy_columns",
+    up(db) {
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(products)").all() as { name: string }[]).map((c) => c.name),
+      );
+      const add = (name: string, def: string) => {
+        if (!columns.has(name)) db.exec(`ALTER TABLE products ADD COLUMN ${def}`);
+      };
+
+      add("supplier_code", "supplier_code TEXT");
+      add("product_series", "product_series TEXT");
+      add("tube_type_code", "tube_type_code TEXT");
+      add("size_code", "size_code TEXT");
+      add("form_code", "form_code TEXT");
+      add("weight_grams", "weight_grams REAL DEFAULT 0");
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_products_series       ON products(product_series);
+        CREATE INDEX IF NOT EXISTS idx_products_form_code    ON products(form_code);
+        CREATE INDEX IF NOT EXISTS idx_products_tube_type    ON products(tube_type_code);
+        CREATE INDEX IF NOT EXISTS idx_products_size_code    ON products(size_code);
+        CREATE INDEX IF NOT EXISTS idx_products_supplier_code ON products(supplier_code);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

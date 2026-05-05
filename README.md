@@ -33,7 +33,7 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 docker compose up -d
 ```
 
-Uygulama `http://localhost:3000` adresinde açılır.
+Uygulama `http://localhost:3010` adresinde açılır.
 Veriler varsayılan olarak `panel_data` (SQLite) ve `panel_uploads` (görseller) isimli Docker volume'larında kalıcı olarak saklanır. Backup arşivleri `./backups` klasörüne yazılır.
 
 Verileri doğrudan host klasörlerinde tutmak için `.env` içine şunları ekleyebilirsin:
@@ -58,7 +58,7 @@ docker compose up -d --build
 
 ```bash
 npm install
-npm run dev        # Vite + Express birlikte localhost:3000
+npm run dev        # Vite + Express birlikte localhost:3010
 ```
 
 ---
