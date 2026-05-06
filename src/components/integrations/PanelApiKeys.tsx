@@ -7,8 +7,10 @@ import toast, { Toaster } from 'react-hot-toast';
 
 const AVAILABLE_PERMISSIONS = [
   'products:read', 'products:write', 'stock:read', 'stock:write',
-  'orders:read', 'orders:write', 'sales:read', 'expenses:read',
-  'dashboard:read', 'movements:read', 'integrations:read'
+  'orders:read', 'orders:write', 'sales:read',
+  'expenses:read', 'expenses:write',
+  'dashboard:read', 'movements:read', 'integrations:read',
+  'assistant:read'
 ];
 
 export default function PanelApiKeys() {

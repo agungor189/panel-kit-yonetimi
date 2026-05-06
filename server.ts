@@ -5554,6 +5554,252 @@ async function startServer() {
     });
   });
 
+  // --- PUBLIC EXPENSES (Telegram bot / asistan akışı) ---
+
+  app.post("/api/public/expenses", publicApiAuth("expenses:write"), (req, res) => {
+    const {
+      date, category, amount, currency, supplier, note, title,
+      payment_method, invoice_number, cash_account_id,
+    } = req.body || {};
+
+    try {
+      const expenseAmount = Number(amount);
+      if (!Number.isFinite(expenseAmount) || expenseAmount <= 0) {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_AMOUNT', message: "Tutar 0'dan büyük olmalıdır." } });
+      }
+      const expenseCurrency = (cleanText(currency) || 'TRY').toUpperCase();
+      const activeRate = getActiveExchangeRate();
+      if (!activeRate || activeRate <= 0) {
+        return res.status(400).json({ success: false, error: { code: 'NO_RATE', message: 'Döviz kuru alınamadı.' } });
+      }
+
+      let accountId = cleanText(cash_account_id);
+      if (!accountId) {
+        const account = db.prepare(
+          "SELECT id FROM cash_accounts WHERE is_active = 1 AND COALESCE(is_liability, 0) = 0 ORDER BY created_at ASC LIMIT 1"
+        ).get() as any;
+        accountId = account?.id || null;
+      }
+      if (!accountId) {
+        return res.status(400).json({ success: false, error: { code: 'NO_ACCOUNT', message: 'Aktif kasa hesabı bulunamadı.' } });
+      }
+
+      const txId = uuidv4();
+      const expensePayload = {
+        id: txId,
+        date: cleanText(date) || new Date().toISOString(),
+        category: cleanText(category) || 'Diğer',
+        platform: null,
+        amount: expenseAmount,
+        note: cleanText(note),
+        reference_number: null,
+        title: cleanText(title) || cleanText(supplier) || 'Telegram fişi',
+        description: null,
+        payment_method: cleanText(payment_method) || 'Nakit',
+        supplier: cleanText(supplier),
+        invoice_number: cleanText(invoice_number),
+        cash_account_id: accountId,
+        currency: expenseCurrency,
+        exchange_rate_at_transaction: activeRate,
+        amount_try: expenseCurrency === 'USD' ? expenseAmount * activeRate : expenseAmount,
+        payer_person_id: null,
+        will_be_refunded: 0,
+        refund_status: null,
+        is_invoice: 0,
+        invoice_name: null,
+        is_stock_related: 0,
+        distribute_to_product_cost: 0,
+      };
+
+      db.transaction(() => {
+        insertExpenseCashTransaction(expensePayload);
+        db.prepare(`
+          INSERT INTO transactions (
+            id, date, type, category, platform, amount, note, reference_number, title, description, payment_method, supplier, invoice_number, cash_account_id, exchange_rate_at_transaction,
+            currency, amount_try, payer_person_id, will_be_refunded, refund_status, is_invoice, invoice_name, is_stock_related, distribute_to_product_cost
+          )
+          VALUES (?, ?, 'Expense', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          txId, expensePayload.date, expensePayload.category, expensePayload.platform, expensePayload.amount, expensePayload.note, expensePayload.reference_number, expensePayload.title, expensePayload.description, expensePayload.payment_method, expensePayload.supplier, expensePayload.invoice_number, expensePayload.cash_account_id, expensePayload.exchange_rate_at_transaction,
+          expensePayload.currency, expensePayload.amount_try, expensePayload.payer_person_id, expensePayload.will_be_refunded, expensePayload.refund_status, expensePayload.is_invoice, expensePayload.invoice_name, expensePayload.is_stock_related, expensePayload.distribute_to_product_cost
+        );
+        logActivity('CREATE', 'expense', txId, { source: 'public_api', after: expensePayload }, null);
+      })();
+
+      logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip, expenseId: txId });
+      res.json({ success: true, data: { id: txId, amount: expenseAmount, currency: expenseCurrency, category: expensePayload.category } });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: { code: 'EXPENSE_FAILED', message: err.message } });
+    }
+  });
+
+  app.post(
+    "/api/public/expenses/:id/attachments",
+    publicApiAuth("expenses:write"),
+    expenseUpload.single("file"),
+    (req, res) => {
+      if (!req.file) return res.status(400).json({ success: false, error: { code: 'NO_FILE', message: 'Dosya yüklenmedi.' } });
+
+      const expense = db.prepare("SELECT id FROM transactions WHERE id = ? AND type = 'Expense'").get(req.params.id) as any;
+      if (!expense) {
+        try { fs.unlinkSync(req.file.path); } catch (_) {}
+        return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Gider bulunamadı.' } });
+      }
+
+      const attId = uuidv4();
+      const filePath = `uploads/expenses/${req.file.filename}`;
+      try {
+        db.prepare(`
+          INSERT INTO expense_attachments (id, expense_id, file_name, file_path, mime_type, file_size)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(attId, req.params.id, req.file.originalname, filePath, req.file.mimetype, req.file.size);
+
+        logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip, attachmentId: attId });
+        res.json({ success: true, data: { id: attId, file_path: filePath } });
+      } catch (err: any) {
+        try { fs.unlinkSync(req.file.path); } catch (_) {}
+        res.status(500).json({ success: false, error: { code: 'ATTACH_FAILED', message: err.message } });
+      }
+    }
+  );
+
+  // --- ASISTAN RAPORLARI (Telegram bot için) ---
+
+  app.get("/api/public/assistant/today", publicApiAuth("assistant:read"), (req, res) => {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const startIso = todayStart.toISOString();
+
+    const sales = db.prepare(`
+      SELECT COUNT(*) AS count, COALESCE(SUM(total_amount), 0) AS revenue,
+             COALESCE(SUM(net_profit), 0) AS net_profit, COALESCE(SUM(total_quantity), 0) AS units
+      FROM sales WHERE created_at >= ? AND status = 'Tamamlandı'
+    `).get(startIso) as any;
+
+    const cancelled = db.prepare(`
+      SELECT COUNT(*) AS count FROM sales WHERE created_at >= ? AND status IN ('İptal','İade')
+    `).get(startIso) as any;
+
+    const expenses = db.prepare(`
+      SELECT COUNT(*) AS count, COALESCE(SUM(amount_try), 0) AS total
+      FROM transactions WHERE type = 'Expense' AND date >= ?
+    `).get(startIso) as any;
+
+    const top = db.prepare(`
+      SELECT si.product_name AS name, SUM(si.quantity) AS qty, SUM(si.unit_price * si.quantity) AS revenue
+      FROM sale_items si
+      JOIN sales s ON s.id = si.sale_id
+      WHERE s.created_at >= ? AND s.status = 'Tamamlandı'
+      GROUP BY si.product_id
+      ORDER BY qty DESC
+      LIMIT 5
+    `).all(startIso);
+
+    logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip });
+    res.json({
+      success: true,
+      data: {
+        date: todayStart.toISOString().slice(0, 10),
+        sales_count: sales.count,
+        revenue_try: sales.revenue,
+        net_profit_try: sales.net_profit,
+        units_sold: sales.units,
+        cancelled_count: cancelled.count,
+        expenses_count: expenses.count,
+        expenses_total_try: expenses.total,
+        net_cashflow_try: (sales.revenue || 0) - (expenses.total || 0),
+        top_products: top,
+      },
+    });
+  });
+
+  app.get("/api/public/assistant/low-stock", publicApiAuth("assistant:read"), (req, res) => {
+    const threshold = Math.max(0, Number(req.query.threshold ?? 10) || 10);
+    const rows = db.prepare(`
+      SELECT id, sku, title, central_stock, min_stock_level
+      FROM products
+      WHERE COALESCE(is_sellable, 1) = 1
+        AND COALESCE(central_stock, 0) <= ?
+      ORDER BY central_stock ASC
+      LIMIT 50
+    `).all(threshold);
+    logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip });
+    res.json({ success: true, data: { threshold, items: rows } });
+  });
+
+  app.get("/api/public/assistant/top-products", publicApiAuth("assistant:read"), (req, res) => {
+    const days = Math.min(365, Math.max(1, Number(req.query.days ?? 7) || 7));
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit ?? 10) || 10));
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const rows = db.prepare(`
+      SELECT si.product_id, si.product_name AS name,
+             SUM(si.quantity) AS qty,
+             SUM(si.unit_price * si.quantity) AS revenue,
+             SUM(si.net_profit) AS net_profit
+      FROM sale_items si
+      JOIN sales s ON s.id = si.sale_id
+      WHERE s.created_at >= ? AND s.status = 'Tamamlandı'
+      GROUP BY si.product_id
+      ORDER BY qty DESC
+      LIMIT ?
+    `).all(since, limit);
+    logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip });
+    res.json({ success: true, data: { days, items: rows } });
+  });
+
+  app.get("/api/public/assistant/sales", publicApiAuth("assistant:read"), (req, res) => {
+    const from = cleanText(req.query.from as string) || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const to = cleanText(req.query.to as string) || new Date().toISOString();
+
+    const summary = db.prepare(`
+      SELECT COUNT(*) AS count,
+             COALESCE(SUM(total_amount), 0) AS revenue,
+             COALESCE(SUM(net_profit), 0) AS net_profit,
+             COALESCE(SUM(total_quantity), 0) AS units
+      FROM sales WHERE created_at >= ? AND created_at <= ? AND status = 'Tamamlandı'
+    `).get(from, to) as any;
+
+    const byPlatform = db.prepare(`
+      SELECT platform, COUNT(*) AS count, COALESCE(SUM(total_amount), 0) AS revenue
+      FROM sales WHERE created_at >= ? AND created_at <= ? AND status = 'Tamamlandı'
+      GROUP BY platform
+      ORDER BY revenue DESC
+    `).all(from, to);
+
+    logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip });
+    res.json({ success: true, data: { from, to, summary, by_platform: byPlatform } });
+  });
+
+  app.get("/api/public/assistant/cashflow", publicApiAuth("assistant:read"), (req, res) => {
+    const accounts = db.prepare(`
+      SELECT id, name, currency, type,
+             COALESCE(opening_balance, 0) AS opening_balance,
+             is_liability
+      FROM cash_accounts
+      WHERE is_active = 1
+      ORDER BY is_liability ASC, name ASC
+    `).all() as any[];
+
+    const totals = db.prepare(`
+      SELECT account_id,
+             SUM(CASE WHEN type = 'IN'  THEN amount ELSE 0 END) AS total_in,
+             SUM(CASE WHEN type = 'OUT' THEN amount ELSE 0 END) AS total_out
+      FROM cash_transactions
+      WHERE COALESCE(is_deleted, 0) = 0
+      GROUP BY account_id
+    `).all() as any[];
+    const totalsMap = new Map(totals.map((t) => [t.account_id, t]));
+
+    const enriched = accounts.map((a) => {
+      const t = totalsMap.get(a.id) as any;
+      const balance = (a.opening_balance || 0) + ((t?.total_in || 0) - (t?.total_out || 0));
+      return { ...a, balance };
+    });
+
+    logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip });
+    res.json({ success: true, data: { accounts: enriched } });
+  });
+
   // --- DATABASE BACKUP / RESTORE ---
   // Both endpoints are admin-only — a backup contains the entire DB including credentials.
   app.get("/api/backup/download", requireAdmin, async (req, res) => {
