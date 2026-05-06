@@ -105,7 +105,7 @@ export default function PanelApiKeys() {
     if (isReadOnly || currentStatus === 'revoked') return;
     try {
       const newStatus = currentStatus === 'active' ? 'passive' : 'active';
-      await api.put(`/integrations/panel-api/${id}/status`, { status: newStatus });
+      await api.patch(`/integrations/panel-api/${id}/status`, { status: newStatus });
       toast.success(`Bağlantı ${newStatus === 'active' ? 'aktif' : 'pasif'} edildi.`);
       fetchKeys();
     } catch (err) {

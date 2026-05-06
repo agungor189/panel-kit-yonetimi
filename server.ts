@@ -153,7 +153,18 @@ const expenseStorage = multer.diskStorage({
   }
 });
 
-const upload = multer({ storage });
+const upload = multer({
+  storage,
+  limits: { fileSize: 8 * 1024 * 1024 }, // 8 MB
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+    if (allowed.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Sadece JPEG, PNG ve WEBP görselleri yüklenebilir.'));
+    }
+  }
+});
 const expenseUpload = multer({
   storage: expenseStorage,
   limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
@@ -3617,6 +3628,8 @@ async function startServer() {
     const settingsRows = db.prepare("SELECT * FROM settings").all() as any[];
     const settings: any = {};
     settingsRows.forEach(row => {
+      // Legacy plaintext API key — never expose; integrasyon API key yönetimi panel_api_keys üzerinden yapılır.
+      if (row.key === 'api_key') return;
       try {
         settings[row.key] = JSON.parse(row.value);
       } catch {
@@ -3626,7 +3639,7 @@ async function startServer() {
     res.json(settings);
   });
 
-  app.put("/api/settings", (req, res) => {
+  app.put("/api/settings", requireAdmin, (req, res) => {
     const body = req.body;
     const stmt = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
 
@@ -4955,7 +4968,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/integrations/keys", apiLimiter, (req, res) => {
+  app.get("/api/integrations/keys", apiLimiter, requireAdmin, (req, res) => {
     try {
       const keys = db.prepare(`
         SELECT id, service_name, display_name, key_name, merchant_id, seller_id,
@@ -4982,7 +4995,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/integrations/keys", apiLimiter, (req, res) => {
+  app.post("/api/integrations/keys", apiLimiter, requireAdmin, (req, res) => {
     try {
       const { service_name, display_name, key_name, api_key, api_secret, merchant_id, seller_id, notes } = req.body;
 
@@ -5018,7 +5031,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/integrations/keys/:id", apiLimiter, (req, res) => {
+  app.put("/api/integrations/keys/:id", apiLimiter, requireAdmin, (req, res) => {
     try {
       const { display_name, key_name, api_key, api_secret, merchant_id, seller_id, notes } = req.body;
       const id = req.params.id;
@@ -5067,7 +5080,7 @@ async function startServer() {
     }
   });
 
-  app.patch("/api/integrations/keys/:id/status", apiLimiter, (req, res) => {
+  app.patch("/api/integrations/keys/:id/status", apiLimiter, requireAdmin, (req, res) => {
     try {
       const { status } = req.body;
       db.prepare("UPDATE api_keys SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(status, req.params.id);
@@ -5084,7 +5097,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/integrations/keys/:id/test", apiLimiter, async (req, res) => {
+  app.post("/api/integrations/keys/:id/test", apiLimiter, requireAdmin, async (req, res) => {
     try {
       const id = req.params.id;
       const current = db.prepare("SELECT * FROM api_keys WHERE id = ? AND deleted_at IS NULL").get(id) as any;
@@ -5189,7 +5202,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/integrations/keys/:id", apiLimiter, (req, res) => {
+  app.delete("/api/integrations/keys/:id", apiLimiter, requireAdmin, (req, res) => {
     try {
       const id = req.params.id;
       const current = db.prepare("SELECT display_name, service_name FROM api_keys WHERE id = ? AND deleted_at IS NULL").get(id) as any;
@@ -5213,7 +5226,7 @@ async function startServer() {
   });
 
   // --- PANEL API (INTERNAL KEYS FOR EXTERNAL SYSTEMS) ---
-  app.get("/api/integrations/panel-api", apiLimiter, (req, res) => {
+  app.get("/api/integrations/panel-api", apiLimiter, requireAdmin, (req, res) => {
     try {
       const keys = db.prepare("SELECT id, name, key_prefix, last4, status, environment, permissions, allowed_ips, expires_at, last_used_at, last_used_ip, created_at, updated_at, revoked_at FROM panel_api_keys WHERE deleted_at IS NULL ORDER BY created_at DESC").all() as any[];
 
@@ -5234,7 +5247,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/integrations/panel-api", apiLimiter, (req, res) => {
+  app.post("/api/integrations/panel-api", apiLimiter, requireAdmin, (req, res) => {
     try {
       const { name, environment, permissions, allowed_ips, expires_at } = req.body;
 
@@ -5265,7 +5278,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/integrations/panel-api/:id", apiLimiter, (req, res) => {
+  app.put("/api/integrations/panel-api/:id", apiLimiter, requireAdmin, (req, res) => {
     try {
       const { name, permissions, allowed_ips, expires_at } = req.body;
       const id = req.params.id;
@@ -5292,7 +5305,7 @@ async function startServer() {
     }
   });
 
-  app.patch("/api/integrations/panel-api/:id/status", apiLimiter, (req, res) => {
+  app.patch("/api/integrations/panel-api/:id/status", apiLimiter, requireAdmin, (req, res) => {
     try {
       const { status } = req.body;
       db.prepare("UPDATE panel_api_keys SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(status, req.params.id);
@@ -5312,7 +5325,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/integrations/panel-api/:id/revoke", apiLimiter, (req, res) => {
+  app.post("/api/integrations/panel-api/:id/revoke", apiLimiter, requireAdmin, (req, res) => {
     try {
       const id = req.params.id;
       db.prepare("UPDATE panel_api_keys SET status = 'revoked', revoked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
@@ -5328,7 +5341,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/integrations/panel-api/:id/rotate", apiLimiter, (req, res) => {
+  app.post("/api/integrations/panel-api/:id/rotate", apiLimiter, requireAdmin, (req, res) => {
     try {
       const id = req.params.id;
       const current = db.prepare("SELECT * FROM panel_api_keys WHERE id = ? AND deleted_at IS NULL").get(id) as any;
@@ -5360,7 +5373,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/integrations/panel-api/:id/test", apiLimiter, (req, res) => {
+  app.post("/api/integrations/panel-api/:id/test", apiLimiter, requireAdmin, (req, res) => {
     try {
       const id = req.params.id;
       const current = db.prepare("SELECT * FROM panel_api_keys WHERE id = ? AND deleted_at IS NULL").get(id) as any;
@@ -5392,7 +5405,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/integrations/panel-api/:id", apiLimiter, (req, res) => {
+  app.delete("/api/integrations/panel-api/:id", apiLimiter, requireAdmin, (req, res) => {
     try {
       const id = req.params.id;
 
@@ -5512,9 +5525,11 @@ async function startServer() {
   });
 
   app.patch("/api/public/stock/:productId", publicApiAuth("stock:write"), (req, res) => {
-     // placeholder implementation
-     logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip });
-     res.json({ success: true, data: { productId: req.params.productId, updated: true } });
+    logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip, status: 501 });
+    res.status(501).json({
+      success: false,
+      error: { code: 'NOT_IMPLEMENTED', message: 'Bu uç henüz uygulanmadı.' },
+    });
   });
 
   app.get("/api/public/orders", publicApiAuth("orders:read"), (req, res) => {
@@ -5524,15 +5539,19 @@ async function startServer() {
   });
 
   app.post("/api/public/orders", publicApiAuth("orders:write"), (req, res) => {
-     // placeholder implementation
-     logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip });
-     res.json({ success: true, data: { status: "created", body: req.body } });
+    logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip, status: 501 });
+    res.status(501).json({
+      success: false,
+      error: { code: 'NOT_IMPLEMENTED', message: 'Bu uç henüz uygulanmadı.' },
+    });
   });
 
   app.get("/api/public/dashboard-summary", publicApiAuth("dashboard:read"), (req, res) => {
-    // placeholder implementation
-    logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip });
-    res.json({ success: true, data: { totalRevenue: 50000, unreadMessages: 3 } });
+    logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip, status: 501 });
+    res.status(501).json({
+      success: false,
+      error: { code: 'NOT_IMPLEMENTED', message: 'Bu uç henüz uygulanmadı.' },
+    });
   });
 
   // --- DATABASE BACKUP / RESTORE ---

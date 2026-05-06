@@ -191,7 +191,7 @@ function importProducts(db: Database.Database): Map<string, string> {
         exclude_from_analysis: excludeFromAnalysis,
         purchase_price_usd: price,
         purchase_cost: price,
-        sale_price: 0,
+        sale_price: sellable ? +(price * 1.6).toFixed(2) : 0,
         weight: weight,
         weight_grams: weight,
         status: "Active",
@@ -367,14 +367,25 @@ function seedFakeSales(db: Database.Database, days = 180) {
 
   const insertSale = db.prepare(`
     INSERT INTO sales (
-      id, customer_name, customer_phone, total_weight, total_quantity, total_amount,
+      id, order_code, customer_name, customer_phone, total_weight, total_quantity, total_amount,
       status, platform, commission_rate, shipping_cost, discount, packaging_cost,
       ad_spend, other_expenses, net_total, gross_profit, net_profit, exchange_rate_at_transaction,
       created_at, updated_at
     ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
     )
   `);
+
+  const orderCounters = new Map<string, number>();
+  const buildOrderCode = (date: Date): string => {
+    const yy = String(date.getFullYear()).slice(2);
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const dd = String(date.getDate()).padStart(2, '0');
+    const key = `${yy}${mm}${dd}`;
+    const next = (orderCounters.get(key) ?? 0) + 1;
+    orderCounters.set(key, next);
+    return `DS-${key}-${String(next).padStart(4, '0')}`;
+  };
   const insertItem = db.prepare(`
     INSERT INTO sale_items (id, sale_id, product_id, product_name, quantity, weight, unit_price, purchase_cost, net_profit)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -460,8 +471,9 @@ function seedFakeSales(db: Database.Database, days = 180) {
         const tsIso = nowIso(ts);
 
         const saleId = uuidv4();
+        const orderCode = buildOrderCode(ts);
         insertSale.run(
-          saleId, customer, null, totalWeight, qty, totalAmount,
+          saleId, orderCode, customer, null, totalWeight, qty, totalAmount,
           status, platform.name, platform.commission, shipping, 0, qty * 5,
           0, 0, totalAmount - shipping - commission, grossProfit, netProfit, usdTry,
           tsIso, tsIso,
@@ -492,6 +504,13 @@ function seedFakeSales(db: Database.Database, days = 180) {
       }
     }
   })();
+
+  const upsertCounter = db.prepare(`
+    INSERT INTO order_counters (date_key, last_number, updated_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(date_key) DO UPDATE SET last_number = excluded.last_number, updated_at = CURRENT_TIMESTAMP
+  `);
+  for (const [key, last] of orderCounters) upsertCounter.run(key, last);
 
   console.log(`[Fake] ${saleCount} sales (${cancelCount} cancelled/returned, ${skippedNoStock} skipped: no stock), ${itemCount} items over ${days} days`);
 }
