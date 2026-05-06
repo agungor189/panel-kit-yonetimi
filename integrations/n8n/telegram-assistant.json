@@ -1,0 +1,479 @@
+{
+  "name": "DSDST Telegram Assistant",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": ["message"],
+        "additionalFields": {}
+      },
+      "id": "tg-trigger",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [-960, 0],
+      "webhookId": "dsdst-telegram-bot",
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "rules": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.message.photo }}",
+                    "rightValue": "",
+                    "operator": { "type": "object", "operation": "exists" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "photo"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.message.text }}",
+                    "rightValue": "",
+                    "operator": { "type": "string", "operation": "exists" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "text"
+            }
+          ]
+        },
+        "options": { "fallbackOutput": "extra" }
+      },
+      "id": "switch-message",
+      "name": "Foto mu Metin mi?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [-720, 0]
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "fileId": "={{ $json.message.photo[$json.message.photo.length - 1].file_id }}"
+      },
+      "id": "tg-get-photo",
+      "name": "Fotoğrafı indir",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [-480, -160],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={{ $env.GEMINI_API_KEY }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [\n      { \"text\": \"Bu fişin/faturanın bilgilerini SADECE şu JSON şemasında dön: {\\\"date\\\": \\\"YYYY-MM-DDTHH:MM:SSZ\\\", \\\"amount\\\": <number>, \\\"currency\\\": \\\"TRY|USD|EUR\\\", \\\"supplier\\\": <string>, \\\"category\\\": <string>, \\\"invoice_number\\\": <string|null>, \\\"payment_method\\\": <string|null>, \\\"note\\\": <string|null>}. Tutar KDV dahil toplam tutar olsun. Kategori: 'Yemek', 'Yakıt', 'Kargo', 'Ofis', 'Pazarlama', 'Personel', 'Üretim', 'Vergi', 'Diğer'. Markdown YOK, sadece JSON.\" },\n      {\n        \"inline_data\": {\n          \"mime_type\": \"image/jpeg\",\n          \"data\": \"={{ $binary.data.data }}\"\n        }\n      }\n    ]\n  }],\n  \"generationConfig\": { \"temperature\": 0.1, \"responseMimeType\": \"application/json\" }\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "gemini-ocr",
+      "name": "Gemini Vision (OCR)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-240, -160]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json.candidates?.[0]?.content?.parts?.[0]?.text || '{}';\nlet parsed;\ntry { parsed = JSON.parse(raw); } catch (_) { parsed = {}; }\nif (!parsed.date) parsed.date = new Date().toISOString();\nif (!parsed.currency) parsed.currency = 'TRY';\nif (!parsed.category) parsed.category = 'Diğer';\nreturn [{ json: parsed }];"
+      },
+      "id": "parse-ocr",
+      "name": "OCR JSON'u parse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [0, -160]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.PANEL_API_URL }}/api/public/expenses",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $env.PANEL_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "create-expense",
+      "name": "Panel: Gider oluştur",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, -160]
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "fileId": "={{ $('Telegram Trigger').item.json.message.photo[$('Telegram Trigger').item.json.message.photo.length - 1].file_id }}"
+      },
+      "id": "tg-redownload",
+      "name": "Fotoyu yeniden indir",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [480, -160],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=={{ $env.PANEL_API_URL }}/api/public/expenses/{{ $('Panel: Gider oluştur').item.json.data.id }}/attachments",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $env.PANEL_API_KEY }}" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "data"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "attach-receipt",
+      "name": "Panel: Fişi ekle",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, -160]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "=✅ *Gider kaydedildi*\n\n• *Tutar:* {{ $('Panel: Gider oluştur').item.json.data.amount }} {{ $('Panel: Gider oluştur').item.json.data.currency }}\n• *Kategori:* {{ $('Panel: Gider oluştur').item.json.data.category }}\n• *Satıcı:* {{ $('parse-ocr').item.json.supplier || '—' }}\n• *Fatura No:* {{ $('parse-ocr').item.json.invoice_number || '—' }}\n\nFiş gör. ekledim. Panelden onaylayabilirsin.",
+        "additionalFields": { "parse_mode": "Markdown" }
+      },
+      "id": "tg-confirm",
+      "name": "Telegram: Onay mesajı",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [960, -160],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={{ $env.GEMINI_API_KEY }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"Sen DSDST panel asistanısın. Kullanıcının Türkçe mesajını şu intent setine eşle ve SADECE JSON dön: {\\\"intent\\\": \\\"today|low_stock|top_products|sales_range|cashflow|small_talk\\\", \\\"params\\\": { ... }}. low_stock için 'threshold' (number, default 10). top_products için 'days' (default 7) ve 'limit' (default 5). sales_range için 'from' ve 'to' ISO tarih (yoksa son 7 gün). small_talk: rapor istemiyor, sadece selam/sohbet. Kullanıcı mesajı: '{{ $json.message.text.replaceAll('\\\\n', ' ').replaceAll('\\\"', '\\\\\\\"') }}'. Markdown YOK, sadece JSON.\"\n    }]\n  }],\n  \"generationConfig\": { \"temperature\": 0.0, \"responseMimeType\": \"application/json\" }\n}",
+        "options": { "timeout": 20000 }
+      },
+      "id": "gemini-intent",
+      "name": "Gemini: Intent tespiti",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-480, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json.candidates?.[0]?.content?.parts?.[0]?.text || '{}';\nlet parsed;\ntry { parsed = JSON.parse(raw); } catch (_) { parsed = { intent: 'small_talk', params: {} }; }\nif (!parsed.intent) parsed.intent = 'small_talk';\nif (!parsed.params) parsed.params = {};\nreturn [{ json: parsed }];"
+      },
+      "id": "parse-intent",
+      "name": "Intent parse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-240, 200]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "rules": [
+            { "conditions": { "options": { "caseSensitive": true }, "conditions": [{ "leftValue": "={{ $json.intent }}", "rightValue": "today", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" }, "outputKey": "today" },
+            { "conditions": { "options": { "caseSensitive": true }, "conditions": [{ "leftValue": "={{ $json.intent }}", "rightValue": "low_stock", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" }, "outputKey": "low_stock" },
+            { "conditions": { "options": { "caseSensitive": true }, "conditions": [{ "leftValue": "={{ $json.intent }}", "rightValue": "top_products", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" }, "outputKey": "top_products" },
+            { "conditions": { "options": { "caseSensitive": true }, "conditions": [{ "leftValue": "={{ $json.intent }}", "rightValue": "sales_range", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" }, "outputKey": "sales_range" },
+            { "conditions": { "options": { "caseSensitive": true }, "conditions": [{ "leftValue": "={{ $json.intent }}", "rightValue": "cashflow", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" }, "outputKey": "cashflow" }
+          ]
+        },
+        "options": { "fallbackOutput": "extra" }
+      },
+      "id": "intent-router",
+      "name": "Intent router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [0, 200]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.PANEL_API_URL }}/api/public/assistant/today",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "x-api-key", "value": "={{ $env.PANEL_API_KEY }}" }] },
+        "options": {}
+      },
+      "id": "panel-today",
+      "name": "Panel: Bugün",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 40]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.PANEL_API_URL }}/api/public/assistant/low-stock?threshold={{ $('Intent parse').item.json.params.threshold || 10 }}",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "x-api-key", "value": "={{ $env.PANEL_API_KEY }}" }] },
+        "options": {}
+      },
+      "id": "panel-low-stock",
+      "name": "Panel: Düşük stok",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 160]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.PANEL_API_URL }}/api/public/assistant/top-products?days={{ $('Intent parse').item.json.params.days || 7 }}&limit={{ $('Intent parse').item.json.params.limit || 5 }}",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "x-api-key", "value": "={{ $env.PANEL_API_KEY }}" }] },
+        "options": {}
+      },
+      "id": "panel-top",
+      "name": "Panel: Top ürünler",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 280]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.PANEL_API_URL }}/api/public/assistant/sales?from={{ $('Intent parse').item.json.params.from || '' }}&to={{ $('Intent parse').item.json.params.to || '' }}",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "x-api-key", "value": "={{ $env.PANEL_API_KEY }}" }] },
+        "options": {}
+      },
+      "id": "panel-sales",
+      "name": "Panel: Satış aralığı",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 400]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.PANEL_API_URL }}/api/public/assistant/cashflow",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "x-api-key", "value": "={{ $env.PANEL_API_KEY }}" }] },
+        "options": {}
+      },
+      "id": "panel-cash",
+      "name": "Panel: Kasa",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 520]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={{ $env.GEMINI_API_KEY }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"Sen DSDST panel asistanısın. Aşağıdaki JSON veriyi kullanıcıya kısa, net, samimi Türkçe ile özetle. Sayıları binlik ayraçla yaz, para birimini belirt. Madde işaretleri kullan. Kullanıcı sorusu: '{{ $('Telegram Trigger').item.json.message.text.replaceAll('\\\\n',' ').replaceAll('\\\"','\\\\\\\"') }}'. Veri: {{ JSON.stringify($json).replaceAll('\\\"','\\\\\\\"') }}\"\n    }]\n  }],\n  \"generationConfig\": { \"temperature\": 0.4 }\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "gemini-summarize",
+      "name": "Gemini: Cevabı yaz",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 280]
+    },
+    {
+      "parameters": {
+        "jsCode": "const text = $json.candidates?.[0]?.content?.parts?.[0]?.text || 'Bilgiye ulaşamadım, tekrar dener misin?';\nreturn [{ json: { text } }];"
+      },
+      "id": "extract-text",
+      "name": "Mesaj metnini al",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 280]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {}
+      },
+      "id": "tg-reply-report",
+      "name": "Telegram: Rapor cevabı",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [960, 280],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "=Selam! Ben DSDST asistanın. Bana şunları sorabilirsin:\n• \"Bugün ne sattım?\"\n• \"Stoğu azalan ürünler\"\n• \"Son 7 günün en çok satanı\"\n• \"Bu haftanın satışları\"\n• \"Kasa durumu\"\n\nFiş/fatura fotoğrafı atarsan otomatik gider olarak kaydederim.",
+        "additionalFields": {}
+      },
+      "id": "tg-help",
+      "name": "Telegram: Yardım",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [240, 640],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 9 * * *" }] }
+      },
+      "id": "morning-cron",
+      "name": "Sabah 09:00 cron",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-960, 800]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.PANEL_API_URL }}/api/public/assistant/today",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "x-api-key", "value": "={{ $env.PANEL_API_KEY }}" }] },
+        "options": {}
+      },
+      "id": "morning-today",
+      "name": "Sabah: Bugün özeti",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-720, 800]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.PANEL_API_URL }}/api/public/assistant/low-stock?threshold=10",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "x-api-key", "value": "={{ $env.PANEL_API_KEY }}" }] },
+        "options": {}
+      },
+      "id": "morning-low",
+      "name": "Sabah: Düşük stok",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-480, 800]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={{ $env.GEMINI_API_KEY }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"Sabah günaydın brifingi yaz. Kısa, samimi, Türkçe, emoji kullanma. Madde madde olsun. Bugün özeti: {{ JSON.stringify($('Sabah: Bugün özeti').item.json.data).replaceAll('\\\"','\\\\\\\"') }}. Düşük stok: {{ JSON.stringify($('Sabah: Düşük stok').item.json.data).replaceAll('\\\"','\\\\\\\"') }}. Önemli noktaları öne çıkar.\"\n    }]\n  }],\n  \"generationConfig\": { \"temperature\": 0.5 }\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "morning-llm",
+      "name": "Sabah: Gemini brifing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-240, 800]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_OWNER_CHAT_ID }}",
+        "text": "={{ $json.candidates[0].content.parts[0].text }}",
+        "additionalFields": {}
+      },
+      "id": "morning-send",
+      "name": "Sabah: Telegram'a gönder",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [0, 800],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_WITH_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": { "main": [[{ "node": "Foto mu Metin mi?", "type": "main", "index": 0 }]] },
+    "Foto mu Metin mi?": {
+      "main": [
+        [{ "node": "Fotoğrafı indir", "type": "main", "index": 0 }],
+        [{ "node": "Gemini: Intent tespiti", "type": "main", "index": 0 }]
+      ]
+    },
+    "Fotoğrafı indir": { "main": [[{ "node": "Gemini Vision (OCR)", "type": "main", "index": 0 }]] },
+    "Gemini Vision (OCR)": { "main": [[{ "node": "OCR JSON'u parse", "type": "main", "index": 0 }]] },
+    "OCR JSON'u parse": { "main": [[{ "node": "Panel: Gider oluştur", "type": "main", "index": 0 }]] },
+    "Panel: Gider oluştur": { "main": [[{ "node": "Fotoyu yeniden indir", "type": "main", "index": 0 }]] },
+    "Fotoyu yeniden indir": { "main": [[{ "node": "Panel: Fişi ekle", "type": "main", "index": 0 }]] },
+    "Panel: Fişi ekle": { "main": [[{ "node": "Telegram: Onay mesajı", "type": "main", "index": 0 }]] },
+    "Gemini: Intent tespiti": { "main": [[{ "node": "Intent parse", "type": "main", "index": 0 }]] },
+    "Intent parse": { "main": [[{ "node": "Intent router", "type": "main", "index": 0 }]] },
+    "Intent router": {
+      "main": [
+        [{ "node": "Panel: Bugün", "type": "main", "index": 0 }],
+        [{ "node": "Panel: Düşük stok", "type": "main", "index": 0 }],
+        [{ "node": "Panel: Top ürünler", "type": "main", "index": 0 }],
+        [{ "node": "Panel: Satış aralığı", "type": "main", "index": 0 }],
+        [{ "node": "Panel: Kasa", "type": "main", "index": 0 }],
+        [{ "node": "Telegram: Yardım", "type": "main", "index": 0 }]
+      ]
+    },
+    "Panel: Bugün":         { "main": [[{ "node": "Gemini: Cevabı yaz", "type": "main", "index": 0 }]] },
+    "Panel: Düşük stok":    { "main": [[{ "node": "Gemini: Cevabı yaz", "type": "main", "index": 0 }]] },
+    "Panel: Top ürünler":   { "main": [[{ "node": "Gemini: Cevabı yaz", "type": "main", "index": 0 }]] },
+    "Panel: Satış aralığı": { "main": [[{ "node": "Gemini: Cevabı yaz", "type": "main", "index": 0 }]] },
+    "Panel: Kasa":          { "main": [[{ "node": "Gemini: Cevabı yaz", "type": "main", "index": 0 }]] },
+    "Gemini: Cevabı yaz":   { "main": [[{ "node": "Mesaj metnini al", "type": "main", "index": 0 }]] },
+    "Mesaj metnini al":     { "main": [[{ "node": "Telegram: Rapor cevabı", "type": "main", "index": 0 }]] },
+    "Sabah 09:00 cron":     { "main": [[{ "node": "Sabah: Bugün özeti", "type": "main", "index": 0 }]] },
+    "Sabah: Bugün özeti":   { "main": [[{ "node": "Sabah: Düşük stok", "type": "main", "index": 0 }]] },
+    "Sabah: Düşük stok":    { "main": [[{ "node": "Sabah: Gemini brifing", "type": "main", "index": 0 }]] },
+    "Sabah: Gemini brifing":{ "main": [[{ "node": "Sabah: Telegram'a gönder", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": []
+}
