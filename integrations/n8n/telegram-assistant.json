@@ -21,44 +21,32 @@
     },
     {
       "parameters": {
-        "rules": {
-          "rules": [
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
             {
-              "conditions": {
-                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
-                "conditions": [
-                  {
-                    "leftValue": "={{ $json.message.photo }}",
-                    "rightValue": "",
-                    "operator": { "type": "object", "operation": "exists" }
-                  }
-                ],
-                "combinator": "and"
-              },
-              "outputKey": "photo"
-            },
-            {
-              "conditions": {
-                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
-                "conditions": [
-                  {
-                    "leftValue": "={{ $json.message.text }}",
-                    "rightValue": "",
-                    "operator": { "type": "string", "operation": "exists" }
-                  }
-                ],
-                "combinator": "and"
-              },
-              "outputKey": "text"
+              "id": "is-photo",
+              "leftValue": "={{ $json.message.photo ? 'yes' : 'no' }}",
+              "rightValue": "yes",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
             }
-          ]
+          ],
+          "combinator": "and"
         },
-        "options": { "fallbackOutput": "extra" }
+        "options": {}
       },
-      "id": "switch-message",
-      "name": "Foto mu Metin mi?",
-      "type": "n8n-nodes-base.switch",
-      "typeVersion": 3.2,
+      "id": "if-photo",
+      "name": "Foto mu?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
       "position": [-720, 0]
     },
     {
@@ -98,7 +86,7 @@
         "jsCode": "const raw = $json.candidates?.[0]?.content?.parts?.[0]?.text || '{}';\nlet parsed;\ntry { parsed = JSON.parse(raw); } catch (_) { parsed = {}; }\nif (!parsed.date) parsed.date = new Date().toISOString();\nif (!parsed.currency) parsed.currency = 'TRY';\nif (!parsed.category) parsed.category = 'Diğer';\nreturn [{ json: parsed }];"
       },
       "id": "parse-ocr",
-      "name": "OCR JSON'u parse",
+      "name": "OCR JSON parse",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [0, -160]
@@ -145,7 +133,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=={{ $env.PANEL_API_URL }}/api/public/expenses/{{ $('Panel: Gider oluştur').item.json.data.id }}/attachments",
+        "url": "={{ $env.PANEL_API_URL }}/api/public/expenses/{{ $('Panel: Gider oluştur').item.json.data.id }}/attachments",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -174,8 +162,8 @@
     {
       "parameters": {
         "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
-        "text": "=✅ *Gider kaydedildi*\n\n• *Tutar:* {{ $('Panel: Gider oluştur').item.json.data.amount }} {{ $('Panel: Gider oluştur').item.json.data.currency }}\n• *Kategori:* {{ $('Panel: Gider oluştur').item.json.data.category }}\n• *Satıcı:* {{ $('parse-ocr').item.json.supplier || '—' }}\n• *Fatura No:* {{ $('parse-ocr').item.json.invoice_number || '—' }}\n\nFiş gör. ekledim. Panelden onaylayabilirsin.",
-        "additionalFields": { "parse_mode": "Markdown" }
+        "text": "=✅ Gider kaydedildi\n\n• Tutar: {{ $('Panel: Gider oluştur').item.json.data.amount }} {{ $('Panel: Gider oluştur').item.json.data.currency }}\n• Kategori: {{ $('Panel: Gider oluştur').item.json.data.category }}\n• Satıcı: {{ $('OCR JSON parse').item.json.supplier || '—' }}\n• Fatura No: {{ $('OCR JSON parse').item.json.invoice_number || '—' }}\n\nFiş görseli ekledim. Panelden onaylayabilirsin.",
+        "additionalFields": {}
       },
       "id": "tg-confirm",
       "name": "Telegram: Onay mesajı",
@@ -195,7 +183,7 @@
         "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={{ $env.GEMINI_API_KEY }}",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"Sen DSDST panel asistanısın. Kullanıcının Türkçe mesajını şu intent setine eşle ve SADECE JSON dön: {\\\"intent\\\": \\\"today|low_stock|top_products|sales_range|cashflow|small_talk\\\", \\\"params\\\": { ... }}. low_stock için 'threshold' (number, default 10). top_products için 'days' (default 7) ve 'limit' (default 5). sales_range için 'from' ve 'to' ISO tarih (yoksa son 7 gün). small_talk: rapor istemiyor, sadece selam/sohbet. Kullanıcı mesajı: '{{ $json.message.text.replaceAll('\\\\n', ' ').replaceAll('\\\"', '\\\\\\\"') }}'. Markdown YOK, sadece JSON.\"\n    }]\n  }],\n  \"generationConfig\": { \"temperature\": 0.0, \"responseMimeType\": \"application/json\" }\n}",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"Sen DSDST panel asistanısın. Kullanıcının Türkçe mesajını şu intent setine eşle ve SADECE JSON dön: {\\\"intent\\\": \\\"today|low_stock|top_products|sales_range|cashflow|small_talk\\\", \\\"params\\\": { ... }}. low_stock için 'threshold' (number, default 10). top_products için 'days' (default 7) ve 'limit' (default 5). sales_range için 'from' ve 'to' ISO tarih (yoksa son 7 gün). small_talk: rapor istemiyor, sadece selam/sohbet. Kullanıcı mesajı: '{{ $json.message.text }}'. Markdown YOK, sadece JSON.\"\n    }]\n  }],\n  \"generationConfig\": { \"temperature\": 0.0, \"responseMimeType\": \"application/json\" }\n}",
         "options": { "timeout": 20000 }
       },
       "id": "gemini-intent",
@@ -216,16 +204,69 @@
     },
     {
       "parameters": {
+        "mode": "rules",
         "rules": {
-          "rules": [
-            { "conditions": { "options": { "caseSensitive": true }, "conditions": [{ "leftValue": "={{ $json.intent }}", "rightValue": "today", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" }, "outputKey": "today" },
-            { "conditions": { "options": { "caseSensitive": true }, "conditions": [{ "leftValue": "={{ $json.intent }}", "rightValue": "low_stock", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" }, "outputKey": "low_stock" },
-            { "conditions": { "options": { "caseSensitive": true }, "conditions": [{ "leftValue": "={{ $json.intent }}", "rightValue": "top_products", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" }, "outputKey": "top_products" },
-            { "conditions": { "options": { "caseSensitive": true }, "conditions": [{ "leftValue": "={{ $json.intent }}", "rightValue": "sales_range", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" }, "outputKey": "sales_range" },
-            { "conditions": { "options": { "caseSensitive": true }, "conditions": [{ "leftValue": "={{ $json.intent }}", "rightValue": "cashflow", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" }, "outputKey": "cashflow" }
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+                "conditions": [
+                  { "id": "r1", "leftValue": "={{ $json.intent }}", "rightValue": "today", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "today"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+                "conditions": [
+                  { "id": "r2", "leftValue": "={{ $json.intent }}", "rightValue": "low_stock", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "low_stock"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+                "conditions": [
+                  { "id": "r3", "leftValue": "={{ $json.intent }}", "rightValue": "top_products", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "top_products"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+                "conditions": [
+                  { "id": "r4", "leftValue": "={{ $json.intent }}", "rightValue": "sales_range", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "sales_range"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+                "conditions": [
+                  { "id": "r5", "leftValue": "={{ $json.intent }}", "rightValue": "cashflow", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "cashflow"
+            }
           ]
         },
-        "options": { "fallbackOutput": "extra" }
+        "options": {
+          "fallbackOutput": "extra"
+        }
       },
       "id": "intent-router",
       "name": "Intent router",
@@ -309,7 +350,7 @@
         "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={{ $env.GEMINI_API_KEY }}",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"Sen DSDST panel asistanısın. Aşağıdaki JSON veriyi kullanıcıya kısa, net, samimi Türkçe ile özetle. Sayıları binlik ayraçla yaz, para birimini belirt. Madde işaretleri kullan. Kullanıcı sorusu: '{{ $('Telegram Trigger').item.json.message.text.replaceAll('\\\\n',' ').replaceAll('\\\"','\\\\\\\"') }}'. Veri: {{ JSON.stringify($json).replaceAll('\\\"','\\\\\\\"') }}\"\n    }]\n  }],\n  \"generationConfig\": { \"temperature\": 0.4 }\n}",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"Sen DSDST panel asistanısın. Aşağıdaki JSON veriyi kullanıcıya kısa, net, samimi Türkçe ile özetle. Sayıları binlik ayraçla yaz, para birimini belirt. Madde işaretleri kullan. Kullanıcı sorusu: '{{ $('Telegram Trigger').item.json.message.text }}'. Veri: {{ JSON.stringify($json) }}\"\n    }]\n  }],\n  \"generationConfig\": { \"temperature\": 0.4 }\n}",
         "options": { "timeout": 30000 }
       },
       "id": "gemini-summarize",
@@ -349,7 +390,7 @@
     {
       "parameters": {
         "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
-        "text": "=Selam! Ben DSDST asistanın. Bana şunları sorabilirsin:\n• \"Bugün ne sattım?\"\n• \"Stoğu azalan ürünler\"\n• \"Son 7 günün en çok satanı\"\n• \"Bu haftanın satışları\"\n• \"Kasa durumu\"\n\nFiş/fatura fotoğrafı atarsan otomatik gider olarak kaydederim.",
+        "text": "=Selam! Ben DSDST asistanın. Bana şunları sorabilirsin:\n• Bugün ne sattım?\n• Stoğu azalan ürünler\n• Son 7 günün en çok satanları\n• Bu haftanın satışları\n• Kasa durumu\n\nFiş/fatura fotoğrafı atarsan otomatik gider olarak kaydederim.",
         "additionalFields": {}
       },
       "id": "tg-help",
@@ -366,7 +407,11 @@
     },
     {
       "parameters": {
-        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 9 * * *" }] }
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "0 9 * * *" }
+          ]
+        }
       },
       "id": "morning-cron",
       "name": "Sabah 09:00 cron",
@@ -408,7 +453,7 @@
         "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={{ $env.GEMINI_API_KEY }}",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"Sabah günaydın brifingi yaz. Kısa, samimi, Türkçe, emoji kullanma. Madde madde olsun. Bugün özeti: {{ JSON.stringify($('Sabah: Bugün özeti').item.json.data).replaceAll('\\\"','\\\\\\\"') }}. Düşük stok: {{ JSON.stringify($('Sabah: Düşük stok').item.json.data).replaceAll('\\\"','\\\\\\\"') }}. Önemli noktaları öne çıkar.\"\n    }]\n  }],\n  \"generationConfig\": { \"temperature\": 0.5 }\n}",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"Sabah günaydın brifingi yaz. Kısa, samimi, Türkçe, emoji kullanma. Madde madde olsun. Bugün özeti: {{ JSON.stringify($('Sabah: Bugün özeti').item.json.data) }}. Düşük stok: {{ JSON.stringify($('Sabah: Düşük stok').item.json.data) }}. Önemli noktaları öne çıkar.\"\n    }]\n  }],\n  \"generationConfig\": { \"temperature\": 0.5 }\n}",
         "options": { "timeout": 30000 }
       },
       "id": "morning-llm",
@@ -437,16 +482,16 @@
     }
   ],
   "connections": {
-    "Telegram Trigger": { "main": [[{ "node": "Foto mu Metin mi?", "type": "main", "index": 0 }]] },
-    "Foto mu Metin mi?": {
+    "Telegram Trigger": { "main": [[{ "node": "Foto mu?", "type": "main", "index": 0 }]] },
+    "Foto mu?": {
       "main": [
         [{ "node": "Fotoğrafı indir", "type": "main", "index": 0 }],
         [{ "node": "Gemini: Intent tespiti", "type": "main", "index": 0 }]
       ]
     },
     "Fotoğrafı indir": { "main": [[{ "node": "Gemini Vision (OCR)", "type": "main", "index": 0 }]] },
-    "Gemini Vision (OCR)": { "main": [[{ "node": "OCR JSON'u parse", "type": "main", "index": 0 }]] },
-    "OCR JSON'u parse": { "main": [[{ "node": "Panel: Gider oluştur", "type": "main", "index": 0 }]] },
+    "Gemini Vision (OCR)": { "main": [[{ "node": "OCR JSON parse", "type": "main", "index": 0 }]] },
+    "OCR JSON parse": { "main": [[{ "node": "Panel: Gider oluştur", "type": "main", "index": 0 }]] },
     "Panel: Gider oluştur": { "main": [[{ "node": "Fotoyu yeniden indir", "type": "main", "index": 0 }]] },
     "Fotoyu yeniden indir": { "main": [[{ "node": "Panel: Fişi ekle", "type": "main", "index": 0 }]] },
     "Panel: Fişi ekle": { "main": [[{ "node": "Telegram: Onay mesajı", "type": "main", "index": 0 }]] },
