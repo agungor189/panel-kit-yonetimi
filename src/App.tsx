@@ -25,6 +25,7 @@ import {
   RefreshCw,
   Eye
 } from 'lucide-react';
+import KitManagement from './components/KitManagement';
 import Dashboard from './components/Dashboard';
 import ProductList from './components/ProductList';
 import ProductDetail from './components/ProductDetail';
@@ -66,7 +67,7 @@ function normalizeRole(role: unknown): UserRole {
   return role === 'admin' || role === 'user' || role === 'readonly' ? role : 'admin';
 }
 
-type View = 'dashboard' | 'products' | 'product-detail' | 'product-wizard' | 'stock' | 'income' | 'expense' | 'recurring' | 'analytics' | 'product-analytics' | 'insights' | 'settings' | 'activity-logs' | 'b2b' | 'sales' | 'api-keys' | 'panel-api' | 'trendyol' | 'cash';
+type View = 'dashboard' | 'products' | 'product-detail' | 'product-wizard' | 'kits' | 'stock' | 'income' | 'expense' | 'recurring' | 'analytics' | 'product-analytics' | 'insights' | 'settings' | 'activity-logs' | 'b2b' | 'sales' | 'api-keys' | 'panel-api' | 'trendyol' | 'cash';
 type NavItem = { id: View; label: string; icon: ComponentType<{ className?: string }> };
 
 export default function App() {
@@ -192,6 +193,7 @@ export default function App() {
   const mainNavItems: NavItem[] = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'products', label: 'Ürünler', icon: Package },
+    { id: 'kits', label: 'Kit Yönetimi', icon: Package },
     { id: 'sales', label: 'Satışlar', icon: ShoppingCart },
     { id: 'b2b', label: 'B2B', icon: Briefcase },
     { id: 'cash', label: 'Finans Merkezi', icon: Landmark },
@@ -209,7 +211,7 @@ export default function App() {
   const restrictedReadonlyViews: View[] = ['settings', 'api-keys', 'panel-api', 'trendyol', 'product-wizard', 'b2b'];
   const visibleMainNavItems = mainNavItems.filter(item => !isReadOnly || item.id !== 'b2b');
   const visibleAnalyticsNavItems = analyticsNavItems;
-  const primaryNavItems = visibleMainNavItems.filter(item => ['dashboard', 'products', 'sales', 'b2b', 'cash'].includes(item.id));
+  const primaryNavItems = visibleMainNavItems.filter(item => ['dashboard', 'products', 'kits', 'sales', 'b2b', 'cash'].includes(item.id));
   const financeNavItems = visibleMainNavItems.filter(item => ['income', 'expense', 'recurring'].includes(item.id));
 
   useEffect(() => {
@@ -548,6 +550,7 @@ export default function App() {
               onProductClick={navigateToProduct}
             />
           )}
+          {currentView === 'kits' && <KitManagement />}
           {currentView === 'product-detail' && selectedProductId && (
              <ProductDetail
                 productId={selectedProductId}

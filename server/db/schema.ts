@@ -90,6 +90,43 @@ export function applySchema(db: Database.Database): void {
       FOREIGN KEY(component_product_id) REFERENCES products(id) ON DELETE RESTRICT
     );
 
+    -- Kit yönetimi mevcut ürün BOM yapısından bilinçli olarak ayrıdır.
+    CREATE TABLE IF NOT EXISTS kit_profiles (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, shape TEXT, dimension TEXT,
+      material TEXT, thickness TEXT, supplier TEXT, price_per_meter REAL DEFAULT 0,
+      color TEXT, finish TEXT, grade TEXT, weight_per_meter REAL DEFAULT 0,
+      stock_length_mm REAL DEFAULT 6000, is_active INTEGER DEFAULT 1, notes TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS kit_profile_offers (
+      id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, supplier TEXT NOT NULL,
+      price_per_meter REAL NOT NULL DEFAULT 0, currency TEXT DEFAULT 'TRY', lead_time_days INTEGER,
+      supplier_sku TEXT, notes TEXT, is_preferred INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(profile_id) REFERENCES kit_profiles(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS kits (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, code TEXT UNIQUE, description TEXT,
+      profile_id TEXT NOT NULL, profile_offer_id TEXT, status TEXT DEFAULT 'active', cover_image TEXT,
+      notes TEXT, target_margin REAL DEFAULT 30, sale_price REAL DEFAULT 0,
+      labour_cost REAL DEFAULT 0, packaging_cost REAL DEFAULT 0, other_cost REAL DEFAULT 0,
+      commission_rate REAL DEFAULT 0, vat_rate REAL DEFAULT 20,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(profile_id) REFERENCES kit_profiles(id) ON DELETE RESTRICT,
+      FOREIGN KEY(profile_offer_id) REFERENCES kit_profile_offers(id) ON DELETE SET NULL
+    );
+    CREATE TABLE IF NOT EXISTS kit_items (
+      id TEXT PRIMARY KEY, kit_id TEXT NOT NULL, product_id TEXT NOT NULL,
+      quantity REAL NOT NULL DEFAULT 1, unit_cost REAL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(kit_id, product_id), FOREIGN KEY(kit_id) REFERENCES kits(id) ON DELETE CASCADE,
+      FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT
+    );
+    CREATE TABLE IF NOT EXISTS kit_cuts (
+      id TEXT PRIMARY KEY, kit_id TEXT NOT NULL, quantity REAL NOT NULL DEFAULT 1,
+      length_mm REAL NOT NULL, label TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(kit_id) REFERENCES kits(id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS stock_movements (
       id             TEXT    PRIMARY KEY,
       product_id     TEXT,

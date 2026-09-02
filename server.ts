@@ -23,6 +23,7 @@ import { createProductAnalyticsRouter } from "./server/routes/productAnalyticsRo
 import { createInsightsRouter } from "./server/routes/insightsRoutes.js";
 import { createRecurringPaymentsRouter } from "./server/routes/recurringPaymentsRoutes.js";
 import { createDashboardDataRouter } from "./server/routes/dashboardDataRoutes.js";
+import { createKitRouter } from "./server/routes/kitRoutes.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
 import { restoreUploadEntry } from "./server/utils/restoreUploads.js";
 import { initializeDatabase, openDatabase } from "./server/db/initialize.js";
@@ -5487,6 +5488,7 @@ async function startServer() {
   app.use("/api/analytics", createProductAnalyticsRouter(db));
   app.use("/api/insights", createInsightsRouter(db));
   app.use("/api/dashboard", createDashboardDataRouter(db));
+  app.use("/api/kits", createKitRouter(db));
 
   // --- PUBLIC API ROUTES ---
   app.use("/api/public", publicAuthFailedLimiter, publicApiLimiter);

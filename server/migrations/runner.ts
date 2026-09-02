@@ -1316,6 +1316,80 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 38,
+    name: "add_independent_kit_management",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS kit_profiles (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, shape TEXT, dimension TEXT, material TEXT,
+          thickness TEXT, supplier TEXT, price_per_meter REAL DEFAULT 0, stock_length_mm REAL DEFAULT 6000,
+          is_active INTEGER DEFAULT 1, notes TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS kits (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, code TEXT UNIQUE, description TEXT, profile_id TEXT NOT NULL,
+          status TEXT DEFAULT 'active', cover_image TEXT, notes TEXT, target_margin REAL DEFAULT 30, sale_price REAL DEFAULT 0,
+          labour_cost REAL DEFAULT 0, packaging_cost REAL DEFAULT 0, other_cost REAL DEFAULT 0,
+          commission_rate REAL DEFAULT 0, vat_rate REAL DEFAULT 20, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(profile_id) REFERENCES kit_profiles(id) ON DELETE RESTRICT
+        );
+        CREATE TABLE IF NOT EXISTS kit_items (
+          id TEXT PRIMARY KEY, kit_id TEXT NOT NULL, product_id TEXT NOT NULL, quantity REAL NOT NULL DEFAULT 1,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(kit_id, product_id),
+          FOREIGN KEY(kit_id) REFERENCES kits(id) ON DELETE CASCADE, FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT
+        );
+        CREATE TABLE IF NOT EXISTS kit_cuts (
+          id TEXT PRIMARY KEY, kit_id TEXT NOT NULL, quantity REAL NOT NULL DEFAULT 1, length_mm REAL NOT NULL,
+          label TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(kit_id) REFERENCES kits(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_kits_profile ON kits(profile_id);
+        CREATE INDEX IF NOT EXISTS idx_kit_items_product ON kit_items(product_id);
+      `);
+    },
+  },
+  {
+    version: 39,
+    name: "seed_standard_profile_dimensions",
+    up(db) {
+      // Price, supplier and wall thickness intentionally remain editable: these are
+      // the stable dimensions identified in the imported product catalogue.
+      const profiles = [
+        ['Yuvarlak 25 mm', 'Yuvarlak', '25 mm'], ['Yuvarlak 60 mm', 'Yuvarlak', '60 mm'],
+        ['Yuvarlak 3/4 inç', 'Yuvarlak', '3/4 inç'], ['Yuvarlak 1 inç', 'Yuvarlak', '1 inç'],
+        ['Yuvarlak 1 1/2 inç', 'Yuvarlak', '1 1/2 inç'], ['Yuvarlak 2 inç', 'Yuvarlak', '2 inç'],
+        ['Kare 20×20 mm', 'Kare', '20×20 mm'], ['Kare 25×25 mm', 'Kare', '25×25 mm'],
+        ['Kare 30×30 mm', 'Kare', '30×30 mm'], ['Kare 40×40 mm', 'Kare', '40×40 mm'],
+      ];
+      const insert = db.prepare(`INSERT OR IGNORE INTO kit_profiles
+        (id, name, shape, dimension, material, stock_length_mm, is_active) VALUES (?, ?, ?, ?, ?, 6000, 1)`);
+      for (const [name, shape, dimension] of profiles) insert.run(`default-profile-${dimension.replace(/[^a-z0-9]/gi, '-').toLowerCase()}`, name, shape, dimension, 'Karbon Çelik');
+    },
+  },
+  {
+    version: 40,
+    name: "add_profile_offers_and_kit_cost_snapshots",
+    up(db) {
+      for (const sql of [
+        "ALTER TABLE kit_profiles ADD COLUMN color TEXT",
+        "ALTER TABLE kit_profiles ADD COLUMN finish TEXT",
+        "ALTER TABLE kit_profiles ADD COLUMN grade TEXT",
+        "ALTER TABLE kit_profiles ADD COLUMN weight_per_meter REAL DEFAULT 0",
+        "ALTER TABLE kits ADD COLUMN profile_offer_id TEXT",
+        "ALTER TABLE kit_items ADD COLUMN unit_cost REAL DEFAULT 0",
+      ]) { try { db.exec(sql); } catch (_) {} }
+      db.exec(`CREATE TABLE IF NOT EXISTS kit_profile_offers (
+        id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, supplier TEXT NOT NULL,
+        price_per_meter REAL NOT NULL DEFAULT 0, currency TEXT DEFAULT 'TRY', lead_time_days INTEGER,
+        supplier_sku TEXT, notes TEXT, is_preferred INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(profile_id) REFERENCES kit_profiles(id) ON DELETE CASCADE
+      ); CREATE INDEX IF NOT EXISTS idx_kit_profile_offers_profile ON kit_profile_offers(profile_id);`);
+      // Existing single-price profiles remain usable as their first supplier offer.
+      const rows = db.prepare("SELECT id, supplier, price_per_meter FROM kit_profiles WHERE COALESCE(price_per_meter, 0) > 0").all() as any[];
+      const insert = db.prepare("INSERT OR IGNORE INTO kit_profile_offers (id, profile_id, supplier, price_per_meter, is_preferred) VALUES (?, ?, ?, ?, 1)");
+      for (const row of rows) insert.run(`legacy-offer-${row.id}`, row.id, row.supplier || 'Varsayılan tedarikçi', row.price_per_meter);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

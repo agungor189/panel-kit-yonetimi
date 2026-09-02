@@ -3,6 +3,32 @@
 @import "react-resizable/css/styles.css";
 @import "tailwindcss";
 
+/* Kit parça maliyeti ürün kartından gelir; kit formunda değiştirilemez. */
+section.lg\:col-span-2 table th:nth-child(3) {
+  font-size: 0;
+}
+section.lg\:col-span-2 table th:nth-child(3)::after {
+  content: 'Ürün alış (otomatik)';
+  font-size: 0.75rem;
+}
+section.lg\:col-span-2 table td:nth-child(3) input[type='number'] {
+  pointer-events: none;
+  background: #f1f5f9;
+  color: #475569;
+}
+
+/* Kit kesimleri dar yan kolon yerine kendi tam genişlikli çalışma alanında yer alır. */
+@media (min-width: 1024px) {
+  div.grid.lg\:grid-cols-3 > section:last-child:not(.lg\:col-span-2):not(.lg\:col-span-3) {
+    grid-column: span 3 / span 3;
+  }
+
+  div.grid.lg\:grid-cols-3 > section:last-child:not(.lg\:col-span-2):not(.lg\:col-span-3) > div.grid {
+    grid-template-columns: minmax(0, 1fr) 140px 100px 32px;
+    gap: 0.5rem;
+  }
+}
+
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
