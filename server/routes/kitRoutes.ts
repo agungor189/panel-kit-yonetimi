@@ -37,10 +37,11 @@ export function createKitRouter(db: Database.Database) {
       COALESCE(o.price_per_meter, p.price_per_meter) effective_price_per_meter, o.supplier offer_supplier, o.currency offer_currency, p.stock_length_mm
       FROM kits k JOIN kit_profiles p ON p.id=k.profile_id LEFT JOIN kit_profile_offers o ON o.id=k.profile_offer_id WHERE k.id=?`).get(id) as any;
     if (!kit) return null;
-    kit.items = db.prepare(`SELECT ki.*, p.title, p.name, p.sku, p.purchase_cost, p.central_stock,
+    kit.items = db.prepare(`SELECT ki.*, p.title, p.name, p.sku, p.purchase_cost, p.central_stock, p.weight,
       p.sale_price, CAST(CASE WHEN ki.quantity > 0 THEN FLOOR(COALESCE(p.central_stock,0)/ki.quantity) ELSE 0 END AS INTEGER) available_units
       FROM kit_items ki JOIN products p ON p.id=ki.product_id WHERE ki.kit_id=? ORDER BY p.title`).all(id);
     kit.cuts = db.prepare('SELECT * FROM kit_cuts WHERE kit_id=? ORDER BY length_mm DESC').all(id);
+    kit.complementary_items = db.prepare(`SELECT * FROM kit_complementary_items WHERE kit_id=? ORDER BY product_name_snapshot`).all(id) as any[];
     kit.items = kit.items.map((item: any) => ({ ...item, available_units: Math.floor(productAvailability(item.product_id) / Math.max(0.0001, num(item.quantity))) }));
     const availability = (kit.items as any[]).length ? Math.min(...kit.items.map((i: any) => num(i.available_units))) : 0;
     // Connection pieces always use the live product card prices. Kit pricing never
@@ -49,15 +50,30 @@ export function createKitRouter(db: Database.Database) {
     const partsSale = kit.items.reduce((s: number, i: any) => s + num(i.quantity) * num(i.sale_price), 0);
     const profileMeters = kit.cuts.reduce((s: number, c: any) => s + num(c.quantity) * num(c.length_mm), 0) / 1000;
     const profileCost = profileMeters * num(kit.effective_price_per_meter);
+    const complementaryCost = kit.complementary_items.reduce((sum: number, item: any) => sum + num(item.quantity) * num(item.purchase_price_snapshot), 0);
+    const complementaryWeightKg = kit.complementary_items.reduce((sum: number, item: any) => sum + num(item.quantity) * num(item.unit_weight_kg_snapshot), 0);
+    const connectionWeightKg = kit.items.reduce((sum: number, item: any) => sum + num(item.quantity) * num(item.weight) / 1000, 0);
+    const profileWeightKg = profileMeters * num(kit.weight_per_meter);
     const profileBaseCost = profileCost + num(kit.labour_cost) + num(kit.packaging_cost) + num(kit.other_cost);
-    const suggestedProfileSale = profileBaseCost / Math.max(0.01, 1 - num(kit.target_margin) / 100 - num(kit.commission_rate) / 100);
+    // “Hedef kâr” is a markup on the profile work cost, not a gross-margin
+    // denominator. At 100% the profile sale becomes 2× its profile cost;
+    // commission is then grossed up separately when applicable.
+    const suggestedProfileSale = (profileBaseCost * (1 + num(kit.target_margin) / 100)) /
+      Math.max(0.01, 1 - num(kit.commission_rate) / 100);
     const profileSale = num(kit.sale_price) || suggestedProfileSale;
     const commission = profileSale * num(kit.commission_rate) / 100;
-    const salePrice = partsSale + profileSale;
-    const baseCost = partsCost + profileBaseCost;
+    // Complements have no customer-facing price card. Their current procurement
+    // cost is carried into the kit offer at cost; only the profile work receives
+    // the configurable target-profit uplift. Connection products keep their
+    // own live sales prices from the main product catalog.
+    const complementarySale = complementaryCost;
+    const salePrice = partsSale + complementarySale + profileSale;
+    const baseCost = partsCost + complementaryCost + profileBaseCost;
     const vat = salePrice * num(kit.vat_rate) / 100;
-    const netProfit = (partsSale - partsCost) + profileSale - profileBaseCost - commission;
-    kit.analysis = { availability, partsCost, partsSale, profileMeters, profileCost, profileBaseCost, profileSale, baseCost, suggestedPrice: suggestedProfileSale, suggestedProfileSale, salePrice, commission, vat, netProfit, margin: salePrice ? (netProfit / salePrice) * 100 : 0 };
+    const netProfit = (partsSale - partsCost) + (profileSale - profileBaseCost - commission);
+    kit.analysis = { availability, partsCost, partsSale, profileMeters, profileCost, profileBaseCost, profileSale, baseCost, suggestedPrice: suggestedProfileSale, suggestedProfileSale, salePrice, commission, vat, netProfit, margin: salePrice ? (netProfit / salePrice) * 100 : 0,
+      complementaryCost, weightBreakdown: { connectionWeightKg, profileWeightKg, complementaryWeightKg, totalWeightKg: connectionWeightKg + profileWeightKg + complementaryWeightKg },
+      breakdown: { partsCost, partsSale, profileMaterial: profileCost, complementaryCost, complementarySale, labour: num(kit.labour_cost), packaging: num(kit.packaging_cost), other: num(kit.other_cost), profileBaseCost, profileSale, commission, baseCost, salePrice, netProfit } };
     return kit;
   };
 
@@ -86,6 +102,15 @@ export function createKitRouter(db: Database.Database) {
   });
   router.delete('/profiles/:profileId/offers/:offerId', (req,res) => { db.prepare('DELETE FROM kit_profile_offers WHERE id=? AND profile_id=?').run(req.params.offerId,req.params.profileId); res.json({success:true}); });
 
+  router.get('/complementary-products', (_req, res) => res.json(db.prepare('SELECT * FROM complementary_products ORDER BY is_active DESC, name').all()));
+  router.post('/complementary-products', (req, res) => {
+    const b=req.body||{}; const id=uuidv4();
+    db.prepare(`INSERT INTO complementary_products (id,name,category,description,supplier,supplier_reference,notes,unit,purchase_price,unit_weight_kg,is_active) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(id,b.name,b.category,b.description,b.supplier,b.supplier_reference,b.notes,b.unit||'adet',num(b.purchase_price),num(b.unit_weight_kg),b.is_active===false?0:1);
+    res.json(db.prepare('SELECT * FROM complementary_products WHERE id=?').get(id));
+  });
+  router.put('/complementary-products/:id', (req,res) => { const b=req.body||{}; db.prepare(`UPDATE complementary_products SET name=?,category=?,description=?,supplier=?,supplier_reference=?,notes=?,unit=?,purchase_price=?,unit_weight_kg=?,is_active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(b.name,b.category,b.description,b.supplier,b.supplier_reference,b.notes,b.unit||'adet',num(b.purchase_price),num(b.unit_weight_kg),b.is_active===false?0:1,req.params.id); res.json(db.prepare('SELECT * FROM complementary_products WHERE id=?').get(req.params.id)); });
+  router.delete('/complementary-products/:id', (req,res) => { try { db.prepare('DELETE FROM complementary_products WHERE id=?').run(req.params.id); res.json({success:true}); } catch { res.status(409).json({error:'Bu tamamlayıcı ürün mevcut bir kitte kullanıldığı için silinemez.'}); } });
+
   router.get('/', (_req, res) => {
     const kits = (db.prepare('SELECT id FROM kits ORDER BY updated_at DESC').all() as any[]).map(row => kitDetail(row.id));
     res.json(kits);
@@ -97,10 +122,17 @@ export function createKitRouter(db: Database.Database) {
     else db.prepare(`INSERT INTO kits (id,name,code,description,profile_id,profile_offer_id,status,cover_image,notes,target_margin,sale_price,labour_cost,packaging_cost,other_cost,commission_rate,vat_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(id,b.name,b.code||null,b.description,b.profile_id,b.profile_offer_id||null,b.status||'active',b.cover_image,b.notes,num(b.target_margin),num(b.sale_price),num(b.labour_cost),num(b.packaging_cost),num(b.other_cost),num(b.commission_rate),num(b.vat_rate)||20);
     db.prepare('DELETE FROM kit_items WHERE kit_id=?').run(id); db.prepare('DELETE FROM kit_cuts WHERE kit_id=?').run(id);
+    db.prepare('DELETE FROM kit_complementary_items WHERE kit_id=?').run(id);
     const itemStmt = db.prepare('INSERT INTO kit_items (id,kit_id,product_id,quantity,unit_cost) VALUES (?,?,?,?,?)');
     for (const item of Array.isArray(b.items) ? b.items : []) if (item.product_id && num(item.quantity)) itemStmt.run(uuidv4(),id,item.product_id,num(item.quantity),num(item.unit_cost));
     const cutStmt = db.prepare('INSERT INTO kit_cuts (id,kit_id,quantity,length_mm,label) VALUES (?,?,?,?,?)');
     for (const cut of Array.isArray(b.cuts) ? b.cuts : []) if (num(cut.length_mm) && num(cut.quantity)) cutStmt.run(uuidv4(),id,num(cut.quantity),num(cut.length_mm),cut.label);
+    const complementary = db.prepare('SELECT * FROM complementary_products WHERE id=?');
+    const complementaryStmt = db.prepare(`INSERT INTO kit_complementary_items (id,kit_id,complementary_product_id,quantity,product_name_snapshot,unit_snapshot,purchase_price_snapshot,unit_weight_kg_snapshot,supplier_snapshot) VALUES (?,?,?,?,?,?,?,?,?)`);
+    for (const line of Array.isArray(b.complementary_items) ? b.complementary_items : []) {
+      const product = complementary.get(line.complementary_product_id) as any;
+      if (product && num(line.quantity)) complementaryStmt.run(uuidv4(),id,product.id,num(line.quantity),product.name,product.unit,num(product.purchase_price),num(product.unit_weight_kg),product.supplier);
+    }
   });
   router.post('/', (req, res) => { const id=uuidv4(); try { saveKit(id,req.body)(); res.json(kitDetail(id)); } catch(e:any) { res.status(400).json({error:e.message}); } });
   router.put('/:id', (req, res) => { try { saveKit(req.params.id,req.body,true)(); res.json(kitDetail(req.params.id)); } catch(e:any) { res.status(400).json({error:e.message}); } });

@@ -1390,6 +1390,32 @@ const migrations: Migration[] = [
       for (const row of rows) insert.run(`legacy-offer-${row.id}`, row.id, row.supplier || 'Varsayılan tedarikçi', row.price_per_meter);
     },
   },
+  {
+    version: 42,
+    name: "add_independent_complementary_product_catalog",
+    up(db) {
+      db.exec(`CREATE TABLE IF NOT EXISTS complementary_products (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, category TEXT, description TEXT,
+        supplier TEXT, supplier_reference TEXT, notes TEXT, unit TEXT NOT NULL DEFAULT 'adet',
+        purchase_price REAL NOT NULL DEFAULT 0, unit_weight_kg REAL NOT NULL DEFAULT 0,
+        is_active INTEGER DEFAULT 1, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      ); CREATE TABLE IF NOT EXISTS kit_complementary_items (
+        id TEXT PRIMARY KEY, kit_id TEXT NOT NULL, complementary_product_id TEXT NOT NULL,
+        quantity REAL NOT NULL DEFAULT 1, product_name_snapshot TEXT NOT NULL, unit_snapshot TEXT NOT NULL,
+        purchase_price_snapshot REAL NOT NULL DEFAULT 0, unit_weight_kg_snapshot REAL NOT NULL DEFAULT 0,
+        supplier_snapshot TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(kit_id) REFERENCES kits(id) ON DELETE CASCADE,
+        FOREIGN KEY(complementary_product_id) REFERENCES complementary_products(id) ON DELETE RESTRICT
+      ); CREATE INDEX IF NOT EXISTS idx_kit_complementary_items_kit ON kit_complementary_items(kit_id);`);
+    },
+  },
+  {
+    version: 43,
+    name: "add_complementary_product_images",
+    up(db) {
+      try { db.exec("ALTER TABLE complementary_products ADD COLUMN cover_image TEXT"); } catch (_) {}
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

@@ -5490,6 +5490,25 @@ async function startServer() {
   app.use("/api/dashboard", createDashboardDataRouter(db));
   app.use("/api/kits", createKitRouter(db));
 
+  // Kit module images intentionally use the same safe image pipeline as the
+  // product catalogue, while staying outside products/product_images.
+  app.post("/api/kits/:id/image", upload.single("image"), (req: any, res) => {
+    const kit = db.prepare("SELECT id FROM kits WHERE id = ?").get(req.params.id);
+    if (!kit) return res.status(404).json({ error: "Kit bulunamadı" });
+    if (!req.file) return res.status(400).json({ error: "Görsel seçilmedi" });
+    const coverImage = `/uploads/${req.file.filename}`;
+    db.prepare("UPDATE kits SET cover_image = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(coverImage, req.params.id);
+    res.json({ success: true, cover_image: coverImage });
+  });
+  app.post("/api/kits/complementary-products/:id/image", upload.single("image"), (req: any, res) => {
+    const product = db.prepare("SELECT id FROM complementary_products WHERE id = ?").get(req.params.id);
+    if (!product) return res.status(404).json({ error: "Tamamlayıcı ürün bulunamadı" });
+    if (!req.file) return res.status(400).json({ error: "Görsel seçilmedi" });
+    const coverImage = `/uploads/${req.file.filename}`;
+    db.prepare("UPDATE complementary_products SET cover_image = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(coverImage, req.params.id);
+    res.json({ success: true, cover_image: coverImage });
+  });
+
   // --- PUBLIC API ROUTES ---
   app.use("/api/public", publicAuthFailedLimiter, publicApiLimiter);
 
