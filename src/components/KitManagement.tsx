@@ -2,11 +2,11 @@ import { useEffect, useState } from 'react';
 import { ArrowLeft, Boxes, Calculator, FileText, Layers3, PackagePlus, Pencil, Plus, Printer, Search, Trash2, X } from 'lucide-react';
 import { api, formatCurrency } from '../lib/api';
 import { Product } from '../types';
-import { EnhancedComplementaryCatalog, EnhancedKitBuilder, EnhancedKitOverview } from './KitEnhancements';
+import { EnhancedComplementaryCatalog, EnhancedKitBuilder, KitDetailV2 } from './KitEnhancements';
 
 type Any = any;
 const n=(x:Any)=>Number(x)||0;
-const fresh=()=>({name:'',code:'',description:'',profile_id:'',profile_offer_id:'',target_margin:30,sale_price:0,labour_cost:0,packaging_cost:0,other_cost:0,commission_rate:0,vat_rate:20,items:[],complementary_items:[],cuts:[]});
+const fresh=()=>({name:'',code:'',description:'',profile_id:'',profile_offer_id:'',target_margin:30,sale_price:0,cutting_cost:0,labour_cost:0,packaging_cost:0,other_cost:0,commission_rate:0,payment_cost:0,shipping_cost:0,vat_rate:20,items:[],complementary_items:[],cuts:[]});
 // Kit içinde parça fiyatı sabitlenmez: Ürün kartındaki güncel alış fiyatı okunur.
 const cost=(x:Any)=>n(x.purchase_cost);
 
@@ -15,7 +15,7 @@ export default function KitManagement(){
   const load=async()=>{const [k,p,r,c]=await Promise.all([api.get('/kits'),api.get('/kits/profiles'),api.get('/products?include_components=1'),api.get('/kits/complementary-products')]);setKits(k);setProfiles(p);setProducts(r);setComplementary(c)};useEffect(()=>{load().catch(console.error)},[]);
   const back=()=>{setDetail(null);setEdit(null);setEditProfile(null);setPage('home')};
   if(edit)return <EnhancedKitBuilder kit={edit} profiles={profiles} products={products} complementary={complementary} back={()=>setEdit(null)} save={async(x:Any,image:File|null)=>{const saved=await(x.id?api.put(`/kits/${x.id}`,x):api.post('/kits',x));if(image){const form=new FormData();form.append('image',image);await api.upload(`/kits/${saved.id}/image`,form);saved.cover_image=(await api.get(`/kits/${saved.id}`)).cover_image;}await load();setEdit(null);setDetail(saved)}}/>;
-  if(detail)return <EnhancedKitOverview kit={detail} back={()=>setDetail(null)} edit={()=>setEdit(detail)}/>;
+  if(detail)return <KitDetailV2 kit={detail} back={()=>setDetail(null)} edit={()=>setEdit(detail)}/>;
   if(editProfile)return <ProfileEditor profile={editProfile} back={()=>setEditProfile(null)} save={async(x:Any)=>{const result=x.id?await api.put(`/kits/profiles/${x.id}`,x):await api.post('/kits/profiles',x);await load();alert('Profil başarıyla kaydedildi.');if(!x.id)setEditProfile(null);else setEditProfile({...x,...result})}}/>;
   return <div className="space-y-5"><div className="flex items-start justify-between"><div><p className="text-xs font-black uppercase tracking-[.16em] text-cyan-700">Üretim & maliyet</p><h1 className="mt-1 text-2xl font-black">Kit Yönetimi</h1><p className="mt-1 text-sm text-slate-500">Kitler, profiller ve kesim planları.</p></div>{page!=='home'&&<button onClick={back} className="rounded-xl border bg-white px-3 py-2 text-sm font-bold"><ArrowLeft className="mr-1 inline h-4 w-4"/>Ana sayfa</button>}</div>
     {page==='home'&&<Home kits={kits} profiles={profiles} complementary={complementary} go={setPage}/>} {page==='kits'&&<KitList kits={kits} newKit={()=>setEdit(fresh())} open={setDetail}/>} {page==='profiles'&&<ProfileList profiles={profiles} open={setEditProfile} add={()=>setEditProfile({name:'',shape:'Kare',dimension:'',material:'Karbon Çelik',thickness:'',color:'',finish:'',grade:'',stock_length_mm:6000,offers:[]})}/>} {page==='complementary'&&<EnhancedComplementaryCatalog items={complementary} reload={load}/>} {page==='cut'&&<CutPlan kits={kits}/>}</div>;

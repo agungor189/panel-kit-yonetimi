@@ -1416,6 +1416,17 @@ const migrations: Migration[] = [
       try { db.exec("ALTER TABLE complementary_products ADD COLUMN cover_image TEXT"); } catch (_) {}
     },
   },
+  {
+    version: 44,
+    name: "add_kit_cost_analysis_fields",
+    up(db) {
+      for (const sql of [
+        "ALTER TABLE kits ADD COLUMN cutting_cost REAL DEFAULT 0",
+        "ALTER TABLE kits ADD COLUMN payment_cost REAL DEFAULT 0",
+        "ALTER TABLE kits ADD COLUMN shipping_cost REAL DEFAULT 0",
+      ]) try { db.exec(sql); } catch (_) {}
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

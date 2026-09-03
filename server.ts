@@ -2719,7 +2719,8 @@ async function startServer() {
   app.post("/api/products/bulk-pricing", (req, res) => {
     try {
       const { updates, settings } = req.body;
-      const { exchangeRate, bufferPercentage, profitPercentage } = settings;
+      const { exchangeRate, bufferPercentage, profitPercentage, includeLocked } = settings;
+      const normalizedExchangeRate = Number(exchangeRate) || 0;
       let updatedCount = 0;
       let skippedLockedCount = 0;
       let skippedMissingCount = 0;
@@ -2742,11 +2743,12 @@ async function startServer() {
         const stmt = db.prepare(`
           UPDATE products
           SET sale_price = ?,
+              purchase_cost = ?,
               exchange_rate_used = ?,
               buffer_percentage = ?,
               profit_percentage = ?,
               updated_at = CURRENT_TIMESTAMP
-          WHERE id = ? AND COALESCE(price_locked, 0) = 0
+          WHERE id = ?
         `);
 
         const platformStmt = db.prepare(`
@@ -2761,7 +2763,7 @@ async function startServer() {
             skippedMissingCount += 1;
             continue;
           }
-          if (currentProduct.price_locked === 1) {
+          if (currentProduct.price_locked === 1 && !includeLocked) {
             skippedLockedCount += 1;
             continue;
           }
@@ -2780,7 +2782,8 @@ async function startServer() {
             'bulk-pricing'
           );
 
-          const result = stmt.run(update.newSalePrice, exchangeRate, bufferPercentage, profitPercentage, update.id);
+          const purchaseCostTRY = (Number(currentProduct.purchase_price_usd) || 0) * normalizedExchangeRate;
+          const result = stmt.run(update.newSalePrice, purchaseCostTRY, normalizedExchangeRate, bufferPercentage, profitPercentage, update.id);
           if (result.changes > 0) {
             updatedCount += result.changes;
             platformStmt.run(update.newSalePrice, update.id);
@@ -2792,9 +2795,10 @@ async function startServer() {
         updatedCount,
         skippedLockedCount,
         skippedMissingCount,
-        exchangeRate,
+        exchangeRate: normalizedExchangeRate,
         bufferPercentage,
         profitPercentage,
+        includeLocked: Boolean(includeLocked),
       }, req.user?.id);
       res.json({ success: true, updatedCount, skippedLockedCount, skippedMissingCount });
     } catch (err: any) {

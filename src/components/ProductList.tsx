@@ -125,7 +125,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
     name: 'Ürün Adı',
     category: 'Malzeme',
     stock: 'Merkez Depo Stoğu',
-    price: 'Satış Fiyatı',
+    price: 'Alış Fiyatı (USD)',
     barcode: 'Barkod',
     description: 'Açıklama',
     weight: 'Ağırlık',
@@ -144,7 +144,8 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
       'Ürün Adı': p.name || p.title,
       'Boru Ölçüsü': p.pipe_size || '',
       'Merkez Depo Stoğu': p.total_stock || 0,
-      'Satış Fiyatı': p.sale_price,
+      'Alış Fiyatı (USD)': p.purchase_price_usd,
+      'Satış Fiyatı (TL)': p.sale_price,
       'Barkod': p.barcode || '',
       'Açıklama': p.description || '',
       'Ağırlık': p.weight || 0,
@@ -189,7 +190,11 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
         newMapping.name = findMatch(['ad', 'isim', 'başlık', 'ürün adı']) || headers[1] || '';
         newMapping.category = findMatch(['malzeme', 'kategori', 'category']) || headers[2] || '';
         newMapping.stock = findMatch(['stok', 'adet', 'stock', 'toplam stok', 'merkez depo stoğu']) || headers[3] || '';
-        newMapping.price = findMatch(['fiyat', 'price', 'satış fiyatı']) || headers[4] || '';
+        newMapping.price =
+          findMatch(['alış fiyatı', 'alis fiyati', 'alış usd', 'alis usd', 'purchase price', 'purchase usd', 'cost usd', 'usd']) ||
+          findMatch(['fiyat', 'price']) ||
+          headers[4] ||
+          '';
         newMapping.barcode = findMatch(['barkod', 'barcode', 'ean']) || headers[5] || '';
         newMapping.description = findMatch(['açıklama', 'description', 'detay']) || headers[6] || '';
         newMapping.weight = findMatch(['ağırlık', 'weight', 'gram']) || headers[7] || '';
@@ -234,6 +239,8 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
           return isNaN(num) ? 0 : num;
         };
         const purchasePriceUSD = parseCSVPrice(row[mapping.price]);
+        const importExchangeRate = activeRate > 1 ? activeRate : 0;
+        const purchaseCostTRY = purchasePriceUSD * importExchangeRate;
         const barcode = row[mapping.barcode] || '';
         const description = row[mapping.description] || '';
         const weight = parseInt(row[mapping.weight]) || 0;
@@ -256,12 +263,12 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
           weight: weight,
           model: 'Standart',
           purchase_price_usd: purchasePriceUSD,
-          purchase_cost: 0,
+          purchase_cost: purchaseCostTRY,
           sale_price: 0,
           buffer_percentage: 0,
           profit_percentage: 0,
           price_locked: false,
-          exchange_rate_used: 0,
+          exchange_rate_used: importExchangeRate,
           central_stock: totalStock,
           total_stock: totalStock,
           status: totalStock > 0 ? 'Active' : 'Out of stock',
@@ -399,7 +406,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                 'Malzeme': 'Aliminyum',
                 'Seri': 'OYA',
                 'Merkez Depo Stoğu': '100',
-                'Satış Fiyatı': '250',
+                'Alış Fiyatı (USD)': '4.50',
                 'Barkod': '8690000000001',
                 'Açıklama': 'Siyah kaliteli kaplama',
                 'Ağırlık': '500',

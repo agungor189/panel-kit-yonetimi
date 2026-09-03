@@ -13,13 +13,13 @@ export default function PricingSettingsModal({
   products: any[] 
 }) {
   const { FormatAmount, activeRate } = useCurrency();
-  const [exchangeRate, setExchangeRate] = useState<number>(activeRate || 0);
+  const [exchangeRate, setExchangeRate] = useState<number>(activeRate > 1 ? activeRate : 0);
   const [bufferPercentage, setBufferPercentage] = useState<number>(20);
   const [profitPercentage, setProfitPercentage] = useState<number>(50);
   const [includeLocked, setIncludeLocked] = useState<boolean>(false);
 
   useEffect(() => {
-    if (activeRate > 0 && exchangeRate === 0) {
+    if (activeRate > 1 && exchangeRate <= 1) {
       setExchangeRate(activeRate);
     }
   }, [activeRate]);
@@ -30,21 +30,19 @@ export default function PricingSettingsModal({
   const [errorMessage, setErrorMessage] = useState("");
   const [confirmUpdate, setConfirmUpdate] = useState<{ updates: any[], missingOnly: boolean } | null>(null);
 
+  const productCostTRY = (product: any) => {
+    const purchaseUSD = parseFloat(product.purchase_price_usd);
+    const rate = exchangeRate || 0;
+    if (!Number.isNaN(purchaseUSD) && purchaseUSD > 0 && rate > 0) {
+      return purchaseUSD * rate;
+    }
+    return 0;
+  };
+
   // Initial calculation logic
   const calculatePricing = (product: any) => {
-    let purchaseUSD = parseFloat(product.purchase_price_usd);
-    let purchaseTRY = 0;
-    const rate = exchangeRate || 0;
-
-    if (!isNaN(purchaseUSD) && purchaseUSD > 0) {
-       purchaseTRY = purchaseUSD * rate;
-    } else if (parseFloat(product.purchase_cost) > 0) {
-       purchaseTRY = parseFloat(product.purchase_cost);
-    }
-
-    if (purchaseTRY === 0 && parseFloat(product.sale_price) > 0) {
-       return parseFloat(product.sale_price); // Fallback to existing logic if cost is unknown
-    }
+    const purchaseTRY = productCostTRY(product);
+    if (purchaseTRY === 0) return 0;
 
     const buffer = bufferPercentage || 0;
     const profit = profitPercentage || 0;
@@ -54,6 +52,10 @@ export default function PricingSettingsModal({
   };
 
   const handlePreview = () => {
+    if (exchangeRate <= 1) {
+      setErrorMessage("Geçerli USD/TRY kuru gelmeden fiyat hesaplanamaz. Lütfen kuru yenileyin veya doğru kuru girin.");
+      return;
+    }
     let hasFailures = false;
     const data = products.map(p => {
       if (p.price_locked && !includeLocked) {
@@ -76,6 +78,10 @@ export default function PricingSettingsModal({
 
   const executeUpdate = (onlyMissing: boolean = false) => {
     setErrorMessage("");
+    if (exchangeRate <= 1) {
+      setErrorMessage("Geçerli USD/TRY kuru gelmeden fiyat güncellemesi yapılamaz. Lütfen kuru yenileyin veya doğru kuru girin.");
+      return;
+    }
     const dataToUpdate = products.filter(p => {
       if (p.price_locked && !includeLocked) return false;
       if (onlyMissing && p.sale_price > 0) return false;
@@ -102,7 +108,8 @@ export default function PricingSettingsModal({
         settings: {
           exchangeRate,
           bufferPercentage,
-          profitPercentage
+          profitPercentage,
+          includeLocked
         }
       });
       onRefresh();

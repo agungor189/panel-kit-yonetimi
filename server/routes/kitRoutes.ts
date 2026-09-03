@@ -54,11 +54,12 @@ export function createKitRouter(db: Database.Database) {
     const complementaryWeightKg = kit.complementary_items.reduce((sum: number, item: any) => sum + num(item.quantity) * num(item.unit_weight_kg_snapshot), 0);
     const connectionWeightKg = kit.items.reduce((sum: number, item: any) => sum + num(item.quantity) * num(item.weight) / 1000, 0);
     const profileWeightKg = profileMeters * num(kit.weight_per_meter);
-    const profileBaseCost = profileCost + num(kit.labour_cost) + num(kit.packaging_cost) + num(kit.other_cost);
+    const profileBaseCost = profileCost + num(kit.cutting_cost) + num(kit.labour_cost) + num(kit.packaging_cost) + num(kit.other_cost);
+    const commercialFixed = num(kit.payment_cost) + num(kit.shipping_cost);
     // “Hedef kâr” is a markup on the profile work cost, not a gross-margin
     // denominator. At 100% the profile sale becomes 2× its profile cost;
     // commission is then grossed up separately when applicable.
-    const suggestedProfileSale = (profileBaseCost * (1 + num(kit.target_margin) / 100)) /
+    const suggestedProfileSale = (profileBaseCost * (1 + num(kit.target_margin) / 100) + commercialFixed) /
       Math.max(0.01, 1 - num(kit.commission_rate) / 100);
     const profileSale = num(kit.sale_price) || suggestedProfileSale;
     const commission = profileSale * num(kit.commission_rate) / 100;
@@ -68,12 +69,13 @@ export function createKitRouter(db: Database.Database) {
     // own live sales prices from the main product catalog.
     const complementarySale = complementaryCost;
     const salePrice = partsSale + complementarySale + profileSale;
-    const baseCost = partsCost + complementaryCost + profileBaseCost;
+    const baseCost = partsCost + complementaryCost + profileBaseCost + commission + commercialFixed;
     const vat = salePrice * num(kit.vat_rate) / 100;
-    const netProfit = (partsSale - partsCost) + (profileSale - profileBaseCost - commission);
+    const netProfit = salePrice - baseCost;
     kit.analysis = { availability, partsCost, partsSale, profileMeters, profileCost, profileBaseCost, profileSale, baseCost, suggestedPrice: suggestedProfileSale, suggestedProfileSale, salePrice, commission, vat, netProfit, margin: salePrice ? (netProfit / salePrice) * 100 : 0,
       complementaryCost, weightBreakdown: { connectionWeightKg, profileWeightKg, complementaryWeightKg, totalWeightKg: connectionWeightKg + profileWeightKg + complementaryWeightKg },
-      breakdown: { partsCost, partsSale, profileMaterial: profileCost, complementaryCost, complementarySale, labour: num(kit.labour_cost), packaging: num(kit.packaging_cost), other: num(kit.other_cost), profileBaseCost, profileSale, commission, baseCost, salePrice, netProfit } };
+      markup: baseCost ? (netProfit / baseCost) * 100 : 0,
+      breakdown: { partsCost, partsSale, profileMaterial: profileCost, complementaryCost, complementarySale, cutting: num(kit.cutting_cost), labour: num(kit.labour_cost), packaging: num(kit.packaging_cost), other: num(kit.other_cost), commission, payment: num(kit.payment_cost), shipping: num(kit.shipping_cost), commercialFixed, profileBaseCost, profileSale, baseCost, salePrice, netProfit } };
     return kit;
   };
 
@@ -117,10 +119,10 @@ export function createKitRouter(db: Database.Database) {
   });
   router.get('/:id', (req, res) => { const kit = kitDetail(req.params.id); kit ? res.json(kit) : res.status(404).json({ error: 'Kit bulunamadı' }); });
   const saveKit = (id: string, b: any, update = false) => db.transaction(() => {
-    if (update) db.prepare(`UPDATE kits SET name=?,code=?,description=?,profile_id=?,profile_offer_id=?,status=?,cover_image=?,notes=?,target_margin=?,sale_price=?,labour_cost=?,packaging_cost=?,other_cost=?,commission_rate=?,vat_rate=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .run(b.name,b.code||null,b.description,b.profile_id,b.profile_offer_id||null,b.status||'active',b.cover_image,b.notes,num(b.target_margin),num(b.sale_price),num(b.labour_cost),num(b.packaging_cost),num(b.other_cost),num(b.commission_rate),num(b.vat_rate)||20,id);
-    else db.prepare(`INSERT INTO kits (id,name,code,description,profile_id,profile_offer_id,status,cover_image,notes,target_margin,sale_price,labour_cost,packaging_cost,other_cost,commission_rate,vat_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(id,b.name,b.code||null,b.description,b.profile_id,b.profile_offer_id||null,b.status||'active',b.cover_image,b.notes,num(b.target_margin),num(b.sale_price),num(b.labour_cost),num(b.packaging_cost),num(b.other_cost),num(b.commission_rate),num(b.vat_rate)||20);
+    if (update) db.prepare(`UPDATE kits SET name=?,code=?,description=?,profile_id=?,profile_offer_id=?,status=?,cover_image=?,notes=?,target_margin=?,sale_price=?,cutting_cost=?,labour_cost=?,packaging_cost=?,other_cost=?,commission_rate=?,payment_cost=?,shipping_cost=?,vat_rate=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+      .run(b.name,b.code||null,b.description,b.profile_id,b.profile_offer_id||null,b.status||'active',b.cover_image,b.notes,num(b.target_margin),num(b.sale_price),num(b.cutting_cost),num(b.labour_cost),num(b.packaging_cost),num(b.other_cost),num(b.commission_rate),num(b.payment_cost),num(b.shipping_cost),num(b.vat_rate)||20,id);
+    else db.prepare(`INSERT INTO kits (id,name,code,description,profile_id,profile_offer_id,status,cover_image,notes,target_margin,sale_price,cutting_cost,labour_cost,packaging_cost,other_cost,commission_rate,payment_cost,shipping_cost,vat_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id,b.name,b.code||null,b.description,b.profile_id,b.profile_offer_id||null,b.status||'active',b.cover_image,b.notes,num(b.target_margin),num(b.sale_price),num(b.cutting_cost),num(b.labour_cost),num(b.packaging_cost),num(b.other_cost),num(b.commission_rate),num(b.payment_cost),num(b.shipping_cost),num(b.vat_rate)||20);
     db.prepare('DELETE FROM kit_items WHERE kit_id=?').run(id); db.prepare('DELETE FROM kit_cuts WHERE kit_id=?').run(id);
     db.prepare('DELETE FROM kit_complementary_items WHERE kit_id=?').run(id);
     const itemStmt = db.prepare('INSERT INTO kit_items (id,kit_id,product_id,quantity,unit_cost) VALUES (?,?,?,?,?)');
