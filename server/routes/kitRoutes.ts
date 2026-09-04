@@ -104,13 +104,23 @@ export function createKitRouter(db: Database.Database) {
   });
   router.delete('/profiles/:profileId/offers/:offerId', (req,res) => { db.prepare('DELETE FROM kit_profile_offers WHERE id=? AND profile_id=?').run(req.params.offerId,req.params.profileId); res.json({success:true}); });
 
-  router.get('/complementary-products', (_req, res) => res.json(db.prepare('SELECT * FROM complementary_products ORDER BY is_active DESC, name').all()));
+  router.get('/complementary-products', (_req, res) => {
+    const rows = db.prepare('SELECT * FROM complementary_products ORDER BY is_active DESC, name').all() as any[];
+    const images = db.prepare('SELECT * FROM complementary_product_images ORDER BY sort_order ASC, created_at ASC').all() as any[];
+    const byProduct = new Map<string, any[]>();
+    for (const image of images) {
+      const list = byProduct.get(image.complementary_product_id) || [];
+      list.push(image);
+      byProduct.set(image.complementary_product_id, list);
+    }
+    res.json(rows.map(row => ({ ...row, images: byProduct.get(row.id) || (row.cover_image ? [{ id: 'cover', path: row.cover_image, sort_order: 0 }] : []) })));
+  });
   router.post('/complementary-products', (req, res) => {
     const b=req.body||{}; const id=uuidv4();
     db.prepare(`INSERT INTO complementary_products (id,name,category,description,supplier,supplier_reference,notes,unit,purchase_price,unit_weight_kg,is_active) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(id,b.name,b.category,b.description,b.supplier,b.supplier_reference,b.notes,b.unit||'adet',num(b.purchase_price),num(b.unit_weight_kg),b.is_active===false?0:1);
-    res.json(db.prepare('SELECT * FROM complementary_products WHERE id=?').get(id));
+    res.json({ ...(db.prepare('SELECT * FROM complementary_products WHERE id=?').get(id) as any), images: [] });
   });
-  router.put('/complementary-products/:id', (req,res) => { const b=req.body||{}; db.prepare(`UPDATE complementary_products SET name=?,category=?,description=?,supplier=?,supplier_reference=?,notes=?,unit=?,purchase_price=?,unit_weight_kg=?,is_active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(b.name,b.category,b.description,b.supplier,b.supplier_reference,b.notes,b.unit||'adet',num(b.purchase_price),num(b.unit_weight_kg),b.is_active===false?0:1,req.params.id); res.json(db.prepare('SELECT * FROM complementary_products WHERE id=?').get(req.params.id)); });
+  router.put('/complementary-products/:id', (req,res) => { const b=req.body||{}; db.prepare(`UPDATE complementary_products SET name=?,category=?,description=?,supplier=?,supplier_reference=?,notes=?,unit=?,purchase_price=?,unit_weight_kg=?,is_active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(b.name,b.category,b.description,b.supplier,b.supplier_reference,b.notes,b.unit||'adet',num(b.purchase_price),num(b.unit_weight_kg),b.is_active===false?0:1,req.params.id); const row = db.prepare('SELECT * FROM complementary_products WHERE id=?').get(req.params.id) as any; const images = db.prepare('SELECT * FROM complementary_product_images WHERE complementary_product_id=? ORDER BY sort_order ASC, created_at ASC').all(req.params.id); res.json({ ...row, images }); });
   router.delete('/complementary-products/:id', (req,res) => { try { db.prepare('DELETE FROM complementary_products WHERE id=?').run(req.params.id); res.json({success:true}); } catch { res.status(409).json({error:'Bu tamamlayıcı ürün mevcut bir kitte kullanıldığı için silinemez.'}); } });
 
   router.get('/', (_req, res) => {

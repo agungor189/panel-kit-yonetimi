@@ -12,7 +12,9 @@ import {
   Upload,
   Trash2,
   FileText,
-  ScanLine
+  ScanLine,
+  SlidersHorizontal,
+  X
 } from 'lucide-react';
 import { api, PLATFORMS } from '../lib/api';
 import { useCurrency } from '../CurrencyContext';
@@ -70,6 +72,44 @@ function getBottleneckComponent(product: Product) {
   }, product.bom_components?.[0]);
 }
 
+function FilterSelect({
+  label,
+  value,
+  onChange,
+  options,
+  allLabel,
+  labels = {},
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: string[];
+  allLabel: string;
+  labels?: Record<string, string>;
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1.5 ml-1 block text-[10px] font-black uppercase tracking-widest text-text-muted">
+        {label}
+      </span>
+      <div className="relative">
+        <select
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          className="h-11 w-full appearance-none rounded-xl border border-border-color bg-bg-main px-3 pr-9 text-sm font-bold text-text-main outline-none transition-all hover:border-primary focus:border-primary focus:ring-2 focus:ring-primary/20"
+        >
+          {options.map((option) => (
+            <option key={option} value={option}>
+              {option === 'Hepsi' ? allLabel : labels[option] || option}
+            </option>
+          ))}
+        </select>
+        <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-text-muted" />
+      </div>
+    </label>
+  );
+}
+
 interface ProductListProps {
   onAddProduct: () => void;
   onProductClick: (id: string) => void;
@@ -82,7 +122,10 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('table');
   const [search, setSearch] = useState('');
   const [filterCategory, setFilterCategory] = useState('Hepsi');
+  const [filterProfileType, setFilterProfileType] = useState('Hepsi');
+  const [filterSize, setFilterSize] = useState('Hepsi');
   const [filterStatus, setFilterStatus] = useState('Hepsi');
+  const [sortKey, setSortKey] = useState('name_asc');
   const [showScanner, setShowScanner] = useState(false);
 
   useEffect(() => {
@@ -98,6 +141,19 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
     }
   };
 
+  const normalizeFilterValue = (value: unknown) => String(value || '').trim();
+  const profileTypeOf = (product: Product) => normalizeFilterValue((product as any).normalized_tube_type || product.form_code || product.tube_type_code || product.model);
+  const sizeOf = (product: Product) => normalizeFilterValue((product as any).normalized_pipe_size || product.pipe_size || product.size || product.size_code);
+  const materialOf = (product: Product) => normalizeFilterValue(product.category || product.material || (product as any).normalized_material);
+  const productWeight = (product: Product) => Number(product.weight || (product as any).unit_weight_kg || 0);
+  const purchaseUsd = (product: Product) => Number(product.purchase_price_usd || 0);
+  const purchaseTry = (product: Product) => Number(product.purchase_cost || 0);
+  const saleTry = (product: Product) => Number(product.sale_price || 0);
+  const stockQty = (product: Product) => Number(product.total_stock ?? product.central_stock ?? 0);
+  const sortedUnique = (values: string[]) => [...new Set(values.map(normalizeFilterValue).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'tr'));
+  const byText = (a: string, b: string) => a.localeCompare(b, 'tr', { numeric: true, sensitivity: 'base' });
+
   const filteredProducts = products.filter(p => {
     const searchLower = search.toLowerCase();
     const matchesSearch =
@@ -106,12 +162,45 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
       (p.sku?.toLowerCase().includes(searchLower)) ||
       (p.barcode?.toLowerCase().includes(searchLower)) ||
       (p.product_series?.toLowerCase().includes(searchLower));
-    const matchesCategory = filterCategory === 'Hepsi' || p.category === filterCategory;
+    const matchesCategory = filterCategory === 'Hepsi' || materialOf(p) === filterCategory;
+    const matchesProfileType = filterProfileType === 'Hepsi' || profileTypeOf(p) === filterProfileType;
+    const matchesSize = filterSize === 'Hepsi' || sizeOf(p) === filterSize;
     const matchesStatus = filterStatus === 'Hepsi' || p.status === filterStatus;
-    return matchesSearch && matchesCategory && matchesStatus;
+    return matchesSearch && matchesCategory && matchesProfileType && matchesSize && matchesStatus;
+  }).sort((a, b) => {
+    switch (sortKey) {
+      case 'sku_asc': return byText(a.sku || '', b.sku || '');
+      case 'material_asc': return byText(materialOf(a), materialOf(b));
+      case 'profile_asc': return byText(profileTypeOf(a), profileTypeOf(b)) || byText(sizeOf(a), sizeOf(b));
+      case 'size_asc': return byText(sizeOf(a), sizeOf(b)) || byText(profileTypeOf(a), profileTypeOf(b));
+      case 'weight_desc': return productWeight(b) - productWeight(a);
+      case 'weight_asc': return productWeight(a) - productWeight(b);
+      case 'purchase_usd_desc': return purchaseUsd(b) - purchaseUsd(a);
+      case 'purchase_usd_asc': return purchaseUsd(a) - purchaseUsd(b);
+      case 'purchase_try_desc': return purchaseTry(b) - purchaseTry(a);
+      case 'purchase_try_asc': return purchaseTry(a) - purchaseTry(b);
+      case 'sale_desc': return saleTry(b) - saleTry(a);
+      case 'sale_asc': return saleTry(a) - saleTry(b);
+      case 'stock_desc': return stockQty(b) - stockQty(a);
+      case 'stock_asc': return stockQty(a) - stockQty(b);
+      case 'value_desc': return (stockQty(b) * saleTry(b)) - (stockQty(a) * saleTry(a));
+      case 'name_asc':
+      default: return byText(a.name || a.title || '', b.name || b.title || '');
+    }
   });
 
-  const categories = ['Hepsi', ...new Set(products.map(p => p.category))];
+  const categories = ['Hepsi', ...sortedUnique(products.map(materialOf))];
+  const profileTypes = ['Hepsi', ...sortedUnique(products.map(profileTypeOf))];
+  const profileSizes = ['Hepsi', ...sortedUnique(products.map(sizeOf))];
+  const hasActiveFilters = Boolean(search) || filterCategory !== 'Hepsi' || filterProfileType !== 'Hepsi' || filterSize !== 'Hepsi' || filterStatus !== 'Hepsi' || sortKey !== 'name_asc';
+  const clearFilters = () => {
+    setSearch('');
+    setFilterCategory('Hepsi');
+    setFilterProfileType('Hepsi');
+    setFilterSize('Hepsi');
+    setFilterStatus('Hepsi');
+    setSortKey('name_asc');
+  };
   const csvInputRef = useRef<HTMLInputElement>(null);
 
   // CSV Mapping State
@@ -125,7 +214,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
     name: 'Ürün Adı',
     category: 'Malzeme',
     stock: 'Merkez Depo Stoğu',
-    price: 'Alış Fiyatı (USD)',
+    price: 'Satış Fiyatı',
     barcode: 'Barkod',
     description: 'Açıklama',
     weight: 'Ağırlık',
@@ -144,8 +233,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
       'Ürün Adı': p.name || p.title,
       'Boru Ölçüsü': p.pipe_size || '',
       'Merkez Depo Stoğu': p.total_stock || 0,
-      'Alış Fiyatı (USD)': p.purchase_price_usd,
-      'Satış Fiyatı (TL)': p.sale_price,
+      'Satış Fiyatı': p.sale_price,
       'Barkod': p.barcode || '',
       'Açıklama': p.description || '',
       'Ağırlık': p.weight || 0,
@@ -190,11 +278,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
         newMapping.name = findMatch(['ad', 'isim', 'başlık', 'ürün adı']) || headers[1] || '';
         newMapping.category = findMatch(['malzeme', 'kategori', 'category']) || headers[2] || '';
         newMapping.stock = findMatch(['stok', 'adet', 'stock', 'toplam stok', 'merkez depo stoğu']) || headers[3] || '';
-        newMapping.price =
-          findMatch(['alış fiyatı', 'alis fiyati', 'alış usd', 'alis usd', 'purchase price', 'purchase usd', 'cost usd', 'usd']) ||
-          findMatch(['fiyat', 'price']) ||
-          headers[4] ||
-          '';
+        newMapping.price = findMatch(['fiyat', 'price', 'satış fiyatı']) || headers[4] || '';
         newMapping.barcode = findMatch(['barkod', 'barcode', 'ean']) || headers[5] || '';
         newMapping.description = findMatch(['açıklama', 'description', 'detay']) || headers[6] || '';
         newMapping.weight = findMatch(['ağırlık', 'weight', 'gram']) || headers[7] || '';
@@ -239,8 +323,6 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
           return isNaN(num) ? 0 : num;
         };
         const purchasePriceUSD = parseCSVPrice(row[mapping.price]);
-        const importExchangeRate = activeRate > 1 ? activeRate : 0;
-        const purchaseCostTRY = purchasePriceUSD * importExchangeRate;
         const barcode = row[mapping.barcode] || '';
         const description = row[mapping.description] || '';
         const weight = parseInt(row[mapping.weight]) || 0;
@@ -263,12 +345,12 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
           weight: weight,
           model: 'Standart',
           purchase_price_usd: purchasePriceUSD,
-          purchase_cost: purchaseCostTRY,
+          purchase_cost: 0,
           sale_price: 0,
           buffer_percentage: 0,
           profit_percentage: 0,
           price_locked: false,
-          exchange_rate_used: importExchangeRate,
+          exchange_rate_used: 0,
           central_stock: totalStock,
           total_stock: totalStock,
           status: totalStock > 0 ? 'Active' : 'Out of stock',
@@ -406,7 +488,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                 'Malzeme': 'Aliminyum',
                 'Seri': 'OYA',
                 'Merkez Depo Stoğu': '100',
-                'Alış Fiyatı (USD)': '4.50',
+                'Satış Fiyatı': '250',
                 'Barkod': '8690000000001',
                 'Açıklama': 'Siyah kaliteli kaplama',
                 'Ağırlık': '500',
@@ -496,50 +578,134 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
       )}
 
       {/* Filters Bar */}
-      <div className="card p-3 lg:p-4 flex flex-col lg:flex-row items-stretch lg:items-center gap-3 lg:gap-4 bg-white shadow-sm">
-        <div className="relative flex-1 flex items-center">
-          <Search className="w-4 h-4 text-text-muted absolute left-3.5" />
-          <input
-            type="text"
-            placeholder="Ürün Ara Veya Barkod Okut..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-10 pr-12 py-3 lg:py-2.5 bg-bg-main rounded-xl lg:rounded-lg text-sm border border-border-color focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all outline-none"
-          />
-          <button
-            onClick={() => setShowScanner(true)}
-            className="absolute right-2 p-1.5 text-text-muted hover:text-primary transition-colors hover:bg-bg-main rounded-md"
-            title="Kamera ile Barkod Oku"
-          >
-            <ScanLine className="w-5 h-5" />
-          </button>
-        </div>
+      <div className="card bg-white p-4 shadow-sm">
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
+            <div className="relative flex min-w-[260px] flex-1 items-center">
+              <Search className="absolute left-3.5 h-4 w-4 text-text-muted" />
+              <input
+                type="text"
+                placeholder="Ürün adı, SKU, barkod veya seri ara..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="w-full rounded-xl border border-border-color bg-bg-main py-3 pl-10 pr-12 text-sm outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/20"
+              />
+              <button
+                onClick={() => setShowScanner(true)}
+                className="absolute right-2 rounded-md p-1.5 text-text-muted transition-colors hover:bg-white hover:text-primary"
+                title="Kamera ile barkod oku"
+              >
+                <ScanLine className="h-5 w-5" />
+              </button>
+            </div>
 
-        <div className="flex items-center space-x-2 lg:space-x-3">
-                  <div className="flex-1 lg:flex-none flex items-center px-3 py-3 lg:py-2 bg-bg-main rounded-xl lg:rounded-lg border border-border-color">
-            <Filter className="w-3.5 h-3.5 text-text-muted mr-2" />
-            <select
-              value={filterCategory}
-              onChange={(e) => setFilterCategory(e.target.value)}
-              className="bg-transparent text-xs lg:text-sm font-semibold outline-none cursor-pointer text-text-main w-full"
-            >
-              {categories.map(c => <option key={c} value={c}>{c === 'Hepsi' ? 'Tüm Malzemeler' : c}</option>)}
-            </select>
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border-color bg-bg-main px-3 py-2 xl:w-auto">
+              <div className="flex items-center gap-2 text-xs font-black uppercase tracking-widest text-text-muted">
+                <SlidersHorizontal className="h-4 w-4" />
+                Filtreler
+              </div>
+              <div className="rounded-full bg-white px-3 py-1 text-xs font-bold text-primary shadow-sm">
+                {filteredProducts.length} / {products.length} ürün
+              </div>
+              {hasActiveFilters && (
+                <button
+                  onClick={clearFilters}
+                  className="flex items-center gap-1 rounded-lg border border-border-color bg-white px-3 py-1.5 text-xs font-bold text-text-muted transition-colors hover:border-primary hover:text-primary"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  Temizle
+                </button>
+              )}
+            </div>
+
+            <div className="flex w-fit rounded-xl border border-border-color bg-bg-main p-1">
+              <button
+                onClick={() => setViewMode('grid')}
+                className={cn("p-2 lg:p-1.5 rounded-lg lg:rounded-md transition-all", viewMode === 'grid' ? "bg-white shadow-sm text-primary" : "text-text-muted")}
+              >
+                <LayoutGrid className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setViewMode('table')}
+                className={cn("p-2 lg:p-1.5 rounded-lg lg:rounded-md transition-all", viewMode === 'table' ? "bg-white shadow-sm text-primary" : "text-text-muted")}
+              >
+                <List className="w-4 h-4" />
+              </button>
+            </div>
           </div>
 
-          <div className="flex bg-bg-main rounded-xl lg:rounded-lg p-1 border border-border-color">
-            <button
-              onClick={() => setViewMode('grid')}
-              className={cn("p-2 lg:p-1.5 rounded-lg lg:rounded-md transition-all", viewMode === 'grid' ? "bg-white shadow-sm text-primary" : "text-text-muted")}
-            >
-              <LayoutGrid className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => setViewMode('table')}
-              className={cn("p-2 lg:p-1.5 rounded-lg lg:rounded-md transition-all", viewMode === 'table' ? "bg-white shadow-sm text-primary" : "text-text-muted")}
-            >
-              <List className="w-4 h-4" />
-            </button>
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+            <FilterSelect
+              label="Malzeme"
+              value={filterCategory}
+              onChange={setFilterCategory}
+              options={categories}
+              allLabel="Tüm malzemeler"
+            />
+            <FilterSelect
+              label="Profil türü"
+              value={filterProfileType}
+              onChange={setFilterProfileType}
+              options={profileTypes}
+              allLabel="Tüm profil türleri"
+            />
+            <FilterSelect
+              label="Ölçü"
+              value={filterSize}
+              onChange={setFilterSize}
+              options={profileSizes}
+              allLabel="Tüm ölçüler"
+            />
+            <FilterSelect
+              label="Durum"
+              value={filterStatus}
+              onChange={setFilterStatus}
+              options={['Hepsi', 'Active', 'Passive', 'Out of stock']}
+              allLabel="Tüm durumlar"
+              labels={{ Active: 'Aktif', Passive: 'Pasif', 'Out of stock': 'Stok yok' }}
+            />
+            <FilterSelect
+              label="Sıralama"
+              value={sortKey}
+              onChange={setSortKey}
+              options={[
+                'name_asc',
+                'sku_asc',
+                'material_asc',
+                'profile_asc',
+                'size_asc',
+                'weight_desc',
+                'weight_asc',
+                'purchase_usd_desc',
+                'purchase_usd_asc',
+                'purchase_try_desc',
+                'purchase_try_asc',
+                'sale_desc',
+                'sale_asc',
+                'stock_desc',
+                'stock_asc',
+                'value_desc',
+              ]}
+              allLabel="Ada göre"
+              labels={{
+                name_asc: 'Ada göre A-Z',
+                sku_asc: 'Stok koduna göre',
+                material_asc: 'Malzemeye göre',
+                profile_asc: 'Profil türüne göre',
+                size_asc: 'Ölçüye göre',
+                weight_desc: 'Ağırlık yüksekten',
+                weight_asc: 'Ağırlık düşükten',
+                purchase_usd_desc: 'Alış USD yüksekten',
+                purchase_usd_asc: 'Alış USD düşükten',
+                purchase_try_desc: 'Alış TL yüksekten',
+                purchase_try_asc: 'Alış TL düşükten',
+                sale_desc: 'Satış yüksekten',
+                sale_asc: 'Satış düşükten',
+                stock_desc: 'Stok yüksekten',
+                stock_asc: 'Stok düşükten',
+                value_desc: 'Toplam değer yüksekten',
+              }}
+            />
           </div>
         </div>
       </div>

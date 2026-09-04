@@ -133,6 +133,12 @@ export function applySchema(db: Database.Database): void {
       unit_weight_kg REAL NOT NULL DEFAULT 0, is_active INTEGER DEFAULT 1,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS complementary_product_images (
+      id TEXT PRIMARY KEY, complementary_product_id TEXT NOT NULL, path TEXT NOT NULL,
+      sort_order INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(complementary_product_id) REFERENCES complementary_products(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_complementary_product_images_product ON complementary_product_images(complementary_product_id);
     CREATE TABLE IF NOT EXISTS kit_complementary_items (
       id TEXT PRIMARY KEY, kit_id TEXT NOT NULL, complementary_product_id TEXT NOT NULL,
       quantity REAL NOT NULL DEFAULT 1, product_name_snapshot TEXT NOT NULL,

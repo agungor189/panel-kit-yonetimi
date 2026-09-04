@@ -1427,6 +1427,24 @@ const migrations: Migration[] = [
       ]) try { db.exec(sql); } catch (_) {}
     },
   },
+  {
+    version: 45,
+    name: "create_complementary_product_image_gallery",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS complementary_product_images (
+          id TEXT PRIMARY KEY,
+          complementary_product_id TEXT NOT NULL,
+          path TEXT NOT NULL,
+          sort_order INTEGER DEFAULT 0,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(complementary_product_id) REFERENCES complementary_products(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_complementary_product_images_product
+          ON complementary_product_images(complementary_product_id);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

@@ -2719,8 +2719,7 @@ async function startServer() {
   app.post("/api/products/bulk-pricing", (req, res) => {
     try {
       const { updates, settings } = req.body;
-      const { exchangeRate, bufferPercentage, profitPercentage, includeLocked } = settings;
-      const normalizedExchangeRate = Number(exchangeRate) || 0;
+      const { exchangeRate, bufferPercentage, profitPercentage } = settings;
       let updatedCount = 0;
       let skippedLockedCount = 0;
       let skippedMissingCount = 0;
@@ -2743,12 +2742,11 @@ async function startServer() {
         const stmt = db.prepare(`
           UPDATE products
           SET sale_price = ?,
-              purchase_cost = ?,
               exchange_rate_used = ?,
               buffer_percentage = ?,
               profit_percentage = ?,
               updated_at = CURRENT_TIMESTAMP
-          WHERE id = ?
+          WHERE id = ? AND COALESCE(price_locked, 0) = 0
         `);
 
         const platformStmt = db.prepare(`
@@ -2763,7 +2761,7 @@ async function startServer() {
             skippedMissingCount += 1;
             continue;
           }
-          if (currentProduct.price_locked === 1 && !includeLocked) {
+          if (currentProduct.price_locked === 1) {
             skippedLockedCount += 1;
             continue;
           }
@@ -2782,8 +2780,7 @@ async function startServer() {
             'bulk-pricing'
           );
 
-          const purchaseCostTRY = (Number(currentProduct.purchase_price_usd) || 0) * normalizedExchangeRate;
-          const result = stmt.run(update.newSalePrice, purchaseCostTRY, normalizedExchangeRate, bufferPercentage, profitPercentage, update.id);
+          const result = stmt.run(update.newSalePrice, exchangeRate, bufferPercentage, profitPercentage, update.id);
           if (result.changes > 0) {
             updatedCount += result.changes;
             platformStmt.run(update.newSalePrice, update.id);
@@ -2795,10 +2792,9 @@ async function startServer() {
         updatedCount,
         skippedLockedCount,
         skippedMissingCount,
-        exchangeRate: normalizedExchangeRate,
+        exchangeRate,
         bufferPercentage,
         profitPercentage,
-        includeLocked: Boolean(includeLocked),
       }, req.user?.id);
       res.json({ success: true, updatedCount, skippedLockedCount, skippedMissingCount });
     } catch (err: any) {
@@ -5509,8 +5505,26 @@ async function startServer() {
     if (!product) return res.status(404).json({ error: "Tamamlayıcı ürün bulunamadı" });
     if (!req.file) return res.status(400).json({ error: "Görsel seçilmedi" });
     const coverImage = `/uploads/${req.file.filename}`;
+    const nextOrder = Number((db.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM complementary_product_images WHERE complementary_product_id = ?").get(req.params.id) as any)?.next_order || 0);
+    db.prepare("INSERT INTO complementary_product_images (id, complementary_product_id, path, sort_order) VALUES (?, ?, ?, ?)").run(uuidv4(), req.params.id, coverImage, nextOrder);
     db.prepare("UPDATE complementary_products SET cover_image = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(coverImage, req.params.id);
     res.json({ success: true, cover_image: coverImage });
+  });
+  app.post("/api/kits/complementary-products/:id/images", upload.array("images", 12), (req: any, res) => {
+    const product = db.prepare("SELECT id, cover_image FROM complementary_products WHERE id = ?").get(req.params.id) as any;
+    if (!product) return res.status(404).json({ error: "Tamamlayıcı ürün bulunamadı" });
+    const files = req.files || [];
+    if (!files.length) return res.status(400).json({ error: "Görsel seçilmedi" });
+    let nextOrder = Number((db.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM complementary_product_images WHERE complementary_product_id = ?").get(req.params.id) as any)?.next_order || 0);
+    const insert = db.prepare("INSERT INTO complementary_product_images (id, complementary_product_id, path, sort_order) VALUES (?, ?, ?, ?)");
+    const images = files.map((file: any) => {
+      const image = { id: uuidv4(), path: `/uploads/${file.filename}`, sort_order: nextOrder++ };
+      insert.run(image.id, req.params.id, image.path, image.sort_order);
+      return image;
+    });
+    const coverImage = product.cover_image || images[0]?.path || null;
+    db.prepare("UPDATE complementary_products SET cover_image = COALESCE(cover_image, ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(coverImage, req.params.id);
+    res.json({ success: true, cover_image: coverImage, images });
   });
 
   // --- PUBLIC API ROUTES ---
