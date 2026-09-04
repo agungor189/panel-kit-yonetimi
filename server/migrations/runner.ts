@@ -1445,6 +1445,17 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 46,
+    name: "persist_kit_cut_and_complementary_extra_fields",
+    up(db) {
+      for (const sql of [
+        "ALTER TABLE kit_cuts ADD COLUMN notes TEXT",
+        "ALTER TABLE complementary_products ADD COLUMN brand TEXT",
+        "ALTER TABLE complementary_products ADD COLUMN size TEXT",
+      ]) try { db.exec(sql); } catch (_) {}
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

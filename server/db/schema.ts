@@ -123,12 +123,12 @@ export function applySchema(db: Database.Database): void {
     );
     CREATE TABLE IF NOT EXISTS kit_cuts (
       id TEXT PRIMARY KEY, kit_id TEXT NOT NULL, quantity REAL NOT NULL DEFAULT 1,
-      length_mm REAL NOT NULL, label TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      length_mm REAL NOT NULL, label TEXT, notes TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(kit_id) REFERENCES kits(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS complementary_products (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, category TEXT, description TEXT,
-      supplier TEXT, supplier_reference TEXT, notes TEXT, cover_image TEXT,
+      supplier TEXT, supplier_reference TEXT, brand TEXT, size TEXT, notes TEXT, cover_image TEXT,
       unit TEXT NOT NULL DEFAULT 'adet', purchase_price REAL NOT NULL DEFAULT 0,
       unit_weight_kg REAL NOT NULL DEFAULT 0, is_active INTEGER DEFAULT 1,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
