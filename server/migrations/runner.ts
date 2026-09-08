@@ -1456,6 +1456,13 @@ const migrations: Migration[] = [
       ]) try { db.exec(sql); } catch (_) {}
     },
   },
+  {
+    version: 47,
+    name: "add_manual_kit_profile_meter_price",
+    up(db) {
+      try { db.exec("ALTER TABLE kits ADD COLUMN manual_profile_price_per_meter REAL DEFAULT 0"); } catch (_) {}
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

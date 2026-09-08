@@ -108,7 +108,7 @@ export function applySchema(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS kits (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, code TEXT UNIQUE, description TEXT,
       profile_id TEXT NOT NULL, profile_offer_id TEXT, status TEXT DEFAULT 'active', cover_image TEXT,
-      notes TEXT, target_margin REAL DEFAULT 30, sale_price REAL DEFAULT 0,
+      notes TEXT, target_margin REAL DEFAULT 30, sale_price REAL DEFAULT 0, manual_profile_price_per_meter REAL DEFAULT 0,
       cutting_cost REAL DEFAULT 0, labour_cost REAL DEFAULT 0, packaging_cost REAL DEFAULT 0, other_cost REAL DEFAULT 0,
       commission_rate REAL DEFAULT 0, payment_cost REAL DEFAULT 0, shipping_cost REAL DEFAULT 0, vat_rate REAL DEFAULT 20,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,

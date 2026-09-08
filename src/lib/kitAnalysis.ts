@@ -65,7 +65,9 @@ export function draftKitAnalysis(data: Any, profile: Any, products: Any[], compl
   const components = (data.items || []).map((line: Any) => ({ ...products.find(product => product.id === line.product_id), ...line }));
   const extraItems = (data.complementary_items || []).map((line: Any) => ({ ...complementary.find(product => product.id === line.complementary_product_id), ...line }));
   const offer = profile?.offers?.find((item: Any) => item.id === data.profile_offer_id) || profile?.offers?.find((item: Any) => item.is_preferred);
-  const profileMeterCost = n(offer?.price_per_meter ?? profile?.price_per_meter);
+  const offerMeterPrice = n(offer?.price_per_meter);
+  const manualMeterPrice = n(data.manual_profile_price_per_meter);
+  const profileMeterCost = offerMeterPrice || manualMeterPrice || n(profile?.effective_price_per_meter ?? profile?.price_per_meter);
   const partsCost = components.reduce((sum: number, item: Any) => sum + n(item.quantity) * n(item.purchase_cost), 0);
   const partsSale = components.reduce((sum: number, item: Any) => sum + n(item.quantity) * n(item.sale_price), 0);
   const complementaryCost = extraItems.reduce((sum: number, item: Any) => sum + n(item.quantity) * n(item.purchase_price_snapshot ?? item.purchase_price), 0);
@@ -85,6 +87,9 @@ export function draftKitAnalysis(data: Any, profile: Any, products: Any[], compl
   const materialCost = partsCost + profileCost + complementaryCost;
   const totalCost = materialCost + n(data.cutting_cost) + n(data.labour_cost) + n(data.packaging_cost) + n(data.other_cost) + commission + commercialFixed;
   const profit = salePrice - totalCost;
-  const suggestion = (margin: number) => partsSale + complementaryCost + ((productionCost * (1 + margin / 100) + commercialFixed + fixedCustomerSale * commissionRate) / Math.max(.01, 1 - commissionRate));
-  return { partsCost, partsSale, complementaryCost, profileMeters, purchasedProfileMeters, profileBars: cutPlan.bars.length, profileCost, materialCost, productionCost, commission, commercialFixed, totalCost, salePrice, profit, netMargin: salePrice ? profit / salePrice * 100 : 0, markup: totalCost ? profit / totalCost * 100 : 0, cuttingPlan: cutPlan, suggestions: [20, 30, 50].map(margin => ({ margin, salePrice: suggestion(margin) })), compatibility: components.map(item => ({ product_id: item.product_id, ...compatibilityFor(profile, item) })) };
+  const suggestion = (margin: number) => {
+    const profileSaleSuggestion = (productionCost * (1 + margin / 100) + commercialFixed + fixedCustomerSale * commissionRate) / Math.max(.01, 1 - commissionRate);
+    return { margin, profileSale: profileSaleSuggestion, salePrice: partsSale + complementaryCost + profileSaleSuggestion };
+  };
+  return { partsCost, partsSale, complementaryCost, profileMeters, purchasedProfileMeters, profileBars: cutPlan.bars.length, profileCost, materialCost, productionCost, commission, commercialFixed, totalCost, salePrice, profit, netMargin: salePrice ? profit / salePrice * 100 : 0, markup: totalCost ? profit / totalCost * 100 : 0, profileMeterCost, cuttingPlan: cutPlan, suggestions: [20, 30, 50].map(suggestion), compatibility: components.map(item => ({ product_id: item.product_id, ...compatibilityFor(profile, item) })) };
 }

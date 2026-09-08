@@ -6,7 +6,7 @@ import { EnhancedComplementaryCatalog, EnhancedKitBuilder, EnhancedProfileEditor
 
 type Any = any;
 const n=(x:Any)=>Number(x)||0;
-const fresh=()=>({name:'',code:'',description:'',profile_id:'',profile_offer_id:'',target_margin:30,sale_price:0,cutting_cost:0,labour_cost:0,packaging_cost:0,other_cost:0,commission_rate:0,payment_cost:0,shipping_cost:0,vat_rate:20,items:[],complementary_items:[],cuts:[]});
+const fresh=()=>({name:'',code:'',description:'',profile_id:'',profile_offer_id:'',target_margin:30,sale_price:0,manual_profile_price_per_meter:0,cutting_cost:0,labour_cost:0,packaging_cost:0,other_cost:0,commission_rate:0,payment_cost:0,shipping_cost:0,vat_rate:20,items:[],complementary_items:[],cuts:[]});
 // Kit içinde parça fiyatı sabitlenmez: Ürün kartındaki güncel alış fiyatı okunur.
 const cost=(x:Any)=>n(x.purchase_cost);
 
@@ -18,7 +18,7 @@ export default function KitManagement(){
   if(detail)return <KitDetailV2 kit={detail} back={()=>setDetail(null)} edit={()=>setEdit(detail)}/>;
   if(editProfile)return <EnhancedProfileEditor profile={editProfile} back={()=>setEditProfile(null)} save={async(x:Any)=>{const result=x.id?await api.put(`/kits/profiles/${x.id}`,x):await api.post('/kits/profiles',x);await load();setEditProfile({...x,...result});return result}}/>;
   return <div className="space-y-5"><div className="flex items-start justify-between"><div><p className="text-xs font-black uppercase tracking-[.16em] text-cyan-700">Üretim & maliyet</p><h1 className="mt-1 text-2xl font-black">Kit Yönetimi</h1><p className="mt-1 text-sm text-slate-500">Kitler, profiller ve kesim planları.</p></div>{page!=='home'&&<button onClick={back} className="rounded-xl border bg-white px-3 py-2 text-sm font-bold"><ArrowLeft className="mr-1 inline h-4 w-4"/>Ana sayfa</button>}</div>
-    {page==='home'&&<Home kits={kits} profiles={profiles} complementary={complementary} go={setPage}/>} {page==='kits'&&<KitList kits={kits} newKit={()=>setEdit(fresh())} open={setDetail}/>} {page==='profiles'&&<ProfileList profiles={profiles} open={setEditProfile} add={()=>setEditProfile({name:'',shape:'Kare',dimension:'',material:'Karbon Çelik',thickness:'',color:'',finish:'',grade:'',stock_length_mm:6000,offers:[]})}/>} {page==='complementary'&&<EnhancedComplementaryCatalog items={complementary} reload={load} onDirtyChange={setChildDirty}/>} {page==='cut'&&<CutPlan kits={kits}/>}</div>;
+    {page==='home'&&<Home kits={kits} profiles={profiles} complementary={complementary} go={setPage}/>} {page==='kits'&&<KitList kits={kits} newKit={()=>setEdit(fresh())} open={setDetail}/>} {page==='profiles'&&<FixedProfileList profiles={profiles} open={setEditProfile} add={(preset:Any)=>setEditProfile({name:preset.name||'',shape:preset.shape||'Kare',dimension:preset.dimension||'',material:preset.material||'Karbon Çelik',thickness:'',color:'',finish:'Standart',grade:'Standart',stock_length_mm:6000,price_per_meter:0,supplier:'',offers:[]})}/>} {page==='complementary'&&<EnhancedComplementaryCatalog items={complementary} reload={load} onDirtyChange={setChildDirty}/>} {page==='cut'&&<CutPlan kits={kits}/>}</div>;
 }
 
 function Home({kits,profiles,complementary,go}:Any){const cards=[['kits',Boxes,'Kitler',`${kits.length} kit`,'Kit oluştur, maliyet gör, stok kapasitesi kontrol et.'],['profiles',Layers3,'Profiller',`${profiles.length} varyant`,'Malzeme, ölçü, et kalınlığı ve tedarikçi fiyatları.'],['complementary',PackagePlus,'Tamamlayıcı Ürünler',`${complementary.length} ürün`,'Adet, metre ve m² bazlı ek malzemeler.'],['cut',Calculator,'Toplu Analiz','Kesim + stok','Seçili kitler için stok ve profil kesim ihtiyacı.']];return <div className="space-y-4"><div className="rounded-2xl border bg-white p-4 text-sm text-slate-600 shadow-sm"><b className="text-slate-900">Kit Yönetimi ne yapar?</b><span className="ml-2">Üründen bağlantı elemanı seç, tek profil belirle, kesimleri gir, gerçek maliyet/satış/stok analizini al.</span></div><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">{cards.map(([id,Icon,title,value,text]:Any)=><button key={id} onClick={()=>go(id)} className="rounded-xl border bg-white p-4 text-left shadow-sm transition hover:border-cyan-500 hover:bg-cyan-50/40"><div className="flex items-center justify-between gap-3"><div className="flex items-center gap-3"><span className="rounded-lg bg-slate-50 p-2 text-cyan-700"><Icon className="h-5 w-5"/></span><h2 className="font-black text-slate-900">{title}</h2></div><b className="text-sm text-cyan-700">{value}</b></div><p className="mt-3 text-sm text-slate-500">{text}</p></button>)}</div></div>}
@@ -70,6 +70,113 @@ function KitEditor({kit,profiles,products,back,save}:Any){const [d,setD]=useStat
 function Prices({d,set}:Any){return <section className="rounded-2xl bg-slate-900 p-5 text-white"><h3 className="font-black">Fiyatlandırma</h3><div className="mt-3 grid grid-cols-2 gap-2">{[['target_margin','Hedef kâr %'],['sale_price','Manuel satış'],['labour_cost','İşçilik'],['packaging_cost','Paketleme'],['other_cost','Diğer'],['commission_rate','Komisyon %'],['vat_rate','KDV %']].map(([key,label])=><label className="text-xs text-slate-300" key={key}>{label}<input type="number" value={d[key]||0} onChange={e=>set(key,e.target.value)} className="mt-1 w-full rounded border border-white/10 bg-white/10 p-2 text-white"/></label>)}</div></section>}
 
 function ProfileList({profiles,open,add}:Any){const [q,setQ]=useState('');const [shape,setShape]=useState('Tümü');const [material,setMaterial]=useState('Tümü');const [dimension,setDimension]=useState('Tümü');const [thickness,setThickness]=useState('Tümü');const [finish,setFinish]=useState('Tümü');const [supplier,setSupplier]=useState('Tümü');const [status,setStatus]=useState('Tümü');const [expanded,setExpanded]=useState<string|null>(null);const uniq=(getter:(x:Any)=>Any)=>['Tümü',...Array.from(new Set(profiles.map(getter).map(x=>String(x||'')).filter(Boolean))).sort((a:string,b:string)=>a.localeCompare(b,'tr',{numeric:true}))];const suppliers=useMemo(()=>['Tümü',...Array.from(new Set(profiles.flatMap((p:Any)=>[p.supplier,...(p.offers||[]).map((o:Any)=>o.supplier)]).map(x=>String(x||'')).filter(Boolean))).sort((a:string,b:string)=>a.localeCompare(b,'tr'))],[profiles]);const rows=profiles.filter((x:Any)=>{const text=[x.name,x.shape,x.material,x.dimension,x.thickness,x.color,x.finish,x.grade,x.supplier,...(x.offers||[]).map((o:Any)=>o.supplier)].join(' ').toLowerCase();return(!q||text.includes(q.toLowerCase()))&&(shape==='Tümü'||x.shape===shape)&&(material==='Tümü'||x.material===material)&&(dimension==='Tümü'||String(x.dimension||'')===dimension)&&(thickness==='Tümü'||String(x.thickness||'')===thickness)&&(finish==='Tümü'||String(x.finish||'Standart')===finish)&&(supplier==='Tümü'||x.supplier===supplier||(x.offers||[]).some((o:Any)=>o.supplier===supplier))&&(status==='Tümü'||(status==='Aktif'?x.is_active!==0:x.is_active===0))});const groups=useMemo(()=>Array.from(rows.reduce((m:Map<string,Any[]>,x:Any)=>{const key=[x.material||'Malzeme yok',x.shape||'Profil',x.dimension||'Ölçü yok'].join(' · ');m.set(key,[...(m.get(key)||[]),x]);return m},new Map<string,Any[]>()).entries()).sort(([a],[b])=>String(a).localeCompare(String(b),'tr',{numeric:true})),[rows]);const active=profiles.filter((x:Any)=>x.is_active!==0).length;const offers=profiles.reduce((s:number,x:Any)=>s+(x.offers?.length||0),0);const waiting=profiles.filter((x:Any)=>!x.offers?.length).length;const avg=profiles.length?profiles.reduce((s:number,x:Any)=>s+n(x.price_per_meter||x.offers?.[0]?.price_per_meter),0)/profiles.length:0;const recent=[...profiles].sort((a:Any,b:Any)=>String(b.updated_at||'').localeCompare(String(a.updated_at||''))).slice(0,3);const clear=()=>{setQ('');setShape('Tümü');setMaterial('Tümü');setDimension('Tümü');setThickness('Tümü');setFinish('Tümü');setSupplier('Tümü');setStatus('Tümü')};return <div className="space-y-5"><div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-start"><div><p className="text-xs font-black uppercase tracking-[.16em] text-cyan-700">Üretim & Maliyet</p><h2 className="text-3xl font-black text-slate-900">Profil Yönetimi</h2><p className="mt-1 text-sm text-slate-500">Profil tipleri, varyantlar ve tedarik teklifleri</p></div><div className="flex gap-2"><button className="rounded-xl border bg-white px-4 py-2 text-sm font-bold text-slate-700"><Upload className="mr-2 inline h-4 w-4"/>Toplu içe aktar</button><button onClick={add} className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white shadow-sm"><Plus className="mr-2 inline h-4 w-4"/>Profil ekle</button></div></div><div className="rounded-xl border bg-white p-3 text-sm text-slate-600 shadow-sm"><b>{groups.length}</b> profil grubu · <b>{active}</b> aktif varyant · <b>{waiting}</b> tedarikçi teklifi bekliyor · ortalama maliyet <b>{formatCurrency(avg)}/m</b></div><main className="space-y-4"><div className="rounded-2xl border border-blue-200 bg-blue-50 p-4"><div className="flex flex-wrap items-center gap-3 text-sm"><b className="text-blue-700">Profil hiyerarşisi</b>{['Malzeme','Profil Türü','Ölçü','Et Kalınlığı','Tedarikçi'].map((x,i)=><span key={x} className="rounded-lg bg-white px-3 py-1 text-xs font-bold text-blue-700">{x}{i<4&&<ChevronDown className="ml-2 inline h-3 w-3 -rotate-90"/>}</span>)}<span className="text-slate-500">Profiller bu hiyerarşiye göre gruplandırılır ve varyantlar oluşturulur.</span></div></div><section className="rounded-2xl border bg-white p-4 shadow-sm"><div className="relative"><Search className="absolute left-3 top-3 h-4 w-4 text-slate-400"/><input value={q} onChange={e=>setQ(e.target.value)} placeholder="Malzeme, ölçü, form, et kalınlığı, kaplama veya tedarikçi ara" className="w-full rounded-xl border bg-white py-2.5 pl-9"/></div><div className="mt-3 grid gap-3 md:grid-cols-3 xl:grid-cols-7">{[['Malzeme',material,setMaterial,uniq((x:Any)=>x.material)],['Profil Türü',shape,setShape,uniq((x:Any)=>x.shape)],['Ölçü',dimension,setDimension,uniq((x:Any)=>x.dimension)],['Et Kalınlığı',thickness,setThickness,uniq((x:Any)=>x.thickness)],['Kaplama',finish,setFinish,uniq((x:Any)=>x.finish||'Standart')],['Tedarikçi',supplier,setSupplier,suppliers],['Durum',status,setStatus,['Tümü','Aktif','Pasif']]].map(([label,value,setter,options]:Any)=><label key={label} className="text-xs font-bold text-slate-500">{label}<select value={value} onChange={e=>setter(e.target.value)} className="mt-1 w-full rounded-lg border bg-white p-2.5 text-sm font-normal text-slate-900">{options.map((o:string)=><option key={o}>{o}</option>)}</select></label>)}</div><button onClick={clear} className="mt-3 text-sm font-bold text-blue-600">Filtreleri temizle</button></section>{groups.map(([group,items]:Any,index:number)=>{const openGroup=expanded===group||(!expanded&&index===0);const activeCount=items.filter((x:Any)=>x.is_active!==0).length;const minT=Math.min(...items.map((x:Any)=>n(x.thickness)).filter(Boolean));const maxT=Math.max(...items.map((x:Any)=>n(x.thickness)).filter(Boolean));const supplierCount=new Set(items.flatMap((x:Any)=>[x.supplier,...(x.offers||[]).map((o:Any)=>o.supplier)].filter(Boolean))).size;return <section key={group} className="rounded-2xl border bg-white p-4 shadow-sm"><button onClick={()=>setExpanded(openGroup?null:group)} className="flex w-full items-center justify-between gap-3 text-left"><div><h3 className="text-lg font-black">{group}</h3><p className="text-sm text-slate-500">Bu ölçü sınıfında {items.length} varyant</p></div><div className="hidden items-center gap-6 text-sm md:flex"><span className="rounded-full bg-emerald-50 px-3 py-1 font-bold text-emerald-700">{activeCount} aktif</span><span><small className="block text-slate-400">Et kalınlığı</small><b>{minT?`${minT.toFixed(2)} – ${maxT.toFixed(2)}`:'—'}</b></span><span><small className="block text-slate-400">Varyant</small><b>{items.length}</b></span><span><small className="block text-slate-400">Tedarikçi</small><b>{supplierCount}</b></span><ChevronDown className={`h-5 w-5 transition ${openGroup?'rotate-180':''}`}/></div></button>{openGroup&&<div className="mt-4 grid gap-4 md:grid-cols-2 2xl:grid-cols-3">{items.map((x:Any)=><div key={x.id} className="rounded-2xl border bg-white p-4 shadow-sm"><div className="flex items-center justify-between"><span className="rounded bg-slate-50 px-2 py-1 text-xs font-bold">{x.shape||'Profil'}</span><span className={x.is_active===0?'h-2.5 w-2.5 rounded-full bg-slate-300':'h-2.5 w-2.5 rounded-full bg-emerald-500'}/></div><h4 className="mt-4 text-lg font-black">{x.dimension||x.name} / {x.thickness||'—'}</h4><p className="text-sm text-slate-500">{x.finish||'Standart'} · {x.color||'Renk yok'} · {x.grade||'Standart'}</p><div className="mt-4 grid grid-cols-2 gap-y-2 text-sm"><span className="text-slate-500">Ağırlık</span><b className="text-right">{n(x.weight_per_meter).toFixed(2)} kg/m</b><span className="text-slate-500">Ham boy</span><b className="text-right">{n(x.stock_length_mm)||6000} mm</b><span className="text-slate-500">Maliyet / m</span><b className="text-right">{formatCurrency(n(x.price_per_meter))}</b><span className="text-slate-500">Tedarikçi</span><b className="text-right text-cyan-700">{x.offers?.length||0} teklif</b></div><div className="mt-4 flex items-center justify-between border-t pt-3"><button onClick={()=>open(x)} className="rounded-lg border px-3 py-1.5 text-xs font-bold text-slate-600">Detay</button><button onClick={()=>open(x)} className="text-xs font-bold text-blue-600"><Pencil className="mr-1 inline h-3.5 w-3.5"/>Düzenle</button></div></div>)}</div>}</section>})}</main></div>}
+
+const FIXED_PROFILE_CATALOG = [
+  { key: 'dd-kare', name: 'Demir Döküm Kare', material: 'Demir Döküm', shape: 'Kare', image: '◼', description: 'Kare demir döküm profil ölçüleri.', dimensions: ['25×25 mm', '40×40 mm'] },
+  { key: 'dd-yuvarlak', name: 'Demir Döküm Yuvarlak', material: 'Demir Döküm', shape: 'Yuvarlak', image: '●', description: 'Endüstriyel boru sistemleri için yuvarlak profil.', dimensions: ['3/4 inç (26.9 mm)', '1 inç (33.7 mm)', '1.5 inç (48.3 mm)', '2 inç (60.3 mm)'] },
+  { key: 'al-kare', name: 'Alüminyum Kare', material: 'Alüminyum', shape: 'Kare', image: '◻', description: 'Hafif sistemler için kare alüminyum profil.', dimensions: ['20×20 mm', '30×30 mm'] },
+  { key: 'al-yuvarlak', name: 'Alüminyum Yuvarlak', material: 'Alüminyum', shape: 'Yuvarlak', image: '○', description: 'Alüminyum yuvarlak profil grubu.', dimensions: ['1 inç (33.7 mm)'] },
+  { key: 'kc-kare', name: 'Karbon Çelik Kare', material: 'Karbon Çelik', shape: 'Kare', image: '■', description: 'Karbon çelik kare profil grubu.', dimensions: ['40×40 mm'] },
+  { key: 'kc-yuvarlak', name: 'Karbon Çelik Yuvarlak', material: 'Karbon Çelik', shape: 'Yuvarlak', image: '⬤', description: 'Karbon çelik yuvarlak profil grubu.', dimensions: ['3/4 inç (26.9 mm)'] },
+  { key: 'ppr-yuvarlak', name: 'PPR Yuvarlak', material: 'PPR', shape: 'Yuvarlak', image: '◯', description: 'PPR yuvarlak profil grubu.', dimensions: ['3/4 inç (26.9 mm)'] },
+];
+
+const dimNorm = (value: Any) => String(value || '').toLowerCase().replace(/×/g, 'x').replace(/\s+/g, '').replace(/inch/g, 'inç');
+const sameDim = (a: Any, b: Any) => {
+  const x = dimNorm(a);
+  const y = dimNorm(b);
+  if (!x || !y) return false;
+  const firstNumber = (text: string) => text.match(/\d+(?:[.,]\d+)?/)?.[0]?.replace(',', '.');
+  return x === y || x.includes(y) || y.includes(x) || (!!firstNumber(x) && firstNumber(x) === firstNumber(y));
+};
+
+function profileVariantsFor(profiles: Any[], group: Any, dimension?: string) {
+  return profiles.filter((profile: Any) => {
+    const materialOk = dimNorm(profile.material).includes(dimNorm(group.material)) || dimNorm(group.material).includes(dimNorm(profile.material));
+    const shapeOk = dimNorm(profile.shape).includes(dimNorm(group.shape)) || dimNorm(group.shape).includes(dimNorm(profile.shape));
+    const dimensionOk = !dimension || sameDim(profile.dimension || profile.name, dimension);
+    return materialOk && shapeOk && dimensionOk;
+  });
+}
+
+function FixedProfileList({ profiles, open, add }: Any) {
+  const [groupKey, setGroupKey] = useState(FIXED_PROFILE_CATALOG[0].key);
+  const group = FIXED_PROFILE_CATALOG.find(item => item.key === groupKey) || FIXED_PROFILE_CATALOG[0];
+  const [dimension, setDimension] = useState(group.dimensions[0]);
+  const [q, setQ] = useState('');
+  const [supplier, setSupplier] = useState('Tümü');
+  const [status, setStatus] = useState('Tümü');
+  useEffect(() => { setDimension(group.dimensions[0]); setQ(''); setSupplier('Tümü'); setStatus('Tümü'); }, [groupKey]);
+  const allForGroup = profileVariantsFor(profiles, group);
+  const variants = profileVariantsFor(profiles, group, dimension).filter((item: Any) => {
+    const text = [item.name, item.supplier, item.thickness, item.color, item.finish, item.grade, ...(item.offers || []).map((offer: Any) => offer.supplier)].join(' ').toLowerCase();
+    const supplierOk = supplier === 'Tümü' || item.supplier === supplier || (item.offers || []).some((offer: Any) => offer.supplier === supplier);
+    const statusOk = status === 'Tümü' || (status === 'Aktif' ? item.is_active !== 0 : item.is_active === 0);
+    return (!q || text.includes(q.toLowerCase())) && supplierOk && statusOk;
+  });
+  const suppliers = ['Tümü', ...Array.from(new Set(allForGroup.flatMap((item: Any) => [item.supplier, ...(item.offers || []).map((offer: Any) => offer.supplier)]).filter(Boolean)))];
+  const preferred = variants.find((item: Any) => item.offers?.some((offer: Any) => offer.is_preferred)) || variants[0];
+  const prices = variants.map((item: Any) => n(item.effective_price_per_meter || item.price_per_meter || item.offers?.[0]?.price_per_meter)).filter(Boolean);
+  const addPreset = () => add({ name: `${group.name} ${dimension}`, material: group.material, shape: group.shape, dimension });
+  return <div className="space-y-4">
+    <div className="flex flex-col justify-between gap-3 md:flex-row md:items-start">
+      <div><h2 className="text-3xl font-black text-slate-900">Profiller & Varyantlar</h2><p className="mt-1 text-sm text-slate-500">Sabit profil tipleri ve bu profillere ait tedarikçi varyantlarını yönetin.</p></div>
+      <button onClick={addPreset} className="rounded-xl bg-cyan-700 px-4 py-2.5 text-sm font-black text-white"><Plus className="mr-1 inline h-4 w-4" />Varyant ekle</button>
+    </div>
+    <div className="rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800">Ana profil grupları sistemde sabittir. Bu ekranda yalnızca bu profillere ait varyant, tedarikçi, ölçü ve fiyat bilgilerini yönetirsiniz.</div>
+    <div className="grid gap-4 lg:grid-cols-[290px_minmax(0,1fr)]">
+      <aside className="rounded-2xl border bg-white p-3 shadow-sm">
+        <div className="mb-3 flex items-center justify-between"><h3 className="font-black">Sabit Profiller</h3><span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-bold text-slate-600">{FIXED_PROFILE_CATALOG.length} profil</span></div>
+        <div className="space-y-2">{FIXED_PROFILE_CATALOG.map(item => {
+          const count = profileVariantsFor(profiles, item).length;
+          const active = item.key === group.key;
+          return <button key={item.key} onClick={() => setGroupKey(item.key)} className={`flex w-full items-center gap-3 rounded-xl border p-3 text-left transition ${active ? 'border-cyan-400 bg-cyan-50' : 'bg-white hover:border-cyan-200'}`}>
+            <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-2xl">{item.image}</span>
+            <span className="min-w-0 flex-1"><b className="block text-slate-900">{item.name}</b><small className="block truncate text-slate-500">{item.dimensions.join(', ')}</small><small className="text-slate-400">{count} varyant</small></span>
+            <ChevronDown className="-rotate-90 h-4 w-4 text-slate-400" />
+          </button>;
+        })}</div>
+      </aside>
+      <main className="space-y-4">
+        <section className="rounded-2xl border bg-white p-4 shadow-sm">
+          <div className="flex items-start gap-4"><span className="flex h-16 w-16 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-3xl">{group.image}</span><div><h3 className="text-2xl font-black text-slate-900">{group.name} <span className="ml-2 rounded-full bg-cyan-100 px-2 py-1 text-xs text-cyan-800">Sabit Profil</span></h3><p className="mt-1 text-sm text-slate-500">{group.description}</p></div></div>
+          <h4 className="mt-5 font-black">Ölçü Seçimi</h4>
+          <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">{group.dimensions.map(item => {
+            const count = profileVariantsFor(profiles, group, item).length;
+            return <button key={item} onClick={() => setDimension(item)} className={`rounded-xl border p-4 text-left ${dimension === item ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-200' : 'bg-white hover:border-blue-200'}`}>
+              <span className="flex items-center gap-3"><span className={`h-5 w-5 rounded-full border-2 ${dimension === item ? 'border-blue-600 bg-blue-600 shadow-[inset_0_0_0_4px_white]' : 'border-slate-400'}`} /><b>{item}</b></span>
+              <small className="mt-2 block text-slate-500">{count} varyant</small>
+            </button>;
+          })}</div>
+          <div className="mt-4 grid gap-3 md:grid-cols-4">
+            <InfoBox label="Toplam varyant" value={variants.length} />
+            <InfoBox label="Tercih edilen" value={preferred?.supplier || preferred?.offers?.find((offer: Any) => offer.is_preferred)?.supplier || '—'} />
+            <InfoBox label="Fiyat aralığı" value={prices.length ? `${formatCurrency(Math.min(...prices))} - ${formatCurrency(Math.max(...prices))}` : '—'} />
+            <InfoBox label="Ham boy" value={`${n(preferred?.stock_length_mm) ? n(preferred.stock_length_mm) / 1000 : 6} m`} />
+          </div>
+        </section>
+        <section className="rounded-2xl border bg-white p-4 shadow-sm">
+          <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-end">
+            <div><h3 className="text-xl font-black">{dimension}</h3><p className="text-sm text-slate-500">{group.name} için kayıtlı varyantlar.</p></div>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <div className="relative"><Search className="absolute left-3 top-3 h-4 w-4 text-slate-400" /><input value={q} onChange={e => setQ(e.target.value)} placeholder="Varyant, tedarikçi veya kod ara" className="w-full rounded-lg border py-2.5 pl-9 text-sm sm:w-72" /></div>
+              <select value={supplier} onChange={e => setSupplier(e.target.value)} className="rounded-lg border bg-white p-2.5 text-sm">{suppliers.map(item => <option key={item}>{item}</option>)}</select>
+              <select value={status} onChange={e => setStatus(e.target.value)} className="rounded-lg border bg-white p-2.5 text-sm"><option>Tümü</option><option>Aktif</option><option>Pasif</option></select>
+              <button onClick={addPreset} className="rounded-lg border border-cyan-300 px-4 py-2 text-sm font-bold text-cyan-700"><Plus className="mr-1 inline h-4 w-4" />Varyant ekle</button>
+            </div>
+          </div>
+          <div className="mt-4 overflow-x-auto rounded-xl border">
+            <table className="w-full min-w-[850px] text-sm">
+              <thead className="bg-slate-50 text-left text-xs uppercase text-slate-500"><tr><th className="p-3">Varyant</th><th className="p-3">Tedarikçi</th><th className="p-3">Et kalınlığı</th><th className="p-3">Ham boy</th><th className="p-3">Ağırlık</th><th className="p-3 text-right">Fiyat / m</th><th className="p-3">Yüzey / renk</th><th className="p-3">Durum</th><th className="p-3 text-right">İşlem</th></tr></thead>
+              <tbody>{variants.map((item: Any) => <tr key={item.id} className="border-t"><td className="p-3 font-bold">{item.name || `${group.name} ${dimension}`}</td><td className="p-3">{item.supplier || item.offers?.[0]?.supplier || '—'}</td><td className="p-3">{item.thickness || '—'} mm</td><td className="p-3">{n(item.stock_length_mm) ? `${n(item.stock_length_mm) / 1000} m` : '6 m'}</td><td className="p-3">{n(item.weight_per_meter).toFixed(2)} kg/m</td><td className="p-3 text-right font-bold">{formatCurrency(n(item.effective_price_per_meter || item.price_per_meter || item.offers?.[0]?.price_per_meter))}</td><td className="p-3">{[item.finish, item.color].filter(Boolean).join(' / ') || 'Standart'}</td><td className="p-3"><span className={item.is_active === 0 ? 'rounded-full bg-slate-100 px-2 py-1 text-xs font-bold text-slate-500' : 'rounded-full bg-emerald-50 px-2 py-1 text-xs font-bold text-emerald-700'}>{item.is_active === 0 ? 'Pasif' : 'Aktif'}</span></td><td className="p-3 text-right"><button onClick={() => open(item)} className="rounded-lg border px-3 py-1.5 text-xs font-bold text-slate-700"><Pencil className="mr-1 inline h-3.5 w-3.5" />Düzenle</button></td></tr>)}
+              {!variants.length && <tr><td colSpan={9} className="p-8 text-center text-slate-400">Bu sabit ölçü için henüz varyant yok. “Varyant ekle” ile tedarikçi/fiyat bilgisi tanımlayın.</td></tr>}</tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>;
+}
 
 function ProfileStat({icon:Icon,label,value,hint,tone='blue'}:Any){const colors:Any={blue:'bg-blue-50 text-blue-700',green:'bg-emerald-50 text-emerald-700',amber:'bg-amber-50 text-amber-700',purple:'bg-purple-50 text-purple-700'};return <div className="rounded-2xl border bg-white p-5 shadow-sm"><div className="flex items-center gap-4"><div className={`rounded-2xl p-3 ${colors[tone]}`}><Icon className="h-6 w-6"/></div><div><p className="text-sm font-bold text-slate-500">{label}</p><b className="text-2xl text-slate-900">{value}</b><p className="text-xs text-emerald-600">{hint}</p></div></div></div>}
 

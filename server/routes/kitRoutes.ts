@@ -77,7 +77,7 @@ export function createKitRouter(db: Database.Database) {
   };
   const kitDetail = (id: string) => {
     const kit = db.prepare(`SELECT k.*, p.name profile_name, p.shape, p.dimension, p.material profile_material, p.thickness, p.color profile_color, p.finish profile_finish, p.grade profile_grade, p.supplier, p.price_per_meter,
-      COALESCE(o.price_per_meter, p.price_per_meter) effective_price_per_meter, o.supplier offer_supplier, o.currency offer_currency, p.stock_length_mm
+      COALESCE(NULLIF(o.price_per_meter, 0), NULLIF(k.manual_profile_price_per_meter, 0), NULLIF(p.price_per_meter, 0), 0) effective_price_per_meter, o.supplier offer_supplier, o.currency offer_currency, p.stock_length_mm
       FROM kits k JOIN kit_profiles p ON p.id=k.profile_id LEFT JOIN kit_profile_offers o ON o.id=k.profile_offer_id WHERE k.id=?`).get(id) as any;
     if (!kit) return null;
     kit.items = db.prepare(`SELECT ki.*, p.title, p.name, p.sku, p.purchase_cost, p.central_stock, p.weight,
@@ -201,10 +201,10 @@ export function createKitRouter(db: Database.Database) {
       const product = complementary.get(line.complementary_product_id) as any;
       if (product?.unit === 'adet' && !isPositiveInteger(line.quantity)) throw new Error('Adet bazlı tamamlayıcı ürün miktarı pozitif tam sayı olmalı.');
     }
-    if (update) db.prepare(`UPDATE kits SET name=?,code=?,description=?,profile_id=?,profile_offer_id=?,status=?,cover_image=?,notes=?,target_margin=?,sale_price=?,cutting_cost=?,labour_cost=?,packaging_cost=?,other_cost=?,commission_rate=?,payment_cost=?,shipping_cost=?,vat_rate=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .run(b.name,b.code||null,b.description,b.profile_id,b.profile_offer_id||null,b.status||'active',b.cover_image,b.notes,num(b.target_margin),num(b.sale_price),num(b.cutting_cost),num(b.labour_cost),num(b.packaging_cost),num(b.other_cost),num(b.commission_rate),num(b.payment_cost),num(b.shipping_cost),optionalNum(b.vat_rate,20),id);
-    else db.prepare(`INSERT INTO kits (id,name,code,description,profile_id,profile_offer_id,status,cover_image,notes,target_margin,sale_price,cutting_cost,labour_cost,packaging_cost,other_cost,commission_rate,payment_cost,shipping_cost,vat_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(id,b.name,b.code||null,b.description,b.profile_id,b.profile_offer_id||null,b.status||'active',b.cover_image,b.notes,num(b.target_margin),num(b.sale_price),num(b.cutting_cost),num(b.labour_cost),num(b.packaging_cost),num(b.other_cost),num(b.commission_rate),num(b.payment_cost),num(b.shipping_cost),optionalNum(b.vat_rate,20));
+    if (update) db.prepare(`UPDATE kits SET name=?,code=?,description=?,profile_id=?,profile_offer_id=?,status=?,cover_image=?,notes=?,target_margin=?,sale_price=?,manual_profile_price_per_meter=?,cutting_cost=?,labour_cost=?,packaging_cost=?,other_cost=?,commission_rate=?,payment_cost=?,shipping_cost=?,vat_rate=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+      .run(b.name,b.code||null,b.description,b.profile_id,b.profile_offer_id||null,b.status||'active',b.cover_image,b.notes,num(b.target_margin),num(b.sale_price),num(b.manual_profile_price_per_meter),num(b.cutting_cost),num(b.labour_cost),num(b.packaging_cost),num(b.other_cost),num(b.commission_rate),num(b.payment_cost),num(b.shipping_cost),optionalNum(b.vat_rate,20),id);
+    else db.prepare(`INSERT INTO kits (id,name,code,description,profile_id,profile_offer_id,status,cover_image,notes,target_margin,sale_price,manual_profile_price_per_meter,cutting_cost,labour_cost,packaging_cost,other_cost,commission_rate,payment_cost,shipping_cost,vat_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id,b.name,b.code||null,b.description,b.profile_id,b.profile_offer_id||null,b.status||'active',b.cover_image,b.notes,num(b.target_margin),num(b.sale_price),num(b.manual_profile_price_per_meter),num(b.cutting_cost),num(b.labour_cost),num(b.packaging_cost),num(b.other_cost),num(b.commission_rate),num(b.payment_cost),num(b.shipping_cost),optionalNum(b.vat_rate,20));
     db.prepare('DELETE FROM kit_items WHERE kit_id=?').run(id); db.prepare('DELETE FROM kit_cuts WHERE kit_id=?').run(id);
     db.prepare('DELETE FROM kit_complementary_items WHERE kit_id=?').run(id);
     const itemStmt = db.prepare('INSERT INTO kit_items (id,kit_id,product_id,quantity,unit_cost) VALUES (?,?,?,?,?)');
