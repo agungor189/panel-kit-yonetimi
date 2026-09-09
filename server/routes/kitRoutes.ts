@@ -77,8 +77,12 @@ export function createKitRouter(db: Database.Database) {
   };
   const kitDetail = (id: string) => {
     const kit = db.prepare(`SELECT k.*, p.name profile_name, p.shape, p.dimension, p.material profile_material, p.thickness, p.color profile_color, p.finish profile_finish, p.grade profile_grade, p.supplier, p.price_per_meter,
-      COALESCE(NULLIF(o.price_per_meter, 0), NULLIF(k.manual_profile_price_per_meter, 0), NULLIF(p.price_per_meter, 0), 0) effective_price_per_meter, o.supplier offer_supplier, o.currency offer_currency, p.stock_length_mm
-      FROM kits k JOIN kit_profiles p ON p.id=k.profile_id LEFT JOIN kit_profile_offers o ON o.id=k.profile_offer_id WHERE k.id=?`).get(id) as any;
+      COALESCE(NULLIF(o.price_per_meter, 0), NULLIF(po.price_per_meter, 0), NULLIF(k.manual_profile_price_per_meter, 0), NULLIF(p.price_per_meter, 0), 0) effective_price_per_meter,
+      COALESCE(o.supplier, po.supplier) offer_supplier, COALESCE(o.currency, po.currency) offer_currency, p.stock_length_mm
+      FROM kits k JOIN kit_profiles p ON p.id=k.profile_id
+      LEFT JOIN kit_profile_offers o ON o.id=k.profile_offer_id
+      LEFT JOIN kit_profile_offers po ON po.profile_id=p.id AND po.is_preferred=1
+      WHERE k.id=?`).get(id) as any;
     if (!kit) return null;
     kit.items = db.prepare(`SELECT ki.*, p.title, p.name, p.sku, p.purchase_cost, p.central_stock, p.weight,
       p.sale_price, CAST(CASE WHEN ki.quantity > 0 THEN FLOOR(COALESCE(p.central_stock,0)/ki.quantity) ELSE 0 END AS INTEGER) available_units
@@ -120,12 +124,14 @@ export function createKitRouter(db: Database.Database) {
     const baseCost = partsCost + complementaryCost + profileBaseCost + commission + commercialFixed;
     const vatRate = num(kit.vat_rate) / 100;
     const vat = vatRate ? salePrice - (salePrice / (1 + vatRate)) : 0;
-    const netProfit = salePrice - baseCost;
+    const netRevenue = salePrice - vat;
+    const netProfit = netRevenue - baseCost;
     kit.analysis = { availability, partsCost, partsSale, profileMeters, purchasedProfileMeters, profileBars: cutting.bars.length, profileCost, profileBaseCost, profileSale, baseCost, suggestedPrice: suggestedProfileSale, suggestedProfileSale, salePrice, commission, vat, netProfit, margin: salePrice ? (netProfit / salePrice) * 100 : 0,
+      netRevenue,
       complementaryCost, weightBreakdown: { connectionWeightKg, profileWeightKg, complementaryWeightKg, totalWeightKg: connectionWeightKg + profileWeightKg + complementaryWeightKg },
       cuttingPlan: { stockLengthMm, bars: cutting.bars.map((bar, index) => ({ number: index + 1, cuts: bar.cuts, remaining_mm: bar.remaining })), usedMm: cutting.usedMm, purchasedMm: cutting.purchasedMm, kerfLossMm: cutting.kerfLossMm, remnantMm: cutting.remnantMm, efficiency: cutting.purchasedMm ? (cutting.usedMm / cutting.purchasedMm) * 100 : 0 },
       markup: baseCost ? (netProfit / baseCost) * 100 : 0,
-      breakdown: { partsCost, partsSale, profileMaterial: profileCost, profileUsedMeters: profileMeters, profilePurchasedMeters: purchasedProfileMeters, profileBars: cutting.bars.length, kerfLoss: cutting.kerfLossMm, remnant: cutting.remnantMm, complementaryCost, complementarySale, cutting: num(kit.cutting_cost), labour: num(kit.labour_cost), packaging: num(kit.packaging_cost), other: num(kit.other_cost), commission, payment: num(kit.payment_cost), shipping: num(kit.shipping_cost), commercialFixed, vat, profileBaseCost, profileSale, baseCost, salePrice, netProfit } };
+      breakdown: { partsCost, partsSale, profileMaterial: profileCost, profileUsedMeters: profileMeters, profilePurchasedMeters: purchasedProfileMeters, profileBars: cutting.bars.length, kerfLoss: cutting.kerfLossMm, remnant: cutting.remnantMm, complementaryCost, complementarySale, cutting: num(kit.cutting_cost), labour: num(kit.labour_cost), packaging: num(kit.packaging_cost), other: num(kit.other_cost), commission, payment: num(kit.payment_cost), shipping: num(kit.shipping_cost), commercialFixed, vat, netRevenue, profileBaseCost, profileSale, baseCost, salePrice, netProfit } };
     return kit;
   };
 

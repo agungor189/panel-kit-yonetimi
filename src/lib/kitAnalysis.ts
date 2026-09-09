@@ -54,7 +54,31 @@ function optimizeCuts(lines: Any[], stockLength: number, kerf: number) {
     }
     return bars;
   };
-  const bars = invalid.length ? [] : makePlan(pieces);
+  let bars = invalid.length ? [] : makePlan(pieces);
+  if (!invalid.length && pieces.length <= 18) {
+    const limit = bars.length;
+    for (let target = 1; target < limit; target++) {
+      const trial = Array.from({ length: target }, () => ({ remaining: stockLength, cuts: [] as number[] }));
+      const pack = (index: number): boolean => {
+        if (index === pieces.length) { bars = trial.map(bar => ({ remaining: bar.remaining, cuts: [...bar.cuts] })); return true; }
+        const piece = pieces[index];
+        const tried = new Set<number>();
+        for (const bar of trial) {
+          if (tried.has(Math.round(bar.remaining))) continue;
+          tried.add(Math.round(bar.remaining));
+          const needed = piece + (bar.cuts.length ? kerf : 0);
+          if (bar.remaining < needed) continue;
+          bar.remaining -= needed;
+          bar.cuts.push(piece);
+          if (pack(index + 1)) return true;
+          bar.cuts.pop();
+          bar.remaining += needed;
+        }
+        return false;
+      };
+      if (pack(0)) break;
+    }
+  }
   const usedMm = pieces.reduce((sum: number, piece: number) => sum + piece, 0);
   const purchasedMm = bars.length * stockLength;
   const kerfLossMm = bars.reduce((sum, bar) => sum + Math.max(0, bar.cuts.length - 1) * kerf, 0);
@@ -84,12 +108,15 @@ export function draftKitAnalysis(data: Any, profile: Any, products: Any[], compl
   const profileSale = n(data.sale_price) || suggestedProfileSale;
   const salePrice = partsSale + complementaryCost + profileSale;
   const commission = salePrice * commissionRate;
+  const vatRate = n(data.vat_rate) / 100;
+  const vat = vatRate ? salePrice - (salePrice / (1 + vatRate)) : 0;
+  const netRevenue = salePrice - vat;
   const materialCost = partsCost + profileCost + complementaryCost;
   const totalCost = materialCost + n(data.cutting_cost) + n(data.labour_cost) + n(data.packaging_cost) + n(data.other_cost) + commission + commercialFixed;
-  const profit = salePrice - totalCost;
+  const profit = netRevenue - totalCost;
   const suggestion = (margin: number) => {
     const profileSaleSuggestion = (productionCost * (1 + margin / 100) + commercialFixed + fixedCustomerSale * commissionRate) / Math.max(.01, 1 - commissionRate);
     return { margin, profileSale: profileSaleSuggestion, salePrice: partsSale + complementaryCost + profileSaleSuggestion };
   };
-  return { partsCost, partsSale, complementaryCost, profileMeters, purchasedProfileMeters, profileBars: cutPlan.bars.length, profileCost, materialCost, productionCost, commission, commercialFixed, totalCost, salePrice, profit, netMargin: salePrice ? profit / salePrice * 100 : 0, markup: totalCost ? profit / totalCost * 100 : 0, profileMeterCost, cuttingPlan: cutPlan, suggestions: [20, 30, 50].map(suggestion), compatibility: components.map(item => ({ product_id: item.product_id, ...compatibilityFor(profile, item) })) };
+  return { partsCost, partsSale, complementaryCost, profileMeters, purchasedProfileMeters, profileBars: cutPlan.bars.length, profileCost, materialCost, productionCost, commission, commercialFixed, vat, netRevenue, totalCost, salePrice, profit, netMargin: salePrice ? profit / salePrice * 100 : 0, markup: totalCost ? profit / totalCost * 100 : 0, profileMeterCost, cuttingPlan: cutPlan, suggestions: [20, 30, 50].map(suggestion), compatibility: components.map(item => ({ product_id: item.product_id, ...compatibilityFor(profile, item) })) };
 }
