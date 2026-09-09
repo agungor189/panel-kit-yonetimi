@@ -148,7 +148,7 @@ function ProfileChooser({ profiles, selectedProfile, data, setData, set }: Any) 
   const [dimension, setDimension] = useState(initialDimension || group.dimensions[0]);
   const materials = Array.from(new Set(KIT_PROFILE_CATALOG.map(item => item.material)));
   const shapes = KIT_PROFILE_CATALOG.filter(item => item.material === group.material).map(item => item.shape);
-  const variants = profiles.filter((profile: Any) => profileMatchesCatalog(profile, group, dimension));
+  const variants = profiles.filter((profile: Any) => profile?.is_active !== 0 && String(profile.thickness || '').trim() && profileMatchesCatalog(profile, group, dimension));
   const thicknesses = Array.from(new Set<string>(variants.map((profile: Any) => String(profile.thickness || '').trim()).filter(Boolean))).sort((a, b) => Number(a) - Number(b));
   const selectedOffer = selectedProfile?.offers?.find((offer: Any) => offer.id === data.profile_offer_id) || selectedProfile?.offers?.find((offer: Any) => offer.is_preferred);
   const selectedMeterPrice = n(selectedOffer?.price_per_meter) || n(selectedProfile?.effective_price_per_meter || selectedProfile?.price_per_meter);

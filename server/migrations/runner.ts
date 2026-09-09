@@ -1463,6 +1463,112 @@ const migrations: Migration[] = [
       try { db.exec("ALTER TABLE kits ADD COLUMN manual_profile_price_per_meter REAL DEFAULT 0"); } catch (_) {}
     },
   },
+  {
+    version: 48,
+    name: "seed_fixed_kit_profile_variants",
+    up(db) {
+      const slug = (value: string) => value
+        .toLocaleLowerCase("tr-TR")
+        .replace(/ğ/g, "g")
+        .replace(/ü/g, "u")
+        .replace(/ş/g, "s")
+        .replace(/ı/g, "i")
+        .replace(/ö/g, "o")
+        .replace(/ç/g, "c")
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+
+      const catalog = [
+        { material: "Demir Döküm", shape: "Kare", dimensions: ["25x25 mm", "40x40 mm"] },
+        { material: "Demir Döküm", shape: "Yuvarlak", dimensions: ["3/4 inç (26.9 mm)", "1 inç (33.7 mm)", "1.5 inç (48.3 mm)", "2 inç (60.3 mm)"] },
+        { material: "Alüminyum", shape: "Yuvarlak", dimensions: ["1 inç"] },
+        { material: "Alüminyum", shape: "Kare", dimensions: ["20x20 mm", "30x30 mm"] },
+        { material: "PPR", shape: "Yuvarlak", dimensions: ["3/4 inç (26.9 mm)"] },
+        { material: "Karbon Çelik", shape: "Kare", dimensions: ["40x40 mm"] },
+        { material: "Karbon Çelik", shape: "Yuvarlak", dimensions: ["3/4 inç (26.9 mm)"] },
+      ];
+      const thicknesses = ["1.0 mm", "1.5 mm", "2.0 mm", "2.5 mm"];
+
+      const fixedProfiles: Array<{
+        id: string;
+        name: string;
+        material: string;
+        shape: string;
+        dimension: string;
+        thickness: string;
+      }> = [];
+      for (const group of catalog) {
+        for (const dimension of group.dimensions) {
+          for (const thickness of thicknesses) {
+            const name = `${group.material} ${group.shape} ${dimension} / ${thickness}`;
+            fixedProfiles.push({
+              id: `fixed-profile-${slug(`${group.material}-${group.shape}-${dimension}-${thickness}`)}`,
+              name,
+              material: group.material,
+              shape: group.shape,
+              dimension,
+              thickness,
+            });
+          }
+        }
+      }
+
+      const findProfile = db.prepare(`
+        SELECT id FROM kit_profiles
+        WHERE LOWER(TRIM(material)) = LOWER(TRIM(?))
+          AND LOWER(TRIM(shape)) = LOWER(TRIM(?))
+          AND LOWER(REPLACE(TRIM(dimension), '×', 'x')) = LOWER(REPLACE(TRIM(?), '×', 'x'))
+          AND LOWER(TRIM(COALESCE(thickness, ''))) = LOWER(TRIM(?))
+        LIMIT 1
+      `);
+      const insertProfile = db.prepare(`
+        INSERT INTO kit_profiles (
+          id, name, shape, dimension, material, thickness, supplier, price_per_meter,
+          color, finish, grade, weight_per_meter, stock_length_mm, is_active, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, '', 0, '', 'Standart', 'Standart', 0, 6000, 1, '')
+      `);
+      const updateProfile = db.prepare(`
+        UPDATE kit_profiles
+        SET name = ?,
+            shape = ?,
+            dimension = ?,
+            material = ?,
+            thickness = ?,
+            finish = COALESCE(NULLIF(finish, ''), 'Standart'),
+            grade = COALESCE(NULLIF(grade, ''), 'Standart'),
+            stock_length_mm = CASE WHEN COALESCE(stock_length_mm, 0) > 0 THEN stock_length_mm ELSE 6000 END,
+            is_active = 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `);
+
+      const fixedIds: string[] = [];
+      for (const profile of fixedProfiles) {
+        const existing = findProfile.get(profile.material, profile.shape, profile.dimension, profile.thickness) as { id: string } | undefined;
+        const id = existing?.id || profile.id;
+        if (!existing) {
+          insertProfile.run(id, profile.name, profile.shape, profile.dimension, profile.material, profile.thickness);
+        } else {
+          updateProfile.run(profile.name, profile.shape, profile.dimension, profile.material, profile.thickness, id);
+        }
+        fixedIds.push(id);
+      }
+
+      if (fixedIds.length) {
+        const placeholders = fixedIds.map(() => "?").join(",");
+        db.prepare(`UPDATE kit_profiles SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id NOT IN (${placeholders})`).run(...fixedIds);
+      }
+
+      const alum20x20 = findProfile.get("Alüminyum", "Kare", "20x20 mm", "1.5 mm") as { id: string } | undefined;
+      if (alum20x20) {
+        db.prepare(`
+          INSERT OR IGNORE INTO kit_profile_offers (
+            id, profile_id, supplier, price_per_meter, currency, lead_time_days, supplier_sku, notes, is_preferred
+          ) VALUES (?, ?, 'sandemir', 24.6, 'TRY', 0, '', '', 0)
+        `).run("fixed-offer-aluminyum-kare-20x20-1-5-sandemir", alum20x20.id);
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {
