@@ -76,7 +76,7 @@ export function createKitRouter(db: Database.Database) {
     return num(row.central_stock) + buildable;
   };
   const kitDetail = (id: string) => {
-    const kit = db.prepare(`SELECT k.*, p.name profile_name, p.shape, p.dimension, p.material profile_material, p.thickness, p.color profile_color, p.finish profile_finish, p.grade profile_grade, p.supplier, p.price_per_meter,
+    const kit = db.prepare(`SELECT k.*, p.name profile_name, p.shape, p.dimension, p.material profile_material, p.thickness, p.color profile_color, p.finish profile_finish, p.grade profile_grade, p.weight_per_meter, p.supplier, p.price_per_meter,
       COALESCE(NULLIF(o.price_per_meter, 0), NULLIF(po.price_per_meter, 0), NULLIF(k.manual_profile_price_per_meter, 0), NULLIF(p.price_per_meter, 0), 0) effective_price_per_meter,
       COALESCE(o.supplier, po.supplier) offer_supplier, COALESCE(o.currency, po.currency) offer_currency, p.stock_length_mm
       FROM kits k JOIN kit_profiles p ON p.id=k.profile_id
@@ -104,6 +104,7 @@ export function createKitRouter(db: Database.Database) {
     const complementaryWeightKg = kit.complementary_items.reduce((sum: number, item: any) => sum + num(item.quantity) * num(item.unit_weight_kg_snapshot), 0);
     const connectionWeightKg = kit.items.reduce((sum: number, item: any) => sum + num(item.quantity) * num(item.weight) / 1000, 0);
     const profileWeightKg = profileMeters * num(kit.weight_per_meter);
+    const purchasedProfileWeightKg = purchasedProfileMeters * num(kit.weight_per_meter);
     const profileBaseCost = profileCost + num(kit.cutting_cost) + num(kit.labour_cost) + num(kit.packaging_cost) + num(kit.other_cost);
     const commercialFixed = num(kit.payment_cost) + num(kit.shipping_cost);
     // “Hedef kâr” is a markup on the profile work cost, not a gross-margin
@@ -128,7 +129,7 @@ export function createKitRouter(db: Database.Database) {
     const netProfit = netRevenue - baseCost;
     kit.analysis = { availability, partsCost, partsSale, profileMeters, purchasedProfileMeters, profileBars: cutting.bars.length, profileCost, profileBaseCost, profileSale, baseCost, suggestedPrice: suggestedProfileSale, suggestedProfileSale, salePrice, commission, vat, netProfit, margin: salePrice ? (netProfit / salePrice) * 100 : 0,
       netRevenue,
-      complementaryCost, weightBreakdown: { connectionWeightKg, profileWeightKg, complementaryWeightKg, totalWeightKg: connectionWeightKg + profileWeightKg + complementaryWeightKg },
+      complementaryCost, weightBreakdown: { connectionWeightKg, profileWeightKg, purchasedProfileWeightKg, complementaryWeightKg, totalWeightKg: connectionWeightKg + profileWeightKg + complementaryWeightKg, totalPurchasedWeightKg: connectionWeightKg + purchasedProfileWeightKg + complementaryWeightKg },
       cuttingPlan: { stockLengthMm, bars: cutting.bars.map((bar, index) => ({ number: index + 1, cuts: bar.cuts, remaining_mm: bar.remaining })), usedMm: cutting.usedMm, purchasedMm: cutting.purchasedMm, kerfLossMm: cutting.kerfLossMm, remnantMm: cutting.remnantMm, efficiency: cutting.purchasedMm ? (cutting.usedMm / cutting.purchasedMm) * 100 : 0 },
       markup: baseCost ? (netProfit / baseCost) * 100 : 0,
       breakdown: { partsCost, partsSale, profileMaterial: profileCost, profileUsedMeters: profileMeters, profilePurchasedMeters: purchasedProfileMeters, profileBars: cutting.bars.length, kerfLoss: cutting.kerfLossMm, remnant: cutting.remnantMm, complementaryCost, complementarySale, cutting: num(kit.cutting_cost), labour: num(kit.labour_cost), packaging: num(kit.packaging_cost), other: num(kit.other_cost), commission, payment: num(kit.payment_cost), shipping: num(kit.shipping_cost), commercialFixed, vat, netRevenue, profileBaseCost, profileSale, baseCost, salePrice, netProfit } };

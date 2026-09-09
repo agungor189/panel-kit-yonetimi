@@ -114,9 +114,13 @@ export function draftKitAnalysis(data: Any, profile: Any, products: Any[], compl
   const materialCost = partsCost + profileCost + complementaryCost;
   const totalCost = materialCost + n(data.cutting_cost) + n(data.labour_cost) + n(data.packaging_cost) + n(data.other_cost) + commission + commercialFixed;
   const profit = netRevenue - totalCost;
+  const connectionWeightKg = components.reduce((sum: number, item: Any) => sum + n(item.quantity) * n(item.weight) / 1000, 0);
+  const profileWeightKg = profileMeters * n(profile?.weight_per_meter);
+  const purchasedProfileWeightKg = purchasedProfileMeters * n(profile?.weight_per_meter);
+  const complementaryWeightKg = extraItems.reduce((sum: number, item: Any) => sum + n(item.quantity) * n(item.unit_weight_kg_snapshot ?? item.unit_weight_kg), 0);
   const suggestion = (margin: number) => {
     const profileSaleSuggestion = (productionCost * (1 + margin / 100) + commercialFixed + fixedCustomerSale * commissionRate) / Math.max(.01, 1 - commissionRate);
     return { margin, profileSale: profileSaleSuggestion, salePrice: partsSale + complementaryCost + profileSaleSuggestion };
   };
-  return { partsCost, partsSale, complementaryCost, profileMeters, purchasedProfileMeters, profileBars: cutPlan.bars.length, profileCost, materialCost, productionCost, commission, commercialFixed, vat, netRevenue, totalCost, salePrice, profit, netMargin: salePrice ? profit / salePrice * 100 : 0, markup: totalCost ? profit / totalCost * 100 : 0, profileMeterCost, cuttingPlan: cutPlan, suggestions: [20, 30, 50].map(suggestion), compatibility: components.map(item => ({ product_id: item.product_id, ...compatibilityFor(profile, item) })) };
+  return { partsCost, partsSale, complementaryCost, profileMeters, purchasedProfileMeters, profileBars: cutPlan.bars.length, profileCost, materialCost, productionCost, commission, commercialFixed, vat, netRevenue, totalCost, baseCost: totalCost, salePrice, profit, netProfit: profit, margin: salePrice ? profit / salePrice * 100 : 0, netMargin: salePrice ? profit / salePrice * 100 : 0, markup: totalCost ? profit / totalCost * 100 : 0, profileMeterCost, cuttingPlan: cutPlan, weightBreakdown: { connectionWeightKg, profileWeightKg, purchasedProfileWeightKg, complementaryWeightKg, totalWeightKg: connectionWeightKg + profileWeightKg + complementaryWeightKg, totalPurchasedWeightKg: connectionWeightKg + purchasedProfileWeightKg + complementaryWeightKg }, suggestions: [20, 30, 50].map(suggestion), compatibility: components.map(item => ({ product_id: item.product_id, ...compatibilityFor(profile, item) })) };
 }
