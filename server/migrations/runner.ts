@@ -1569,6 +1569,45 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 49,
+    name: "add_warehouse_picker_lock_and_progress",
+    up(db) {
+      for (const sql of [
+        "ALTER TABLE users ADD COLUMN email TEXT",
+        "ALTER TABLE sales ADD COLUMN warehouse_picker_user_id TEXT",
+        "ALTER TABLE sales ADD COLUMN warehouse_picker_name TEXT",
+        "ALTER TABLE sales ADD COLUMN warehouse_picking_started_at DATETIME",
+        "ALTER TABLE sales ADD COLUMN warehouse_picking_completed_at DATETIME",
+      ]) try { db.exec(sql); } catch (_) {}
+
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique
+          ON users(email) WHERE email IS NOT NULL AND email != '';
+
+        CREATE TABLE IF NOT EXISTS warehouse_pick_progress (
+          order_id TEXT NOT NULL,
+          product_id TEXT NOT NULL,
+          sku TEXT,
+          required_quantity REAL NOT NULL,
+          picked_quantity REAL NOT NULL DEFAULT 0,
+          picker_user_id TEXT NOT NULL,
+          picker_name TEXT NOT NULL,
+          verified_by TEXT,
+          verified_code_type TEXT CHECK(verified_code_type IN ('sku', 'barcode', 'location')),
+          completed_at DATETIME,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(order_id, product_id),
+          FOREIGN KEY(order_id) REFERENCES sales(id) ON DELETE CASCADE,
+          FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_warehouse_pick_progress_picker
+          ON warehouse_pick_progress(picker_user_id, updated_at);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

@@ -56,8 +56,9 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
   const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
   const [backupConfig, setBackupConfig] = useState<BackupConfig | null>(null);
   const [backupLoading, setBackupLoading] = useState(false);
-  const [newUser, setNewUser] = useState<{ username: string; password: string; role: UserRole }>({
+  const [newUser, setNewUser] = useState<{ username: string; email: string; password: string; role: UserRole }>({
     username: '',
+    email: '',
     password: '',
     role: 'user',
   });
@@ -391,12 +392,13 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
     try {
       await api.post('/users', {
         username,
+        email: newUser.email.trim(),
         password: newUser.password,
         role: newUser.role,
         is_active: 1,
         must_change_password: 1,
       });
-      setNewUser({ username: '', password: '', role: 'user' });
+      setNewUser({ username: '', email: '', password: '', role: 'user' });
       await loadUsers();
     } catch (err: any) {
       alert(err.message || "Kullanıcı oluşturulamadı.");
@@ -407,6 +409,7 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
     try {
       await api.put(`/users/${user.id}`, {
         username: user.username,
+        email: patch.email ?? user.email ?? '',
         role: patch.role ?? user.role,
         is_active: patch.is_active ?? user.is_active,
         must_change_password: patch.must_change_password ?? user.must_change_password,
@@ -686,13 +689,20 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
           </div>
 
           <div className="p-6 lg:p-8 border-b border-border-color bg-bg-main/50">
-            <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_160px_auto] gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_1fr_160px_auto] gap-3">
               <input
                 type="text"
                 value={newUser.username}
                 onChange={(e) => setNewUser({ ...newUser, username: e.target.value })}
                 className="form-input text-sm font-bold"
                 placeholder="Kullanıcı adı"
+              />
+              <input
+                type="email"
+                value={newUser.email}
+                onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
+                className="form-input text-sm font-bold"
+                placeholder="E-posta (opsiyonel)"
               />
               <input
                 type="password"
@@ -738,7 +748,7 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
                   <tr key={user.id} className="hover:bg-bg-main/60 transition-colors">
                     <td className="px-6 py-4">
                       <div className="font-black text-text-main">{user.username}</div>
-                      <div className="text-[10px] text-text-muted font-bold uppercase tracking-tight">{user.id.slice(0, 8)}</div>
+                      <div className="text-[10px] text-text-muted font-bold">{user.email || user.id.slice(0, 8)}</div>
                     </td>
                     <td className="px-6 py-4">
                       <select

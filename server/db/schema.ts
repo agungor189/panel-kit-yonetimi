@@ -452,6 +452,10 @@ export function applySchema(db: Database.Database): void {
       income_transaction_id      TEXT,
       return_reason              TEXT,
       returned_at                DATETIME,
+      warehouse_picker_user_id   TEXT,
+      warehouse_picker_name      TEXT,
+      warehouse_picking_started_at DATETIME,
+      warehouse_picking_completed_at DATETIME,
       created_at                 DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at                 DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -554,6 +558,7 @@ export function applySchema(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS users (
       id                    TEXT PRIMARY KEY,
       username              TEXT UNIQUE NOT NULL,
+      email                 TEXT,
       password_hash         TEXT NOT NULL,
       role                  TEXT    DEFAULT 'user',
       is_active             INTEGER DEFAULT 1,
@@ -566,6 +571,27 @@ export function applySchema(db: Database.Database): void {
       created_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at            DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS warehouse_pick_progress (
+      order_id          TEXT NOT NULL,
+      product_id        TEXT NOT NULL,
+      sku               TEXT,
+      required_quantity REAL NOT NULL,
+      picked_quantity   REAL NOT NULL DEFAULT 0,
+      picker_user_id    TEXT NOT NULL,
+      picker_name       TEXT NOT NULL,
+      verified_by       TEXT,
+      verified_code_type TEXT CHECK(verified_code_type IN ('sku', 'barcode', 'location')),
+      completed_at      DATETIME,
+      created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(order_id, product_id),
+      FOREIGN KEY(order_id) REFERENCES sales(id) ON DELETE CASCADE,
+      FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_warehouse_pick_progress_picker
+      ON warehouse_pick_progress(picker_user_id, updated_at);
 
     CREATE TABLE IF NOT EXISTS pricing_history (
       id                 TEXT PRIMARY KEY,

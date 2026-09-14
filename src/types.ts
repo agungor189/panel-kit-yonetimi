@@ -3,6 +3,7 @@ export type UserRole = 'admin' | 'user' | 'readonly';
 export interface ManagedUser {
   id: string;
   username: string;
+  email?: string;
   role: UserRole;
   is_active: boolean;
   must_change_password: boolean;

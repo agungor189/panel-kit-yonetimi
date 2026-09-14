@@ -1519,6 +1519,7 @@ async function startServer() {
     return {
       id: row.id,
       username: row.username,
+      email: row.email || '',
       role: row.role,
       is_active: Number(row.is_active) === 1,
       must_change_password: Number(row.must_change_password) === 1,
@@ -1531,7 +1532,7 @@ async function startServer() {
   };
 
   const getManageableUser = (id: string) => sanitizeUserRow(db.prepare(`
-    SELECT id, username, role, is_active, must_change_password, permissions, notes,
+    SELECT id, username, email, role, is_active, must_change_password, permissions, notes,
            last_login_at, created_at, updated_at
     FROM users
     WHERE id = ?
@@ -1582,7 +1583,8 @@ async function startServer() {
         return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Kullanıcı adı ve şifre zorunludur.' } });
       }
 
-      const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username) as any;
+      const login = String(username).trim();
+      const user = db.prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE OR email = ? COLLATE NOCASE").get(login, login) as any;
       if (!user) {
         logActivity('LOGIN_FAILED', 'auth', 'unknown', { username, ip: req.ip, reason: 'user_not_found' });
         return res.status(401).json({ success: false, error: { code: 'AUTH_FAILED', message: 'Geçersiz kullanıcı adı veya şifre.' } });
@@ -1845,7 +1847,7 @@ async function startServer() {
   app.get("/api/users", requireAdmin, (req, res) => {
     try {
       const users = (db.prepare(`
-        SELECT id, username, role, is_active, must_change_password, permissions, notes,
+        SELECT id, username, email, role, is_active, must_change_password, permissions, notes,
                last_login_at, created_at, updated_at
         FROM users
         ORDER BY datetime(COALESCE(created_at, '1970-01-01')) DESC, username ASC
@@ -1860,6 +1862,7 @@ async function startServer() {
   app.post("/api/users", requireAdmin, (req, res) => {
     try {
       const username = cleanText(req.body?.username);
+      const email = cleanText(req.body?.email).toLocaleLowerCase('tr-TR');
       const password = typeof req.body?.password === 'string' ? req.body.password : '';
       const role = cleanText(req.body?.role || 'user');
       const isActive = toBit(req.body?.is_active, 1);
@@ -1872,6 +1875,9 @@ async function startServer() {
       if (password.length < 8) {
         return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Şifre en az 8 karakter olmalıdır.' } });
       }
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Geçerli bir e-posta adresi girin.' } });
+      }
       if (!validUserRoles.has(role)) {
         return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Geçersiz rol.' } });
       }
@@ -1880,12 +1886,15 @@ async function startServer() {
       if (duplicate) {
         return res.status(409).json({ success: false, error: { code: 'USERNAME_EXISTS', message: 'Bu kullanıcı adı zaten kullanılıyor.' } });
       }
+      if (email && db.prepare("SELECT id FROM users WHERE email = ? COLLATE NOCASE").get(email)) {
+        return res.status(409).json({ success: false, error: { code: 'EMAIL_EXISTS', message: 'Bu e-posta zaten kullanılıyor.' } });
+      }
 
       const id = uuidv4();
       db.prepare(`
-        INSERT INTO users (id, username, password_hash, role, is_active, must_change_password, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(id, username, bcrypt.hashSync(password, 10), role, isActive, mustChangePassword, notes || null);
+        INSERT INTO users (id, username, email, password_hash, role, is_active, must_change_password, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, username, email || null, bcrypt.hashSync(password, 10), role, isActive, mustChangePassword, notes || null);
 
       const created = getManageableUser(id);
       logActivity('USER_CREATED', 'user', id, { after: created }, req.user?.id);
@@ -1903,6 +1912,7 @@ async function startServer() {
       }
 
       const username = hasOwn(req.body, 'username') ? cleanText(req.body.username) : before.username;
+      const email = hasOwn(req.body, 'email') ? cleanText(req.body.email).toLocaleLowerCase('tr-TR') : before.email;
       const role = hasOwn(req.body, 'role') ? cleanText(req.body.role) : before.role;
       const isActive = hasOwn(req.body, 'is_active') ? toBit(req.body.is_active, before.is_active ? 1 : 0) : (before.is_active ? 1 : 0);
       const mustChangePassword = hasOwn(req.body, 'must_change_password')
@@ -1916,10 +1926,16 @@ async function startServer() {
       if (!validUserRoles.has(role)) {
         return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Geçersiz rol.' } });
       }
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Geçerli bir e-posta adresi girin.' } });
+      }
 
       const duplicate = db.prepare("SELECT id FROM users WHERE username = ? AND id != ?").get(username, req.params.id) as any;
       if (duplicate) {
         return res.status(409).json({ success: false, error: { code: 'USERNAME_EXISTS', message: 'Bu kullanıcı adı zaten kullanılıyor.' } });
+      }
+      if (email && db.prepare("SELECT id FROM users WHERE email = ? COLLATE NOCASE AND id != ?").get(email, req.params.id)) {
+        return res.status(409).json({ success: false, error: { code: 'EMAIL_EXISTS', message: 'Bu e-posta zaten kullanılıyor.' } });
       }
 
       ensureUserManagementSafe(req.user?.id, before, role, isActive);
@@ -1927,13 +1943,14 @@ async function startServer() {
       db.prepare(`
         UPDATE users
         SET username = ?,
+            email = ?,
             role = ?,
             is_active = ?,
             must_change_password = ?,
             notes = ?,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
-      `).run(username, role, isActive, mustChangePassword, notes || null, req.params.id);
+      `).run(username, email || null, role, isActive, mustChangePassword, notes || null, req.params.id);
 
       const after = getManageableUser(req.params.id);
       logActivity('USER_UPDATED', 'user', req.params.id, { before, after }, req.user?.id);
@@ -5534,7 +5551,28 @@ async function startServer() {
     "/api/warehouse/v1",
     publicAuthFailedLimiter,
     publicApiLimiter,
-    createWarehouseRouter({ db, hashApiKey, logActivity }),
+    createWarehouseRouter({
+      db,
+      hashApiKey,
+      logActivity,
+      uploadsDir,
+      authenticateUserToken: (token) => {
+        try {
+          const decoded = jwt.verify(token, JWT_SECRET) as { id?: string };
+          if (!decoded.id) return null;
+          const auth = loadUserForAuth(decoded.id);
+          if (!auth.user || auth.disabled) return null;
+          return {
+            id: auth.user.id,
+            username: auth.user.username,
+            role: auth.user.role,
+            must_change_password: auth.user.must_change_password,
+          };
+        } catch {
+          return null;
+        }
+      },
+    }),
   );
 
   app.get("/api/public/health", (req, res) => {

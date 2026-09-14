@@ -1,6 +1,12 @@
 import express from "express";
+import path from "node:path";
 import Database from "better-sqlite3";
-import { WarehouseService, WarehouseServiceError } from "../services/warehouseService.js";
+import { WarehousePicker, WarehouseService, WarehouseServiceError } from "../services/warehouseService.js";
+
+type WarehouseUser = WarehousePicker & {
+  role: string;
+  must_change_password: boolean;
+};
 
 type WarehouseRouterDependencies = {
   db: Database.Database;
@@ -12,6 +18,8 @@ type WarehouseRouterDependencies = {
     details?: unknown,
     actorId?: string,
   ) => void;
+  authenticateUserToken: (token: string) => WarehouseUser | null;
+  uploadsDir: string;
 };
 
 const permissionsFor = (rawPermissions: unknown): string[] => {
@@ -26,7 +34,13 @@ const permissionsFor = (rawPermissions: unknown): string[] => {
 const errorResponse = (res: express.Response, status: number, code: string, message: string) =>
   res.status(status).json({ success: false, error: { code, message } });
 
-export function createWarehouseRouter({ db, hashApiKey, logActivity }: WarehouseRouterDependencies) {
+export function createWarehouseRouter({
+  db,
+  hashApiKey,
+  logActivity,
+  authenticateUserToken,
+  uploadsDir,
+}: WarehouseRouterDependencies) {
   const router = express.Router();
   const service = new WarehouseService(db, logActivity);
 
@@ -113,6 +127,36 @@ export function createWarehouseRouter({ db, hashApiKey, logActivity }: Warehouse
     }, req.panelApiKey.id);
   };
 
+  const requireWarehouseUser = (
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction,
+  ) => {
+    const authorization = req.headers.authorization;
+    if (!authorization?.startsWith("Bearer ")) {
+      return errorResponse(res, 401, "UNAUTHORIZED", "Oturum gerekli.");
+    }
+
+    const user = authenticateUserToken(authorization.slice("Bearer ".length));
+    if (!user) return errorResponse(res, 401, "UNAUTHORIZED", "Oturum geçersiz veya süresi dolmuş.");
+    if (user.must_change_password) {
+      return errorResponse(res, 403, "PASSWORD_CHANGE_REQUIRED", "Önce panel üzerinden şifrenizi değiştirin.");
+    }
+    if (user.role === "readonly") {
+      return errorResponse(res, 403, "FORBIDDEN", "Bu kullanıcı depo işlemi yapamaz.");
+    }
+
+    res.locals.warehouseUser = user;
+    next();
+  };
+
+  const handleServiceError = (res: express.Response, error: unknown) => {
+    if (error instanceof WarehouseServiceError) {
+      return errorResponse(res, error.statusCode, error.code, error.message);
+    }
+    throw error;
+  };
+
   router.get("/orders", authenticate("read:warehouse_orders"), (req, res) => {
     const page = Math.max(1, Math.trunc(Number(req.query.page)) || 1);
     const limit = Math.min(100, Math.max(1, Math.trunc(Number(req.query.limit)) || 25));
@@ -148,27 +192,77 @@ export function createWarehouseRouter({ db, hashApiKey, logActivity }: Warehouse
     res.json({ success: true, data: product });
   });
 
-  router.post("/orders/:id/start", authenticate("write:warehouse_status"), (req, res) => {
+  router.get(
+    "/products/:id/image",
+    authenticate("read:products"),
+    (req, res) => {
+      const storedPath = service.getProductImagePath(req.params.id);
+      if (!storedPath) return errorResponse(res, 404, "IMAGE_NOT_FOUND", "Ürün görseli bulunamadı.");
+
+      const relativePath = storedPath.replace(/^[/\\]+uploads[/\\]+/i, "").replace(/^[/\\]+/, "");
+      const root = path.resolve(uploadsDir);
+      const absolutePath = path.resolve(root, relativePath);
+      if (absolutePath !== root && !absolutePath.startsWith(`${root}${path.sep}`)) {
+        return errorResponse(res, 404, "IMAGE_NOT_FOUND", "Ürün görseli bulunamadı.");
+      }
+      auditRead(req);
+      return res.sendFile(absolutePath, (error) => {
+        if (error && !res.headersSent) errorResponse(res, 404, "IMAGE_NOT_FOUND", "Ürün görseli bulunamadı.");
+      });
+    },
+  );
+
+  router.post("/orders/:id/start", authenticate("write:warehouse_status"), requireWarehouseUser, (req, res) => {
     try {
-      const result = service.startPicking(req.params.id, req.panelApiKey!.id);
+      const result = service.startPicking(req.params.id, res.locals.warehouseUser);
       res.json({ success: true, data: result.order, idempotent: result.idempotent });
     } catch (error) {
-      if (error instanceof WarehouseServiceError) {
-        return errorResponse(res, error.statusCode, error.code, error.message);
-      }
-      throw error;
+      return handleServiceError(res, error);
     }
   });
 
-  router.post("/orders/:id/complete", authenticate("write:warehouse_status"), (req, res) => {
+  router.post("/orders/:id/verify-pick", authenticate("write:warehouse_status"), requireWarehouseUser, (req, res) => {
+    const productId = String(req.body?.product_id || "").trim();
+    const code = String(req.body?.code || "").trim();
+    if (!productId || !code) {
+      return errorResponse(res, 400, "VALIDATION_ERROR", "product_id ve code zorunludur.");
+    }
     try {
-      const result = service.completePicking(req.params.id, req.panelApiKey!.id);
+      const result = service.verifyPick(req.params.id, productId, code, res.locals.warehouseUser);
+      res.json({ success: true, data: result });
+    } catch (error) {
+      return handleServiceError(res, error);
+    }
+  });
+
+  router.post(
+    "/orders/:id/pick-items/:productId/complete",
+    authenticate("write:warehouse_status"),
+    requireWarehouseUser,
+    (req, res) => {
+      if (req.body?.picked_quantity === undefined) {
+        return errorResponse(res, 400, "VALIDATION_ERROR", "picked_quantity zorunludur.");
+      }
+      try {
+        const result = service.completePickItem(
+          req.params.id,
+          req.params.productId,
+          req.body.picked_quantity,
+          res.locals.warehouseUser,
+        );
+        res.json({ success: true, data: result });
+      } catch (error) {
+        return handleServiceError(res, error);
+      }
+    },
+  );
+
+  router.post("/orders/:id/complete", authenticate("write:warehouse_status"), requireWarehouseUser, (req, res) => {
+    try {
+      const result = service.completePicking(req.params.id, res.locals.warehouseUser);
       res.json({ success: true, data: result.order, idempotent: result.idempotent });
     } catch (error) {
-      if (error instanceof WarehouseServiceError) {
-        return errorResponse(res, error.statusCode, error.code, error.message);
-      }
-      throw error;
+      return handleServiceError(res, error);
     }
   });
 
