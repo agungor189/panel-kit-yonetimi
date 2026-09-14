@@ -11,6 +11,7 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
+    "warehouse-import:dry-run": "tsx scripts/importWarehouseProducts.ts",
     "rebuild-db:local": "ALLOW_LOCAL_DB_REBUILD=true tsx scripts/rebuildDatabase.ts"
   },
   "dependencies": {

@@ -24,6 +24,7 @@ import { createInsightsRouter } from "./server/routes/insightsRoutes.js";
 import { createRecurringPaymentsRouter } from "./server/routes/recurringPaymentsRoutes.js";
 import { createDashboardDataRouter } from "./server/routes/dashboardDataRoutes.js";
 import { createKitRouter } from "./server/routes/kitRoutes.js";
+import { createWarehouseRouter } from "./server/routes/warehouseRoutes.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
 import { restoreUploadEntry } from "./server/utils/restoreUploads.js";
 import { initializeDatabase, openDatabase } from "./server/db/initialize.js";
@@ -1698,8 +1699,8 @@ async function startServer() {
 
   // API Authentication Middleware
   app.use("/api", (req, res, next) => {
-    // allow auth routes and public API routes with their own auth/limits
-    if (req.path.startsWith('/auth/') || req.path.startsWith('/public/')) return next();
+    // Auth, public API, and warehouse API routes apply their own authentication/limits.
+    if (req.path.startsWith('/auth/') || req.path.startsWith('/public/') || req.path.startsWith('/warehouse/')) return next();
 
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -1748,7 +1749,7 @@ async function startServer() {
   // remain available through /api/auth; every other JWT-backed route is blocked
   // until the user's password is changed.
   app.use("/api", (req, res, next) => {
-    if (req.path.startsWith('/auth/') || req.path.startsWith('/public/')) return next();
+    if (req.path.startsWith('/auth/') || req.path.startsWith('/public/') || req.path.startsWith('/warehouse/')) return next();
 
     const user = req.user;
     if (!user || user.role === 'api_key') return next();
@@ -1769,7 +1770,7 @@ async function startServer() {
   // Server-side write protection: readonly users and the legacy static API key cannot call mutating methods.
   // This enforces access control on the server, not just the client.
   app.use("/api", (req, res, next) => {
-    if (req.path.startsWith('/auth/') || req.path.startsWith('/public/')) return next();
+    if (req.path.startsWith('/auth/') || req.path.startsWith('/public/') || req.path.startsWith('/warehouse/')) return next();
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
 
     const user = req.user;
@@ -5529,6 +5530,12 @@ async function startServer() {
 
   // --- PUBLIC API ROUTES ---
   app.use("/api/public", publicAuthFailedLimiter, publicApiLimiter);
+  app.use(
+    "/api/warehouse/v1",
+    publicAuthFailedLimiter,
+    publicApiLimiter,
+    createWarehouseRouter({ db, hashApiKey, logActivity }),
+  );
 
   app.get("/api/public/health", (req, res) => {
     // Health doesn't require auth but we can validate it if present manually or just return ok
