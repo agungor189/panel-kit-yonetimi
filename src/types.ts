@@ -16,9 +16,12 @@ export interface ManagedUser {
 export interface Product {
   id: string;
   name: string;
+  name_tr?: string;
+  name_en?: string;
   title: string;
   warehouse_location: string;
   sku: string;
+  supplier_code?: string;
   barcode: string;
   category: string;
   model: string;
@@ -39,6 +42,8 @@ export interface Product {
   sale_price: number;
   buffer_percentage: number;
   exchange_rate_used: number;
+  weight_grams?: number;
+  /** @deprecated Use weight_grams. Kept as an API compatibility alias. */
   weight: number;
   status: 'Active' | 'Passive' | 'Out of stock';
   notes: string;
@@ -49,7 +54,7 @@ export interface Product {
   total_stock?: number;
   available_stock?: number;
   physical_stock?: number;
-  product_type?: 'finished' | 'assembly' | 'component' | 'accessory';
+  product_type?: 'simple' | 'assembly' | 'component' | 'accessory';
   is_sellable?: boolean | number;
   visible_in_catalog?: boolean | number;
   exclude_from_analysis?: boolean | number;
@@ -59,6 +64,15 @@ export interface Product {
   bom_usage?: ProductBomUsage[];
   images?: ProductImage[];
   platforms?: ProductPlatform[];
+  logistics?: ProductLogistics | null;
+  reserve_locations?: string[];
+}
+
+export interface ProductLogistics {
+  box_count?: number | null;
+  units_per_box?: number | null;
+  box_weight_kg?: number | null;
+  total_weight_kg?: number | null;
 }
 
 export interface ProductBomComponent {

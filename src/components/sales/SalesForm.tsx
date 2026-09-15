@@ -164,7 +164,7 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
         product_sku: product.sku,
         product_name: product.name || product.title,
         quantity: 1,
-        weight_per_unit: product.weight || 0,
+        weight_per_unit: product.weight_grams ?? product.weight ?? 0,
         sale_price: product.sale_price || 0,
         total_stock: product.total_stock || 0,
         physical_stock: product.physical_stock ?? product.central_stock ?? 0,

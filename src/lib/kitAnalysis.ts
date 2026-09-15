@@ -114,7 +114,7 @@ export function draftKitAnalysis(data: Any, profile: Any, products: Any[], compl
   const materialCost = partsCost + profileCost + complementaryCost;
   const totalCost = materialCost + n(data.cutting_cost) + n(data.labour_cost) + n(data.packaging_cost) + n(data.other_cost) + commission + commercialFixed;
   const profit = netRevenue - totalCost;
-  const connectionWeightKg = components.reduce((sum: number, item: Any) => sum + n(item.quantity) * n(item.weight) / 1000, 0);
+  const connectionWeightKg = components.reduce((sum: number, item: Any) => sum + n(item.quantity) * n(item.weight_grams ?? item.weight) / 1000, 0);
   const profileWeightKg = profileMeters * n(profile?.weight_per_meter);
   const purchasedProfileWeightKg = purchasedProfileMeters * n(profile?.weight_per_meter);
   const complementaryWeightKg = extraItems.reduce((sum: number, item: Any) => sum + n(item.quantity) * n(item.unit_weight_kg_snapshot ?? item.unit_weight_kg), 0);

@@ -15,6 +15,8 @@ export function applySchema(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS products (
       id                      TEXT    PRIMARY KEY,
       name                    TEXT,
+      name_tr                 TEXT,
+      name_en                 TEXT,
       title                   TEXT    NOT NULL,
       warehouse_location      TEXT,
       sku                     TEXT    UNIQUE,
@@ -35,7 +37,7 @@ export function applySchema(db: Database.Database): void {
       supplier                TEXT,
       min_stock_level         INTEGER DEFAULT 50,
       central_stock           INTEGER DEFAULT 0,
-      product_type            TEXT    DEFAULT 'finished',
+      product_type            TEXT    DEFAULT 'simple',
       is_sellable             INTEGER DEFAULT 1,
       visible_in_catalog      INTEGER DEFAULT 1,
       exclude_from_analysis   INTEGER DEFAULT 0,
@@ -58,6 +60,29 @@ export function applySchema(db: Database.Database): void {
       created_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at              DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS product_logistics (
+      product_id       TEXT PRIMARY KEY,
+      box_count        INTEGER,
+      units_per_box    INTEGER,
+      box_weight_kg    REAL,
+      total_weight_kg  REAL,
+      created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS product_reserve_locations (
+      id          TEXT PRIMARY KEY,
+      product_id  TEXT NOT NULL,
+      location    TEXT NOT NULL,
+      sort_order  INTEGER DEFAULT 0,
+      created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(product_id, location),
+      FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_reserve_locations_product
+      ON product_reserve_locations(product_id, sort_order);
 
     CREATE TABLE IF NOT EXISTS product_images (
       id          TEXT PRIMARY KEY,

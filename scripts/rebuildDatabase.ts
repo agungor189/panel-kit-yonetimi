@@ -114,24 +114,24 @@ function importProducts(db: Database.Database): Map<string, string> {
 
   const insert = db.prepare(`
     INSERT INTO products (
-      id, name, title, sku, supplier_code, barcode, category, model,
+      id, name, name_tr, title, sku, supplier_code, barcode, category, model,
       description, material, product_series, tube_type_code,
       size, size_code, form_code, pipe_size,
       connection_type, usage_area, supplier,
       min_stock_level, central_stock,
       product_type, is_sellable, visible_in_catalog, exclude_from_analysis,
       purchase_price_usd, purchase_cost, sale_price,
-      weight, weight_grams, status,
+      weight_grams, status,
       normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size
     ) VALUES (
-      @id, @name, @title, @sku, @supplier_code, @barcode, @category, @model,
+      @id, @name, @name_tr, @title, @sku, @supplier_code, @barcode, @category, @model,
       @description, @material, @product_series, @tube_type_code,
       @size, @size_code, @form_code, @pipe_size,
       @connection_type, @usage_area, @supplier,
       @min_stock_level, @central_stock,
       @product_type, @is_sellable, @visible_in_catalog, @exclude_from_analysis,
       @purchase_price_usd, @purchase_cost, @sale_price,
-      @weight, @weight_grams, @status,
+      @weight_grams, @status,
       @normalized_material, @normalized_model, @normalized_size, @normalized_tube_type, @normalized_pipe_size
     )
   `);
@@ -155,7 +155,7 @@ function importProducts(db: Database.Database): Map<string, string> {
 
       const isComponent = parsedSku.is_component;
       const isAccessory = parsedSku.is_accessory;
-      const productType = isComponent ? "component" : isAccessory ? "accessory" : "finished";
+      const productType = isComponent ? "component" : isAccessory ? "accessory" : "simple";
       const sellable = isComponent || isAccessory ? 0 : 1;
       const visible = isComponent || isAccessory ? 0 : 1;
       const excludeFromAnalysis = isComponent || isAccessory ? 1 : 0;
@@ -166,6 +166,7 @@ function importProducts(db: Database.Database): Map<string, string> {
       insert.run({
         id,
         name: displayName,
+        name_tr: displayName,
         title: displayName,
         sku,
         supplier_code: supplierCode || null,
@@ -192,7 +193,6 @@ function importProducts(db: Database.Database): Map<string, string> {
         purchase_price_usd: price,
         purchase_cost: price,
         sale_price: sellable ? +(price * 1.6).toFixed(2) : 0,
-        weight: weight,
         weight_grams: weight,
         status: "Active",
         normalized_material: normalizedMaterial,
@@ -213,24 +213,24 @@ function importProducts(db: Database.Database): Map<string, string> {
 function seedAssemblies(db: Database.Database, skuToId: Map<string, string>): void {
   const insertAssembly = db.prepare(`
     INSERT INTO products (
-      id, name, title, sku, category, model,
+      id, name, name_tr, title, sku, category, model,
       description, material, product_series, tube_type_code,
       size, size_code, form_code, pipe_size,
       connection_type, supplier,
       min_stock_level, central_stock,
       product_type, is_sellable, visible_in_catalog, exclude_from_analysis,
       purchase_price_usd, purchase_cost, sale_price,
-      weight, weight_grams, status,
+      weight_grams, status,
       normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size
     ) VALUES (
-      @id, @name, @title, @sku, @category, @model,
+      @id, @name, @name_tr, @title, @sku, @category, @model,
       @description, @material, @product_series, @tube_type_code,
       @size, @size_code, @form_code, @pipe_size,
       @connection_type, @supplier,
       0, 0,
-      'finished', 1, 1, 0,
+      'assembly', 1, 1, 0,
       @purchase_price_usd, @purchase_cost, @sale_price,
-      @weight, @weight_grams, 'Active',
+      @weight_grams, 'Active',
       @normalized_material, @normalized_model, @normalized_size, @normalized_tube_type, @normalized_pipe_size
     )
   `);
@@ -240,7 +240,7 @@ function seedAssemblies(db: Database.Database, skuToId: Map<string, string>): vo
     VALUES (?, ?, ?, ?, ?)
   `);
 
-  const getProduct = db.prepare("SELECT id, purchase_price_usd, purchase_cost, weight FROM products WHERE sku = ?");
+  const getProduct = db.prepare("SELECT id, purchase_price_usd, purchase_cost, weight, weight_grams FROM products WHERE sku = ?");
 
   let createdCount = 0;
   let bomCount = 0;
@@ -259,13 +259,14 @@ function seedAssemblies(db: Database.Database, skuToId: Map<string, string>): vo
 
       const purchaseUsd = components.reduce((s, c) => s + (Number(c!.product.purchase_price_usd) || 0) * c!.qty, 0);
       const purchaseCost = components.reduce((s, c) => s + (Number(c!.product.purchase_cost) || 0) * c!.qty, 0);
-      const weight = components.reduce((s, c) => s + (Number(c!.product.weight) || 0) * c!.qty, 0);
+      const weight = components.reduce((s, c) => s + (Number(c!.product.weight_grams ?? c!.product.weight) || 0) * c!.qty, 0);
       const salePrice = +(purchaseUsd * 2.2).toFixed(2);
 
       const id = uuidv4();
       insertAssembly.run({
         id,
         name: assembly.name,
+        name_tr: assembly.name,
         title: assembly.name,
         sku: assembly.sku,
         category: parsed.tube_type ? `${parsed.tube_type} Boru Kelepçesi` : "Boru Kelepçesi",
@@ -283,7 +284,6 @@ function seedAssemblies(db: Database.Database, skuToId: Map<string, string>): vo
         purchase_price_usd: purchaseUsd,
         purchase_cost: purchaseCost,
         sale_price: salePrice,
-        weight,
         weight_grams: weight,
         normalized_material: parsed.material,
         normalized_model: parsed.form,
@@ -301,7 +301,7 @@ function seedAssemblies(db: Database.Database, skuToId: Map<string, string>): vo
     }
   })();
 
-  console.log(`[BOM] Created ${createdCount} carbon steel finished assemblies, ${bomCount} BOM lines`);
+  console.log(`[BOM] Created ${createdCount} carbon steel assembly products, ${bomCount} BOM lines`);
 }
 
 // --- Fake sales seeder -----------------------------------------------------
@@ -334,7 +334,7 @@ function pickWeighted<T extends { weight: number }>(rand: () => number, items: T
 
 function seedFakeSales(db: Database.Database, days = 180) {
   const sellable = db.prepare(`
-    SELECT id, sku, sale_price, purchase_price_usd, weight, central_stock, name
+    SELECT id, sku, sale_price, purchase_price_usd, COALESCE(weight_grams, weight, 0) AS weight_grams, central_stock, name
     FROM products
     WHERE COALESCE(is_sellable, 1) = 1
       AND COALESCE(visible_in_catalog, 1) = 1
@@ -458,7 +458,7 @@ function seedFakeSales(db: Database.Database, days = 180) {
         const margin = 1.4 + rand() * 1.4;
         const unitPriceTry = purchaseUsd * usdTry * margin;
         const totalAmount = unitPriceTry * qty;
-        const totalWeight = (Number(product.weight) || 0) * qty;
+        const totalWeight = (Number(product.weight_grams) || 0) * qty;
         const purchaseCostTotal = purchaseUsd * usdTry * qty;
         const commission = totalAmount * platform.commission;
         const shipping = qty * 35;

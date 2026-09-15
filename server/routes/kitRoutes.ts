@@ -84,7 +84,7 @@ export function createKitRouter(db: Database.Database) {
       LEFT JOIN kit_profile_offers po ON po.profile_id=p.id AND po.is_preferred=1
       WHERE k.id=?`).get(id) as any;
     if (!kit) return null;
-    kit.items = db.prepare(`SELECT ki.*, p.title, p.name, p.sku, p.purchase_cost, p.central_stock, p.weight,
+    kit.items = db.prepare(`SELECT ki.*, p.title, p.name, p.sku, p.purchase_cost, p.central_stock, COALESCE(p.weight_grams, p.weight, 0) AS weight_grams,
       p.sale_price, CAST(CASE WHEN ki.quantity > 0 THEN FLOOR(COALESCE(p.central_stock,0)/ki.quantity) ELSE 0 END AS INTEGER) available_units
       FROM kit_items ki JOIN products p ON p.id=ki.product_id WHERE ki.kit_id=? ORDER BY p.title`).all(id);
     kit.cuts = db.prepare('SELECT * FROM kit_cuts WHERE kit_id=? ORDER BY length_mm DESC').all(id);
@@ -102,7 +102,7 @@ export function createKitRouter(db: Database.Database) {
     const profileCost = purchasedProfileMeters * num(kit.effective_price_per_meter);
     const complementaryCost = kit.complementary_items.reduce((sum: number, item: any) => sum + num(item.quantity) * num(item.purchase_price_snapshot), 0);
     const complementaryWeightKg = kit.complementary_items.reduce((sum: number, item: any) => sum + num(item.quantity) * num(item.unit_weight_kg_snapshot), 0);
-    const connectionWeightKg = kit.items.reduce((sum: number, item: any) => sum + num(item.quantity) * num(item.weight) / 1000, 0);
+    const connectionWeightKg = kit.items.reduce((sum: number, item: any) => sum + num(item.quantity) * num(item.weight_grams) / 1000, 0);
     const profileWeightKg = profileMeters * num(kit.weight_per_meter);
     const purchasedProfileWeightKg = purchasedProfileMeters * num(kit.weight_per_meter);
     const profileBaseCost = profileCost + num(kit.cutting_cost) + num(kit.labour_cost) + num(kit.packaging_cost) + num(kit.other_cost);

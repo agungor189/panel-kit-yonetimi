@@ -222,7 +222,7 @@ export class WarehouseService {
         p.warehouse_location,
         (SELECT path FROM product_images pi WHERE pi.product_id = p.id ORDER BY pi.sort_order ASC, pi.rowid ASC LIMIT 1) AS image_path,
         COALESCE(p.central_stock, 0) AS central_stock,
-        COALESCE(p.product_type, 'finished') AS product_type
+        COALESCE(p.product_type, 'simple') AS product_type
       FROM sale_items si
       LEFT JOIN products p ON p.id = si.product_id
       WHERE si.sale_id = ?

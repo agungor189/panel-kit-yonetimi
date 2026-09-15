@@ -16,7 +16,7 @@ import {
   SlidersHorizontal,
   X
 } from 'lucide-react';
-import { api, PLATFORMS } from '../lib/api';
+import { api } from '../lib/api';
 import { useCurrency } from '../CurrencyContext';
 import { Product } from '../types';
 import Papa from 'papaparse';
@@ -115,6 +115,22 @@ interface ProductListProps {
   onProductClick: (id: string) => void;
 }
 
+type ProductCsvImportReport = {
+  mode: 'dry-run' | 'apply';
+  applied: boolean;
+  rows: number;
+  products_created: number;
+  products_updated: number;
+  bom_parents: number;
+  bom_lines_created: number;
+  bom_lines_updated: number;
+  bom_lines_removed: number;
+  matched_columns: Array<{ csv_header: string; product_field: string; label: string }>;
+  unknown_columns: string[];
+  validation_errors: Array<{ row?: number; field?: string; code: string; message: string }>;
+  warnings: string[];
+};
+
 export default function ProductList({ onAddProduct, onProductClick }: ProductListProps) {
   const { isReadOnly } = useAuth();
   const { FormatAmount, activeRate, viewCurrency } = useCurrency();
@@ -127,6 +143,13 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
   const [filterStatus, setFilterStatus] = useState('Hepsi');
   const [sortKey, setSortKey] = useState('name_asc');
   const [showScanner, setShowScanner] = useState(false);
+  const [nameLanguage, setNameLanguage] = useState<'tr' | 'en'>(() =>
+    localStorage.getItem('products.nameLanguage') === 'en' ? 'en' : 'tr'
+  );
+
+  useEffect(() => {
+    localStorage.setItem('products.nameLanguage', nameLanguage);
+  }, [nameLanguage]);
 
   useEffect(() => {
     loadProducts();
@@ -145,7 +168,10 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
   const profileTypeOf = (product: Product) => normalizeFilterValue((product as any).normalized_tube_type || product.form_code || product.tube_type_code || product.model);
   const sizeOf = (product: Product) => normalizeFilterValue((product as any).normalized_pipe_size || product.pipe_size || product.size || product.size_code);
   const materialOf = (product: Product) => normalizeFilterValue(product.category || product.material || (product as any).normalized_material);
-  const productWeight = (product: Product) => Number(product.weight || (product as any).unit_weight_kg || 0);
+  const productName = (product: Product) => nameLanguage === 'en'
+    ? (product.name_en || product.name_tr || product.name || product.title)
+    : (product.name_tr || product.name_en || product.name || product.title);
+  const productWeight = (product: Product) => Number(product.weight_grams ?? product.weight ?? 0);
   const purchaseUsd = (product: Product) => Number(product.purchase_price_usd || 0);
   const purchaseTry = (product: Product) => Number(product.purchase_cost || 0);
   const saleTry = (product: Product) => Number(product.sale_price || 0);
@@ -157,11 +183,11 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
   const filteredProducts = products.filter(p => {
     const searchLower = search.toLowerCase();
     const matchesSearch =
-      (p.name?.toLowerCase().includes(searchLower)) ||
-      (p.title?.toLowerCase().includes(searchLower)) ||
+      (p.name_tr?.toLowerCase().includes(searchLower)) ||
+      (p.name_en?.toLowerCase().includes(searchLower)) ||
       (p.sku?.toLowerCase().includes(searchLower)) ||
-      (p.barcode?.toLowerCase().includes(searchLower)) ||
-      (p.product_series?.toLowerCase().includes(searchLower));
+      (p.supplier_code?.toLowerCase().includes(searchLower)) ||
+      (p.barcode?.toLowerCase().includes(searchLower));
     const matchesCategory = filterCategory === 'Hepsi' || materialOf(p) === filterCategory;
     const matchesProfileType = filterProfileType === 'Hepsi' || profileTypeOf(p) === filterProfileType;
     const matchesSize = filterSize === 'Hepsi' || sizeOf(p) === filterSize;
@@ -185,7 +211,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
       case 'stock_asc': return stockQty(a) - stockQty(b);
       case 'value_desc': return (stockQty(b) * saleTry(b)) - (stockQty(a) * saleTry(a));
       case 'name_asc':
-      default: return byText(a.name || a.title || '', b.name || b.title || '');
+      default: return byText(productName(a), productName(b));
     }
   });
 
@@ -203,41 +229,30 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
   };
   const csvInputRef = useRef<HTMLInputElement>(null);
 
-  // CSV Mapping State
+  // CSV import preview/report state. Mapping itself lives in shared/productCsvMapping.ts.
   const [showMappingModal, setShowMappingModal] = useState(false);
   const [csvData, setCsvData] = useState<any[]>([]);
   const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
+  const [csvFileName, setCsvFileName] = useState('products.csv');
+  const [importReport, setImportReport] = useState<ProductCsvImportReport | null>(null);
   const [importProgress, setImportProgress] = useState<{current: number, total: number} | null>(null);
-
-  const [mapping, setMapping] = useState<Record<string, string>>({
-    sku: 'Ürün Kodu',
-    name: 'Ürün Adı',
-    category: 'Malzeme',
-    stock: 'Merkez Depo Stoğu',
-    price: 'Satış Fiyatı',
-    barcode: 'Barkod',
-    description: 'Açıklama',
-    weight: 'Ağırlık',
-    location: 'Lokasyon',
-    notes: 'Notlar',
-    pipe_size: 'Boru Ölçüsü',
-    series: 'Seri'
-  });
 
   const exportToCsv = () => {
     const data = filteredProducts.map((p, index) => ({
       'Sıra No': index + 1,
       'Ürün Kodu': p.sku,
+      'Tedarik NO': p.supplier_code || '',
       'Malzeme': p.category,
       'Seri': p.product_series || '',
-      'Ürün Adı': p.name || p.title,
+      'Isim - TR': p.name_tr || '',
+      'İsim - EN': p.name_en || '',
       'Boru Ölçüsü': p.pipe_size || '',
       'Merkez Depo Stoğu': p.total_stock || 0,
       'Satış Fiyatı': p.sale_price,
       'Barkod': p.barcode || '',
       'Açıklama': p.description || '',
-      'Ağırlık': p.weight || 0,
-      'Lokasyon': p.warehouse_location || '',
+      'Parça Ağırlığı': p.weight_grams ?? p.weight ?? 0,
+      'Toplama Lokasyonu': p.warehouse_location || '',
       'Notlar': p.notes || ''
     }));
 
@@ -261,130 +276,47 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
-      complete: (results) => {
+      complete: async (results) => {
         const { data, meta } = results;
         if (data.length === 0) return;
-
-        setCsvData(data);
-        setCsvHeaders(meta.fields || []);
-
-        // Try to auto-map based on headers
-        const newMapping = { ...mapping };
+        if (results.errors.length > 0) {
+          toast.error(`CSV okunamadı: ${results.errors[0].message}`);
+          return;
+        }
         const headers = meta.fields || [];
-
-        const findMatch = (keys: string[]) => headers.find(h => keys.some(k => h.toLowerCase().includes(k.toLowerCase())));
-
-        newMapping.sku = findMatch(['sku', 'kod', 'ürün kodu']) || headers[0] || '';
-        newMapping.name = findMatch(['ad', 'isim', 'başlık', 'ürün adı']) || headers[1] || '';
-        newMapping.category = findMatch(['malzeme', 'kategori', 'category']) || headers[2] || '';
-        newMapping.stock = findMatch(['stok', 'adet', 'stock', 'toplam stok', 'merkez depo stoğu']) || headers[3] || '';
-        newMapping.price = findMatch(['fiyat', 'price', 'satış fiyatı']) || headers[4] || '';
-        newMapping.barcode = findMatch(['barkod', 'barcode', 'ean']) || headers[5] || '';
-        newMapping.description = findMatch(['açıklama', 'description', 'detay']) || headers[6] || '';
-        newMapping.weight = findMatch(['ağırlık', 'weight', 'gram']) || headers[7] || '';
-        newMapping.location = findMatch(['lokasyon', 'konum', 'location', 'raf']) || headers[8] || '';
-        newMapping.notes = findMatch(['not', 'notes', 'bilgi']) || headers[9] || '';
-        newMapping.pipe_size = findMatch(['boru ölçüsü', 'boru olcusu', 'ölçü', 'olcu', 'size', 'pipe size', 'diameter', 'çap', 'cap', 'nominal size', 'nominal bore', 'outside diameter', 'tube size', 'profil ölçüsü', 'profil olcusu']) || '';
-        newMapping.series = findMatch(['seri', 'series', 'product series', 'ürün serisi', 'urun serisi', 'oya', 'prm']) || '';
-
-        setMapping(newMapping);
-        setShowMappingModal(true);
+        setCsvData(data);
+        setCsvHeaders(headers);
+        setCsvFileName(file.name);
+        setImportProgress({ current: 0, total: data.length });
+        try {
+          const report = await api.post('/products/import', { rows: data, headers, dry_run: true, source_name: file.name });
+          setImportReport(report);
+          setShowMappingModal(true);
+        } catch (error: any) {
+          toast.error(error.message || 'CSV önizlemesi oluşturulamadı');
+        } finally {
+          setImportProgress(null);
+        }
       }
     });
   };
 
   const executeImport = async () => {
-    let successCount = 0;
-    let errorCount = 0;
-
-    setDeletingAll(true); // Reuse loading state
-    setShowMappingModal(false);
+    if (!importReport || importReport.validation_errors.length > 0) return;
+    setDeletingAll(true);
     setImportProgress({ current: 0, total: csvData.length });
-
-    for (let i = 0; i < csvData.length; i++) {
-      const row = csvData[i];
-      try {
-        const sku = row[mapping.sku] || `SKU-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-        const name = row[mapping.name] || 'İsimsiz Ürün';
-        const category = row[mapping.category] || 'Genel';
-        const totalStock = parseInt(row[mapping.stock]) || 0;
-
-        const parseCSVPrice = (val: any) => {
-          if (!val) return 0;
-          let s = String(val).replace(/[^0-9.,-]/g, '');
-          s = s.replace(',', '.');
-          const lastDot = s.lastIndexOf('.');
-          if (lastDot !== -1) {
-             const before = s.slice(0, lastDot).replace(/\./g, '');
-             const after = s.slice(lastDot + 1);
-             s = before + '.' + after;
-          }
-          const num = parseFloat(s);
-          return isNaN(num) ? 0 : num;
-        };
-        const purchasePriceUSD = parseCSVPrice(row[mapping.price]);
-        const barcode = row[mapping.barcode] || '';
-        const description = row[mapping.description] || '';
-        const weight = parseInt(row[mapping.weight]) || 0;
-        const location = row[mapping.location] || '';
-        const notes = row[mapping.notes] || '';
-        const pipe_size = row[mapping.pipe_size] || '';
-        const product_series = row[mapping.series] || '';
-
-        await api.post('/products', {
-          name: name,
-          title: name,
-          sku: sku,
-          barcode: barcode,
-          category: category,
-          product_series,
-          pipe_size: pipe_size,
-          description: description,
-          notes: notes,
-          warehouse_location: location,
-          weight: weight,
-          model: 'Standart',
-          purchase_price_usd: purchasePriceUSD,
-          purchase_cost: 0,
-          sale_price: 0,
-          buffer_percentage: 0,
-          profit_percentage: 0,
-          price_locked: false,
-          exchange_rate_used: 0,
-          central_stock: totalStock,
-          total_stock: totalStock,
-          status: totalStock > 0 ? 'Active' : 'Out of stock',
-          platforms: PLATFORMS.map((pName) => ({
-            name: pName,
-            stock: 0,
-            price: 0,
-            is_listed: true
-          }))
-        });
-        successCount++;
-      } catch (err) {
-        console.error('Import error for row:', row, err);
-        errorCount++;
-      }
-      setImportProgress({ current: i + 1, total: csvData.length });
+    try {
+      const report = await api.post('/products/import', { rows: csvData, headers: csvHeaders, dry_run: false, source_name: csvFileName });
+      setImportReport(report);
+      toast.success(`${report.products_created} ürün oluşturuldu, ${report.products_updated} ürün güncellendi`);
+      await loadProducts();
+    } catch (error: any) {
+      toast.error(error.message || 'İçe aktarma başarısız');
+    } finally {
+      setDeletingAll(false);
+      setImportProgress(null);
+      if (csvInputRef.current) csvInputRef.current.value = '';
     }
-
-    setDeletingAll(false);
-    setImportProgress(null);
-
-    if (successCount > 0) {
-      setTimeout(() => {
-        setShowPricingModal(true);
-      }, 500);
-      toast.success(`${successCount} ürün başarıyla eklendi`);
-    }
-
-    if (errorCount > 0) {
-      toast.error(`${errorCount} ürün eklenirken hata oluştu`);
-    }
-
-    loadProducts();
-    if (csvInputRef.current) csvInputRef.current.value = '';
   };
 
   const [deletingAll, setDeletingAll] = useState(false);
@@ -483,17 +415,25 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
           <button
             onClick={() => {
               const data = [{
-                'Ürün Kodu': 'URUN-001',
-                'Ürün Adı': 'Örnek Ürün',
+                'SKU': 'URUN-001',
+                'Tedarik NO': 'TED-001',
+                'Isim - TR': 'Örnek Ürün',
+                'İsim - EN': 'Sample Product',
                 'Malzeme': 'Aliminyum',
-                'Seri': 'OYA',
-                'Merkez Depo Stoğu': '100',
-                'Satış Fiyatı': '250',
-                'Barkod': '8690000000001',
+                'Profil Tipi': 'Yuvarlak',
+                'Ölçü': '25 mm',
+                'Toplam Adet': '100',
+                'Parça Ağırlığı': '500',
+                'Alış Fiyatı': '$2.50',
+                'TÜR': 'simple',
+                'BOM': '',
                 'Açıklama': 'Siyah kaliteli kaplama',
-                'Ağırlık': '500',
-                'Lokasyon': 'A-12-3',
-                'Notlar': 'Acil sevkiyat ürünü'
+                'Toplama Lokasyonu': 'A-12-3',
+                'Rezerv Lokasyon': 'R-01; R-02',
+                'Kutu sayısı': '2',
+                'Kutu içi adet': '50',
+                'Kutu Ağırlığı': '25',
+                'Toplam Ağırlık': '50'
               }];
               const csv = Papa.unparse(data);
               const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -585,7 +525,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
               <Search className="absolute left-3.5 h-4 w-4 text-text-muted" />
               <input
                 type="text"
-                placeholder="Ürün adı, SKU, barkod veya seri ara..."
+                placeholder="TR/EN ad, SKU, tedarikçi kodu veya barkod ara..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="w-full rounded-xl border border-border-color bg-bg-main py-3 pl-10 pr-12 text-sm outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/20"
@@ -616,6 +556,22 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                   Temizle
                 </button>
               )}
+            </div>
+
+            <div className="flex w-fit items-center rounded-xl border border-border-color bg-bg-main p-1" aria-label="Ürün adı dili">
+              {(['tr', 'en'] as const).map((language) => (
+                <button
+                  key={language}
+                  type="button"
+                  onClick={() => setNameLanguage(language)}
+                  className={cn(
+                    "rounded-lg px-3 py-2 text-xs font-black uppercase transition-all",
+                    nameLanguage === language ? "bg-white text-primary shadow-sm" : "text-text-muted"
+                  )}
+                >
+                  {language}
+                </button>
+              ))}
             </div>
 
             <div className="flex w-fit rounded-xl border border-border-color bg-bg-main p-1">
@@ -732,7 +688,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
               </div>
               <div className="p-4">
                 <p className="text-[9px] lg:text-[10px] font-bold text-text-muted uppercase tracking-widest mb-1">{p.category}</p>
-                <h3 className="font-bold text-text-main text-sm group-hover:text-primary transition-colors line-clamp-1 h-5">{p.name || p.title}</h3>
+                <h3 className="font-bold text-text-main text-sm group-hover:text-primary transition-colors line-clamp-1 h-5">{productName(p)}</h3>
                 <p className="text-[10px] text-text-muted font-mono mt-1">{p.sku}</p>
                 {p.product_series && (
                   <p className="text-[9px] font-black text-primary uppercase tracking-widest mt-2">
@@ -811,7 +767,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                           )}
                         </div>
                         <div className="min-w-0">
-                          <p className="text-sm font-bold text-text-main group-hover:text-primary transition-colors line-clamp-1">{p.name || p.title}</p>
+                          <p className="text-sm font-bold text-text-main group-hover:text-primary transition-colors line-clamp-1">{productName(p)}</p>
                           <div className="flex items-center gap-2 mt-0.5">
                             <p className="text-[10px] text-text-muted font-mono uppercase tracking-tighter truncate">{p.sku}</p>
                             <ProductKindBadge product={p} />
@@ -920,60 +876,76 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
         </div>
       )}
 
-      {/* CSV Mapping Modal */}
-      {showMappingModal && (
+      {/* CSV mapping and validation report */}
+      {showMappingModal && importReport && (
         <div className="fixed inset-0 bg-[#0F172A]/40 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl w-full max-w-xl shadow-2xl overflow-hidden animate-in zoom-in duration-300">
+          <div className="bg-white rounded-3xl w-full max-w-3xl shadow-2xl overflow-hidden animate-in zoom-in duration-300">
              <div className="p-8 border-b border-border-color bg-gray-50 flex items-center justify-between">
                 <div>
-                   <h3 className="text-xl font-black text-[#0F172A] tracking-tight">CSV Sütun Eşleştirme</h3>
-                   <p className="text-sm text-text-muted mt-1">Dosyanızdaki sütunları sistem alanlarıyla eşleştirin.</p>
+                   <h3 className="text-xl font-black text-[#0F172A] tracking-tight">CSV İçe Aktarma Raporu</h3>
+                   <p className="text-sm text-text-muted mt-1">{csvFileName} · {importReport.rows} satır · {importReport.mode === 'dry-run' ? 'önizleme' : 'uygulandı'}</p>
                 </div>
                 <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center border border-border-color shadow-sm">
                    <Upload className="w-6 h-6 text-primary" />
                 </div>
              </div>
 
-             <div className="p-8 space-y-6 max-h-[60vh] overflow-y-auto">
-                <div className="grid grid-cols-2 gap-4">
-                   {Object.entries(mapping).map(([field, selectedHeader]) => (
-                     <div key={field} className="space-y-1">
-                        <label className="text-[10px] font-bold text-text-muted uppercase tracking-widest block ml-1">
-                          {field === 'sku' && 'Ürün Kodu (Zorunlu)'}
-                          {field === 'name' && 'Ürün Adı (Zorunlu)'}
-                          {field === 'category' && 'Malzeme / Kategori'}
-                          {field === 'stock' && 'Merkez Depo Stoğu'}
-                          {field === 'price' && 'Alış Fiyatı (USD)'}
-                          {field === 'barcode' && 'Barkod'}
-                          {field === 'description' && 'Açıklama'}
-                          {field === 'weight' && 'Ağırlık (Gram)'}
-                          {field === 'location' && 'Raf Lokasyonu'}
-                          {field === 'notes' && 'Dahili Notlar'}
-                          {field === 'pipe_size' && 'Boru Ölçüsü (Önerilen)'}
-                          {field === 'series' && 'Seri'}
-                        </label>
-                        <div className="relative">
-                           <select
-                             value={selectedHeader}
-                             onChange={(e) => setMapping(prev => ({ ...prev, [field]: e.target.value }))}
-                             className="w-full pl-3 pr-10 py-2.5 bg-bg-main border border-border-color rounded-xl text-sm font-bold appearance-none hover:border-primary transition-colors focus:ring-2 focus:ring-primary/20 outline-none"
-                           >
-                             <option value="">Seçilmedi</option>
-                             {csvHeaders.map(h => (
-                               <option key={h} value={h}>{h}</option>
-                             ))}
-                           </select>
-                           <ChevronDown className="w-4 h-4 text-text-muted absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                        </div>
-                     </div>
-                   ))}
+             <div className="p-8 space-y-6 max-h-[65vh] overflow-y-auto">
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                  {[
+                    ['Oluşturulacak', importReport.products_created],
+                    ['Güncellenecek', importReport.products_updated],
+                    ['BOM üst ürünü', importReport.bom_parents],
+                    ['Yeni BOM satırı', importReport.bom_lines_created],
+                  ].map(([label, value]) => (
+                    <div key={String(label)} className="rounded-2xl border border-border-color bg-bg-main p-4">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-text-muted">{label}</p>
+                      <p className="mt-1 text-2xl font-black text-text-main">{value}</p>
+                    </div>
+                  ))}
                 </div>
 
-                <div className="bg-blue-50 border border-blue-100 p-4 rounded-2xl">
-                   <p className="text-xs text-blue-700 leading-relaxed font-medium">
-                     <strong>İpucu:</strong> Sütun başlıklarınız Ürün Kodu, Ürün Adı vb. ise otomatik eşleştirme yapılır. İlk 5 satır örnek olarak okunur.
-                   </p>
-                </div>
+                <section>
+                  <h4 className="mb-2 text-xs font-black uppercase tracking-widest text-text-muted">Eşleşen kolonlar</h4>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {importReport.matched_columns.map((column) => (
+                      <div key={`${column.csv_header}-${column.product_field}`} className="flex items-center justify-between gap-3 rounded-xl border border-border-color px-3 py-2 text-xs">
+                        <span className="font-bold text-text-main">{column.csv_header}</span>
+                        <span className="text-right font-mono text-primary">{column.product_field}</span>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                {importReport.unknown_columns.length > 0 && (
+                  <section className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                    <h4 className="text-xs font-black uppercase tracking-widest text-amber-800">Tanınmayan kolonlar</h4>
+                    <p className="mt-2 text-sm text-amber-900">{importReport.unknown_columns.join(', ')}</p>
+                  </section>
+                )}
+
+                {importReport.validation_errors.length > 0 ? (
+                  <section className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
+                    <h4 className="flex items-center gap-2 text-xs font-black uppercase tracking-widest text-rose-800">
+                      <AlertTriangle className="h-4 w-4" /> Validation hataları ({importReport.validation_errors.length})
+                    </h4>
+                    <ul className="mt-3 space-y-2 text-sm text-rose-900">
+                      {importReport.validation_errors.slice(0, 50).map((error, index) => (
+                        <li key={`${error.code}-${error.row || 0}-${index}`}>• {error.row ? `Satır ${error.row}: ` : ''}{error.message}</li>
+                      ))}
+                    </ul>
+                  </section>
+                ) : (
+                  <div className="flex items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-bold text-emerald-800">
+                    <CheckCircle className="h-5 w-5" /> Doğrulama tamamlandı. İçe aktarma uygulanabilir.
+                  </div>
+                )}
+
+                {importReport.applied && (
+                  <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">
+                    {importReport.products_created} ürün oluşturuldu, {importReport.products_updated} ürün güncellendi; {importReport.bom_lines_created} BOM satırı oluşturuldu ve {importReport.bom_lines_updated} BOM satırı güncellendi.
+                  </div>
+                )}
              </div>
 
              <div className="p-8 bg-gray-50 border-t border-border-color flex items-center justify-between">
@@ -981,20 +953,17 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                   onClick={() => setShowMappingModal(false)}
                   className="px-6 h-12 text-sm font-bold text-text-muted hover:text-[#0F172A] transition-colors"
                 >
-                  Vazgeç
+                  {importReport.applied ? 'Kapat' : 'Vazgeç'}
                 </button>
-                <button
-                  onClick={executeImport}
-                  disabled={deletingAll}
-                  className="px-8 h-12 bg-[#0F172A] text-white rounded-xl font-bold text-sm shadow-xl hover:scale-105 transition-all disabled:opacity-50"
-                >
-                  {deletingAll ? (
-                    <div className="flex items-center">
-                       <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />
-                       İçe Aktarılıyor...
-                    </div>
-                  ) : 'İçe Aktarımı Başlat'}
-                </button>
+                {!importReport.applied && (
+                  <button
+                    onClick={executeImport}
+                    disabled={deletingAll || importReport.validation_errors.length > 0}
+                    className="px-8 h-12 bg-[#0F172A] text-white rounded-xl font-bold text-sm shadow-xl hover:scale-105 transition-all disabled:opacity-50 disabled:hover:scale-100"
+                  >
+                    {deletingAll ? 'İçe Aktarılıyor...' : 'İçe Aktarımı Uygula'}
+                  </button>
+                )}
              </div>
           </div>
         </div>

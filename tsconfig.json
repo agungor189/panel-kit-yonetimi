@@ -26,6 +26,7 @@
   "include": [
     "server.ts",
     "server/**/*.ts",
+    "shared/**/*.ts",
     "src/**/*.ts",
     "src/**/*.tsx",
     "scripts/**/*.ts",

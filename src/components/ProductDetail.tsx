@@ -264,7 +264,7 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
                 <DetailStat label="Satış Fiyatı" value={<FormatAmount amount={product.sale_price} />} color="text-primary font-black" />
                 <DetailStat label="Merkez Depo Stoğu" value={`${centralStock} Adet`} color={centralStock <= (product.min_stock_level || 0) ? "text-danger" : "text-success"} />
                 <DetailStat label="Seri" value={seriesLabel || 'Bilinmiyor'} color="text-text-muted font-mono text-sm" />
-                <DetailStat label="Ağırlık" value={`${product.weight} gr`} color="text-text-muted" />
+                <DetailStat label="Ağırlık" value={`${product.weight_grams ?? product.weight ?? 0} gr`} color="text-text-muted" />
                 <DetailStat label="Boru Ölçüsü" value={product.pipe_size || 'Bilinmiyor'} color="text-text-muted font-mono text-sm" />
                 <DetailStat label="Alış ($)" value={`$${product.purchase_price_usd.toFixed(2)}`} color="text-text-muted" subLabel={`₺${product.exchange_rate_used} kur ile`} />
                 <DetailStat label="Maliyet (₺)" value={<FormatAmount amount={product.purchase_cost} />} color="text-text-muted" />

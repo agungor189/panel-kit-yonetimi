@@ -28,6 +28,8 @@ import { createWarehouseRouter } from "./server/routes/warehouseRoutes.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
 import { restoreUploadEntry } from "./server/utils/restoreUploads.js";
 import { initializeDatabase, openDatabase } from "./server/db/initialize.js";
+import { importProductsFromCsvRows } from "./server/services/productCsvImport.js";
+import { PRODUCT_TYPES, canonicalProductType, parseReserveLocations } from "./shared/productCsvMapping.js";
 
 declare global {
   namespace Express {
@@ -353,7 +355,7 @@ function getProductBomComponents(productId: string): any[] {
       COALESCE(p.central_stock, 0) as central_stock,
       COALESCE(p.purchase_cost, 0) as purchase_cost,
       COALESCE(p.purchase_price_usd, 0) as purchase_price_usd,
-      COALESCE(p.weight, 0) as weight
+      COALESCE(p.weight_grams, p.weight, 0) as weight_grams
     FROM product_bom b
     JOIN products p ON p.id = b.component_product_id
     WHERE b.parent_product_id = ?
@@ -371,7 +373,7 @@ function getProductStockProfile(product: any) {
       available_stock: physicalStock,
       physical_stock: physicalStock,
       unit_purchase_cost: Number(product?.purchase_cost) || 0,
-      unit_weight: Number(product?.weight) || 0,
+      unit_weight: Number(product?.weight_grams ?? product?.weight) || 0,
       components: [],
     };
   }
@@ -386,7 +388,7 @@ function getProductStockProfile(product: any) {
     const componentAvailable = quantityPerUnit > 0 ? Math.floor(componentStock / quantityPerUnit) : 0;
     availableStock = Math.min(availableStock, componentAvailable);
     unitPurchaseCost += (Number(component.purchase_cost) || 0) * quantityPerUnit;
-    unitWeight += (Number(component.weight) || 0) * quantityPerUnit;
+    unitWeight += (Number(component.weight_grams) || 0) * quantityPerUnit;
 
     return {
       ...component,
@@ -402,7 +404,7 @@ function getProductStockProfile(product: any) {
     available_stock: Math.max(Math.floor(availableStock), 0),
     physical_stock: physicalStock,
     unit_purchase_cost: unitPurchaseCost || (Number(product?.purchase_cost) || 0),
-    unit_weight: unitWeight || (Number(product?.weight) || 0),
+    unit_weight: unitWeight || (Number(product?.weight_grams ?? product?.weight) || 0),
     components: normalizedComponents,
   };
 }
@@ -452,6 +454,9 @@ function getProductBomUsage(componentProductId: string): any[] {
 
 function hydrateProductStock(product: any, includeBom = false) {
   const stockProfile = getProductStockProfile(product);
+  const weightGrams = stockProfile.hasBom
+    ? stockProfile.unit_weight
+    : Number(product?.weight_grams ?? product?.weight) || 0;
   return {
     ...product,
     total_stock: stockProfile.available_stock,
@@ -460,7 +465,9 @@ function hydrateProductStock(product: any, includeBom = false) {
     is_assembly: stockProfile.hasBom ? 1 : 0,
     stock_source: stockProfile.hasBom ? 'bom' : 'central',
     purchase_cost: stockProfile.hasBom ? stockProfile.unit_purchase_cost : product.purchase_cost,
-    weight: stockProfile.hasBom ? stockProfile.unit_weight : product.weight,
+    weight_grams: weightGrams,
+    // Compatibility alias for older clients; persistence uses weight_grams only.
+    weight: weightGrams,
     ...(includeBom ? { bom_components: stockProfile.components } : {}),
   };
 }
@@ -2433,7 +2440,7 @@ async function startServer() {
 
       const allProducts = (db.prepare(`
         SELECT p.id, p.purchase_cost, p.sale_price, p.purchase_price_usd, p.exchange_rate_used, p.buffer_percentage, p.material, p.model, p.size, p.category,
-          p.central_stock, p.weight
+          p.central_stock, p.weight_grams
         FROM products p
         WHERE ${catalogVisibilityWhere(false)}
       `).all() as any[]).map((product) => hydrateProductStock(product));
@@ -2556,6 +2563,8 @@ async function startServer() {
   // Products CRUD
   const productSchema = z.object({
     name: z.string().optional(),
+    name_tr: z.string().optional(),
+    name_en: z.string().optional(),
     sku: z.string().min(1, "SKU boş bırakılamaz"),
     purchase_cost: z.number().min(0, "Maliyet negatif olamaz").optional(),
     sale_price: z.number().min(0, "Satış fiyatı negatif olamaz").optional(),
@@ -2566,6 +2575,8 @@ async function startServer() {
     pipe_size: z.string().optional().default("Bilinmiyor"),
     central_stock: z.coerce.number().min(0, "Merkez depo stoğu negatif olamaz").optional(),
     total_stock: z.coerce.number().min(0, "Merkez depo stoğu negatif olamaz").optional(),
+    weight_grams: z.coerce.number().min(0, "Ağırlık negatif olamaz").optional(),
+    product_type: z.enum(PRODUCT_TYPES).optional(),
     platforms: z.array(z.object({
       name: z.string(),
       stock: z.coerce.number().min(0, "Stok negatif olamaz").optional(),
@@ -2573,6 +2584,62 @@ async function startServer() {
       is_listed: z.boolean().optional()
     }).passthrough()).optional()
   }).passthrough();
+
+  const requestProductType = (value: unknown, fallback: unknown = "simple") => {
+    const parsed = canonicalProductType(value ?? fallback);
+    if (!parsed) throw new Error(`Geçersiz ürün tipi. İzin verilen değerler: ${PRODUCT_TYPES.join(", ")}.`);
+    return parsed;
+  };
+
+  const assertUniqueSupplierCode = (supplierCode: unknown, exceptProductId?: string) => {
+    const code = cleanText(supplierCode);
+    if (!code) return;
+    const conflict = db.prepare(`
+      SELECT id, sku FROM products
+      WHERE supplier_code = ? COLLATE NOCASE
+        AND (? IS NULL OR id != ?)
+      LIMIT 1
+    `).get(code, exceptProductId || null, exceptProductId || null) as any;
+    if (conflict) throw new Error(`Tedarikçi kodu '${code}' zaten ${conflict.sku || conflict.id} ürününde kullanılıyor.`);
+  };
+
+  const persistProductAuxiliaryData = (productId: string, body: any) => {
+    if (body?.logistics && typeof body.logistics === "object") {
+      const numberOrNull = (value: unknown, field: string, integer = false) => {
+        if (value === undefined || value === null || value === "") return null;
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed) || parsed < 0 || (integer && !Number.isInteger(parsed))) {
+          throw new Error(`${field} geçerli bir negatif olmayan ${integer ? "tam sayı" : "sayı"} olmalı.`);
+        }
+        return parsed;
+      };
+      db.prepare(`
+        INSERT INTO product_logistics (product_id, box_count, units_per_box, box_weight_kg, total_weight_kg)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(product_id) DO UPDATE SET
+          box_count=excluded.box_count,
+          units_per_box=excluded.units_per_box,
+          box_weight_kg=excluded.box_weight_kg,
+          total_weight_kg=excluded.total_weight_kg,
+          updated_at=CURRENT_TIMESTAMP
+      `).run(
+        productId,
+        numberOrNull(body.logistics.box_count, "box_count", true),
+        numberOrNull(body.logistics.units_per_box, "units_per_box", true),
+        numberOrNull(body.logistics.box_weight_kg, "box_weight_kg"),
+        numberOrNull(body.logistics.total_weight_kg, "total_weight_kg"),
+      );
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body || {}, "reserve_locations")) {
+      const locations = Array.isArray(body.reserve_locations)
+        ? [...new Set(body.reserve_locations.map(cleanText).filter(Boolean))]
+        : parseReserveLocations(body.reserve_locations);
+      db.prepare("DELETE FROM product_reserve_locations WHERE product_id = ?").run(productId);
+      const insert = db.prepare("INSERT INTO product_reserve_locations (id, product_id, location, sort_order) VALUES (?, ?, ?, ?)");
+      locations.forEach((location, index) => insert.run(uuidv4(), productId, location, index));
+    }
+  };
 
   const deriveProductSeries = (input: any): string | null => {
     const explicit = String(input?.product_series || input?.series || "").trim();
@@ -2606,6 +2673,28 @@ async function startServer() {
     return null;
   };
 
+  app.post("/api/products/import", (req, res) => {
+    try {
+      const rows = Array.isArray(req.body?.rows) ? req.body.rows : null;
+      const headers = Array.isArray(req.body?.headers) ? req.body.headers.map(String) : null;
+      if (!rows || !headers) {
+        return res.status(400).json({ error: "rows ve headers alanları zorunludur." });
+      }
+      const dryRun = req.body?.dry_run !== false;
+      const report = importProductsFromCsvRows(db, rows, headers, {
+        apply: !dryRun,
+        actorUsername: req.user?.username || "product-csv-import",
+        sourceName: cleanText(req.body?.source_name) || "products.csv",
+        sourceHash: crypto.createHash("sha256").update(JSON.stringify({ headers, rows })).digest("hex"),
+      });
+      if (!dryRun && report.validation_errors.length > 0) return res.status(422).json(report);
+      return res.json(report);
+    } catch (err: any) {
+      AppLogger.error("PRODUCT_CSV_IMPORT_ERROR", "Product CSV import failed", err);
+      return res.status(400).json({ error: err.message });
+    }
+  });
+
   app.post("/api/products/bulk-import", (req, res) => {
     const items = req.body;
     if (!Array.isArray(items)) {
@@ -2626,15 +2715,16 @@ async function startServer() {
           const id = uuidv4();
           const centralStock = resolveCentralStock(validated);
           const productSeries = deriveProductSeries(validated);
+          assertUniqueSupplierCode(validated.supplier_code);
           const { normalized_material, normalized_model, normalized_size, normalized_tube_type } = generateNormalizedFields({ material: validated.material, model: validated.model, size: validated.size, category: validated.category, name: validated.name });
 
           db.prepare(`
-            INSERT INTO products (id, name, title, sku, barcode, category, model, product_series, description, purchase_price_usd, purchase_cost, sale_price, buffer_percentage, profit_percentage, exchange_rate_used, price_locked, weight, status, material, size, connection_type, usage_area, supplier, min_stock_level, central_stock, normalized_material, normalized_model, normalized_size, normalized_tube_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO products (id, name, name_tr, name_en, title, sku, supplier_code, barcode, category, model, product_series, description, purchase_price_usd, purchase_cost, sale_price, buffer_percentage, profit_percentage, exchange_rate_used, price_locked, weight_grams, status, material, size, connection_type, usage_area, supplier, min_stock_level, central_stock, product_type, normalized_material, normalized_model, normalized_size, normalized_tube_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(
-            id, validated.name, validated.title, validated.sku, validated.barcode, validated.category, validated.model, productSeries, validated.description,
+            id, validated.name_tr || validated.name_en || validated.name, validated.name_tr || validated.name || null, validated.name_en || null, validated.title || validated.name_tr || validated.name_en || validated.name, validated.sku, validated.supplier_code || null, validated.barcode, validated.category, validated.model, productSeries, validated.description,
             validated.purchase_price_usd || 0, validated.purchase_cost || 0, validated.sale_price || 0, validated.buffer_percentage || 0, validated.profit_percentage || 0, validated.exchange_rate_used || 0, validated.price_locked ? 1 : 0,
-            validated.weight || 0, validated.status || 'active', validated.material, validated.size, validated.connection_type, validated.usage_area, validated.supplier, validated.min_stock_level !== undefined ? validated.min_stock_level : 50, centralStock,
+            validated.weight_grams ?? validated.weight ?? 0, validated.status || 'Active', validated.material, validated.size, validated.connection_type, validated.usage_area, validated.supplier, validated.min_stock_level !== undefined ? validated.min_stock_level : 50, centralStock, requestProductType(validated.product_type),
             normalized_material, normalized_model, normalized_size, normalized_tube_type
           );
 
@@ -2674,37 +2764,107 @@ async function startServer() {
 
     const images = db.prepare("SELECT * FROM product_images WHERE product_id = ? ORDER BY sort_order ASC").all(req.params.id);
     const platforms = db.prepare("SELECT * FROM product_platforms WHERE product_id = ?").all(req.params.id);
+    const logistics = db.prepare("SELECT box_count, units_per_box, box_weight_kg, total_weight_kg FROM product_logistics WHERE product_id = ?").get(req.params.id) || null;
+    const reserveLocations = (db.prepare("SELECT location FROM product_reserve_locations WHERE product_id = ? ORDER BY sort_order, created_at").all(req.params.id) as Array<{ location: string }>).map((row) => row.location);
 
-    res.json({ ...hydrateProductStock(product, true), images, platforms, bom_usage: getProductBomUsage(req.params.id) });
+    res.json({ ...hydrateProductStock(product, true), images, platforms, logistics, reserve_locations: reserveLocations, bom_usage: getProductBomUsage(req.params.id) });
   });
 
 
 
   app.post("/api/products", (req, res) => {
-    const id = uuidv4();
-    const {
-      name, title, warehouse_location, sku, barcode, category, model, description,
-      purchase_price_usd, purchase_cost, sale_price, buffer_percentage, profit_percentage, exchange_rate_used, price_locked,
-      weight, status, notes, platforms, images, material, product_series, size, pipe_size, connection_type, usage_area, supplier, min_stock_level
-    } = req.body;
-    const centralStock = resolveCentralStock(req.body);
-    const productSeries = deriveProductSeries({ ...req.body, product_series, sku, title, name, material, category, model });
+    try {
+      const id = uuidv4();
+      const {
+        name, name_tr, name_en, title, warehouse_location, sku, supplier_code, barcode, category, model, description,
+        purchase_price_usd, purchase_cost, sale_price, buffer_percentage, profit_percentage, exchange_rate_used, price_locked,
+        weight, weight_grams, status, notes, platforms, images, material, product_series, tube_type_code, form_code,
+        size, pipe_size, connection_type, usage_area, supplier, min_stock_level
+      } = req.body;
+      const resolvedSku = cleanText(sku) || `SKU-${Date.now()}`;
+      const resolvedNameTr = cleanText(name_tr) || null;
+      const resolvedNameEn = cleanText(name_en) || null;
+      const resolvedTitle = cleanText(title) || resolvedNameTr || resolvedNameEn || cleanText(name) || resolvedSku;
+      const resolvedName = resolvedNameTr || resolvedNameEn || cleanText(name) || resolvedTitle;
+      const resolvedType = requestProductType(req.body.product_type);
+      const weightGrams = Math.max(0, Number(weight_grams ?? weight) || 0);
+      const centralStock = resolveCentralStock(req.body);
+      const productSeries = deriveProductSeries({ ...req.body, product_series, sku: resolvedSku, title: resolvedTitle, name: resolvedName, material, category, model });
+      assertUniqueSupplierCode(supplier_code);
 
-    // We pass the full body to generateNormalizedFields to use pipe_size inside it if needed.
-    const { normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size } = generateNormalizedFields({ ...req.body, material, model, size, category, name, pipe_size });
+      const { normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size } = generateNormalizedFields({
+        ...req.body,
+        material,
+        model,
+        size,
+        category,
+        name: `${resolvedNameTr || ""} ${resolvedNameEn || ""}`.trim() || resolvedName,
+        pipe_size,
+      });
 
-    const insertProduct = db.prepare(`
-      INSERT INTO products (id, name, title, warehouse_location, sku, barcode, category, model, product_series, description, purchase_price_usd, purchase_cost, sale_price, buffer_percentage, profit_percentage, exchange_rate_used, price_locked, weight, status, notes, material, size, pipe_size, connection_type, usage_area, supplier, min_stock_level, central_stock, normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+      const insertProduct = db.prepare(`
+        INSERT INTO products (
+          id, name, name_tr, name_en, title, warehouse_location, sku, supplier_code, barcode, category, model,
+          product_series, tube_type_code, form_code, description, purchase_price_usd, purchase_cost, sale_price,
+          buffer_percentage, profit_percentage, exchange_rate_used, price_locked, weight_grams, status, notes,
+          material, size, pipe_size, connection_type, usage_area, supplier, min_stock_level, central_stock,
+          product_type, is_sellable, visible_in_catalog, exclude_from_analysis,
+          normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size
+        ) VALUES (
+          @id, @name, @name_tr, @name_en, @title, @warehouse_location, @sku, @supplier_code, @barcode, @category, @model,
+          @product_series, @tube_type_code, @form_code, @description, @purchase_price_usd, @purchase_cost, @sale_price,
+          @buffer_percentage, @profit_percentage, @exchange_rate_used, @price_locked, @weight_grams, @status, @notes,
+          @material, @size, @pipe_size, @connection_type, @usage_area, @supplier, @min_stock_level, @central_stock,
+          @product_type, @is_sellable, @visible_in_catalog, @exclude_from_analysis,
+          @normalized_material, @normalized_model, @normalized_size, @normalized_tube_type, @normalized_pipe_size
+        )
+      `);
 
-    db.transaction(() => {
-      insertProduct.run(
-        id, name, title, warehouse_location, sku || `SKU-${Date.now()}`, barcode, category, model, productSeries, description,
-        purchase_price_usd || 0, purchase_cost || 0, sale_price || 0, buffer_percentage || 0, profit_percentage || 0, exchange_rate_used || 0, price_locked ? 1 : 0,
-        weight || 0, status, notes, material, size, pipe_size, connection_type, usage_area, supplier, min_stock_level !== undefined ? min_stock_level : 50, centralStock,
-        normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size
-      );
+      db.transaction(() => {
+        insertProduct.run({
+          id,
+          name: resolvedName,
+          name_tr: resolvedNameTr,
+          name_en: resolvedNameEn,
+          title: resolvedTitle,
+          warehouse_location: cleanText(warehouse_location) || null,
+          sku: resolvedSku,
+          supplier_code: cleanText(supplier_code) || null,
+          barcode: cleanText(barcode) || null,
+          category: cleanText(category) || cleanText(material) || null,
+          model: cleanText(model) || null,
+          product_series: productSeries,
+          tube_type_code: cleanText(tube_type_code) || null,
+          form_code: cleanText(form_code) || null,
+          description: cleanText(description) || null,
+          purchase_price_usd: Number(purchase_price_usd) || 0,
+          purchase_cost: Number(purchase_cost) || 0,
+          sale_price: Number(sale_price) || 0,
+          buffer_percentage: Number(buffer_percentage) || 0,
+          profit_percentage: Number(profit_percentage) || 0,
+          exchange_rate_used: Number(exchange_rate_used) || 0,
+          price_locked: price_locked ? 1 : 0,
+          weight_grams: weightGrams,
+          status: status || "Active",
+          notes: cleanText(notes) || null,
+          material: cleanText(material) || null,
+          size: cleanText(size) || null,
+          pipe_size: cleanText(pipe_size) || cleanText(size) || null,
+          connection_type: cleanText(connection_type) || null,
+          usage_area: cleanText(usage_area) || null,
+          supplier: cleanText(supplier) || null,
+          min_stock_level: min_stock_level !== undefined ? Number(min_stock_level) || 0 : 50,
+          central_stock: resolvedType === "assembly" ? 0 : centralStock,
+          product_type: resolvedType,
+          is_sellable: resolvedType === "component" ? 0 : 1,
+          visible_in_catalog: resolvedType === "component" ? 0 : 1,
+          exclude_from_analysis: resolvedType === "component" ? 1 : 0,
+          normalized_material,
+          normalized_model,
+          normalized_size,
+          normalized_tube_type,
+          normalized_pipe_size,
+        });
 
       const insertPlatform = db.prepare(`
         INSERT INTO product_platforms (id, product_id, platform_name, stock, price, is_listed)
@@ -2715,7 +2875,7 @@ async function startServer() {
         insertPlatform.run(uuidv4(), id, p.name, 0, p.price ?? sale_price ?? 0, p.is_listed ? 1 : 0);
       }
 
-      if (centralStock > 0) {
+      if (resolvedType !== "assembly" && centralStock > 0) {
         db.prepare(`
           INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type)
           VALUES (?, ?, ?, ?, ?, ?)
@@ -2728,10 +2888,14 @@ async function startServer() {
           insertImg.run(uuidv4(), id, img.path || img, idx);
         });
       }
-      logActivity('CREATE', 'product', id, { name, title, sku }, req.user?.id);
-    })();
+        persistProductAuxiliaryData(id, req.body);
+        logActivity('CREATE', 'product', id, { name: resolvedName, title: resolvedTitle, sku: resolvedSku }, req.user?.id);
+      })();
 
-    res.json({ id });
+      res.json({ id });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
   });
 
   app.post("/api/products/bulk-pricing", (req, res) => {
@@ -2821,17 +2985,38 @@ async function startServer() {
   });
 
   app.put("/api/products/:id", (req, res) => {
-    const {
-      name, title, warehouse_location, sku, barcode, category, model, description,
-      purchase_price_usd, purchase_cost, sale_price, buffer_percentage, profit_percentage, exchange_rate_used, price_locked,
-      weight, status, notes, platforms, images, material, product_series, size, pipe_size, connection_type, usage_area, supplier, min_stock_level
-    } = req.body;
+    try {
+      const beforeProduct: any = db.prepare("SELECT * FROM products WHERE id = ?").get(req.params.id);
+      if (!beforeProduct) return res.status(404).json({ error: "Product not found" });
+      const {
+        name, name_tr, name_en, title, warehouse_location, sku, supplier_code, barcode, category, model, description,
+        purchase_price_usd, purchase_cost, sale_price, buffer_percentage, profit_percentage, exchange_rate_used, price_locked,
+        weight, weight_grams, status, notes, platforms, images, material, product_series, tube_type_code, form_code,
+        size, pipe_size, connection_type, usage_area, supplier, min_stock_level
+      } = req.body;
 
-    const productSeries = deriveProductSeries({ ...req.body, product_series, sku, title, name, material, category, model });
-    const { normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size } = generateNormalizedFields({ material, model, size, pipe_size, category, name });
+      const resolvedNameTr = cleanText(name_tr) || cleanText(beforeProduct.name_tr) || null;
+      const resolvedNameEn = cleanText(name_en) || cleanText(beforeProduct.name_en) || null;
+      const resolvedTitle = cleanText(title) || cleanText(beforeProduct.title) || resolvedNameTr || resolvedNameEn || cleanText(name);
+      const resolvedName = resolvedNameTr || resolvedNameEn || cleanText(name) || resolvedTitle;
+      const resolvedType = requestProductType(req.body.product_type, beforeProduct.product_type);
+      const resolvedSupplierCode = supplier_code === undefined
+        ? cleanText(beforeProduct.supplier_code) || null
+        : cleanText(supplier_code) || null;
+      const weightGrams = Math.max(0, Number(weight_grams ?? weight ?? beforeProduct.weight_grams ?? beforeProduct.weight) || 0);
+      assertUniqueSupplierCode(resolvedSupplierCode, req.params.id);
+      const productSeries = deriveProductSeries({ ...req.body, product_series, sku, title: resolvedTitle, name: resolvedName, material, category, model });
+      const { normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size } = generateNormalizedFields({
+        material,
+        model,
+        size,
+        pipe_size,
+        category,
+        name: `${resolvedNameTr || ""} ${resolvedNameEn || ""}`.trim() || resolvedName,
+      });
 
-    db.transaction(() => {
-      const beforeState: any = db.prepare("SELECT * FROM products WHERE id = ?").get(req.params.id);
+      db.transaction(() => {
+      const beforeState: any = beforeProduct;
       if (beforeState) {
         beforeState.platforms = db.prepare("SELECT platform_name, stock, price, is_listed FROM product_platforms WHERE product_id = ?").all(req.params.id);
         beforeState.images = db.prepare("SELECT id, path, sort_order FROM product_images WHERE product_id = ? ORDER BY sort_order ASC").all(req.params.id);
@@ -2846,15 +3031,17 @@ async function startServer() {
 
       db.prepare(`
         UPDATE products SET
-          name=?, title=?, warehouse_location=?, sku=?, barcode=?, category=?, model=?, product_series=?, description=?,
+          name=?, name_tr=?, name_en=?, title=?, warehouse_location=?, sku=?, supplier_code=?, barcode=?, category=?, model=?, product_series=?, tube_type_code=?, form_code=?, description=?,
           purchase_price_usd=?, purchase_cost=?, sale_price=?, buffer_percentage=?, profit_percentage=?, exchange_rate_used=?, price_locked=?,
-          weight=?, status=?, notes=?, material=?, size=?, pipe_size=?, connection_type=?, usage_area=?, supplier=?, min_stock_level=?, central_stock=?,
+          weight_grams=?, status=?, notes=?, material=?, size=?, pipe_size=?, connection_type=?, usage_area=?, supplier=?, min_stock_level=?, central_stock=?,
+          product_type=?, is_sellable=?, visible_in_catalog=?, exclude_from_analysis=?,
           normalized_material=?, normalized_model=?, normalized_size=?, normalized_tube_type=?, normalized_pipe_size=?, updated_at=CURRENT_TIMESTAMP
         WHERE id=?
       `).run(
-        name, title, warehouse_location, sku, barcode, category, model, productSeries, description,
+        resolvedName, resolvedNameTr, resolvedNameEn, resolvedTitle, warehouse_location, sku, resolvedSupplierCode, barcode, category, model, productSeries, tube_type_code, form_code, description,
         purchase_price_usd || 0, purchase_cost || 0, sale_price || 0, buffer_percentage || 0, profit_percentage || 0, exchange_rate_used || 0, price_locked ? 1 : 0,
-        weight || 0, status, notes, material, size, pipe_size, connection_type, usage_area, supplier, min_stock_level !== undefined ? min_stock_level : 50, nextCentralStock,
+        weightGrams, status, notes, material, size, pipe_size, connection_type, usage_area, supplier, min_stock_level !== undefined ? min_stock_level : 50, nextCentralStock,
+        resolvedType, resolvedType === "component" ? 0 : 1, resolvedType === "component" ? 0 : 1, resolvedType === "component" ? 1 : 0,
         normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size, req.params.id
       );
 
@@ -2914,6 +3101,8 @@ async function startServer() {
         });
       }
 
+      persistProductAuxiliaryData(req.params.id, req.body);
+
       const afterState: any = db.prepare("SELECT * FROM products WHERE id = ?").get(req.params.id);
       if (afterState) {
         afterState.platforms = db.prepare("SELECT platform_name, stock, price, is_listed FROM product_platforms WHERE product_id = ?").all(req.params.id);
@@ -2923,9 +3112,12 @@ async function startServer() {
         }
       }
       logActivity('UPDATE', 'product', req.params.id, { before: beforeState, after: afterState }, req.user?.id);
-    })();
+      })();
 
-    res.json({ success: true });
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
   });
 
   app.delete("/api/products", requireAdmin, (req, res) => {

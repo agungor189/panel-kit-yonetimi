@@ -30,10 +30,13 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
 
   const [formData, setFormData] = useState<any>({
     name: '',
+    name_tr: '',
+    name_en: '',
     title: '',
     total_stock: '',
     warehouse_location: '',
     sku: '',
+    supplier_code: '',
     barcode: '',
     category: '',
     model: 'Standart',
@@ -47,7 +50,8 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
     profit_percentage: settings?.default_profit_percentage || 0,
     exchange_rate_used: activeRate || 0,
     price_locked: false,
-    weight: 0,
+    weight_grams: 0,
+    product_type: 'simple',
     min_stock_level: 50,
     status: 'Active',
     notes: '',
@@ -83,6 +87,7 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
       const totalStock = data.total_stock ?? data.central_stock ?? 0;
       setFormData({
         ...data,
+        weight_grams: data.weight_grams ?? data.weight ?? 0,
         total_stock: totalStock,
         platforms: PLATFORMS.map(name => {
           const p = data.platforms?.find((dp: any) => dp.platform_name === name);
@@ -132,8 +137,8 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
   };
 
   const handleSubmit = async () => {
-    if (!formData.name || !formData.title || formData.total_stock === '' || formData.total_stock === null || formData.total_stock === undefined) {
-       alert("Lütfen zorunlu alanları (Ad, Başlık, Stok) doldurunuz.");
+    if ((!formData.name_tr && !formData.name_en && !formData.title) || formData.total_stock === '' || formData.total_stock === null || formData.total_stock === undefined) {
+       alert("Lütfen Türkçe/İngilizce ad veya başlık ile stok bilgisini doldurunuz.");
        return;
     }
     setLoading(true);
@@ -142,6 +147,7 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
       const centralStock = parseInt(formData.total_stock) || 0;
       const payload = {
         ...formData,
+        name: formData.name_tr || formData.name_en || formData.title,
         central_stock: centralStock,
         total_stock: centralStock,
         platforms: (formData.platforms || []).map((platform: any) => ({
@@ -218,13 +224,22 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                   />
                 </Field>
               </div>
-              <Field label="Dahili Ürün Adı" required>
+              <Field label="Türkçe Ürün Adı">
                 <input 
-                  name="name" 
-                  value={formData.name} 
+                  name="name_tr"
+                  value={formData.name_tr || ''}
                   onChange={handleInputChange} 
-                  placeholder="Örn: Siyah T-Shirt"
+                  placeholder="Örn: Dirsek"
                   className="form-input" 
+                />
+              </Field>
+              <Field label="İngilizce Ürün Adı">
+                <input
+                  name="name_en"
+                  value={formData.name_en || ''}
+                  onChange={handleInputChange}
+                  placeholder="Örn: Elbow"
+                  className="form-input"
                 />
               </Field>
               <Field label="SKU / Stok Kodu">
@@ -234,6 +249,15 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                   onChange={handleInputChange} 
                   placeholder="Otomatik oluşturulur..."
                   className="form-input font-mono font-bold" 
+                />
+              </Field>
+              <Field label="Tedarikçi Kodu">
+                <input
+                  name="supplier_code"
+                  value={formData.supplier_code || ''}
+                  onChange={handleInputChange}
+                  placeholder="Örn: AL-125-B"
+                  className="form-input font-mono"
                 />
               </Field>
               <Field label="Barkod No">
@@ -255,12 +279,20 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
               <Field label="Ürün Ağırlığı (GR)">
                 <input 
                   type="number"
-                  name="weight" 
-                  value={formData.weight} 
+                  name="weight_grams"
+                  value={formData.weight_grams}
                   onChange={handleInputChange} 
                   placeholder="Örn: 250"
                   className="form-input font-bold" 
                 />
+              </Field>
+              <Field label="Ürün Tipi">
+                <select name="product_type" value={formData.product_type || 'simple'} onChange={handleInputChange} className="form-input font-bold">
+                  <option value="simple">Simple</option>
+                  <option value="component">Component</option>
+                  <option value="assembly">Assembly</option>
+                  <option value="accessory">Accessory</option>
+                </select>
               </Field>
               <Field label="Kritik Stok Seviyesi">
                 <input 

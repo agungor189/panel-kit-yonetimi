@@ -1608,6 +1608,64 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 50,
+    name: "add_multilingual_product_names_and_logistics",
+    up(db) {
+      const productColumns = new Set(
+        (db.prepare("PRAGMA table_info(products)").all() as { name: string }[]).map((column) => column.name),
+      );
+      if (!productColumns.has("name_tr")) db.exec("ALTER TABLE products ADD COLUMN name_tr TEXT");
+      if (!productColumns.has("name_en")) db.exec("ALTER TABLE products ADD COLUMN name_en TEXT");
+
+      db.exec(`
+        UPDATE products
+        SET name_tr = COALESCE(NULLIF(TRIM(name_tr), ''), NULLIF(TRIM(name), ''), NULLIF(TRIM(title), ''))
+        WHERE COALESCE(TRIM(name_tr), '') = '';
+
+        UPDATE products
+        SET product_type = 'simple'
+        WHERE LOWER(TRIM(COALESCE(product_type, ''))) IN ('', 'finished', 'final', 'normal');
+
+        UPDATE products
+        SET product_type = 'assembly'
+        WHERE id IN (SELECT DISTINCT parent_product_id FROM product_bom);
+
+        UPDATE products
+        SET weight_grams = weight
+        WHERE COALESCE(weight_grams, 0) = 0 AND COALESCE(weight, 0) > 0;
+
+        UPDATE products
+        SET name = COALESCE(NULLIF(TRIM(name_tr), ''), NULLIF(TRIM(name_en), ''), NULLIF(TRIM(title), ''), name);
+
+        CREATE TABLE IF NOT EXISTS product_logistics (
+          product_id       TEXT PRIMARY KEY,
+          box_count        INTEGER,
+          units_per_box    INTEGER,
+          box_weight_kg    REAL,
+          total_weight_kg  REAL,
+          created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS product_reserve_locations (
+          id          TEXT PRIMARY KEY,
+          product_id  TEXT NOT NULL,
+          location    TEXT NOT NULL,
+          sort_order  INTEGER DEFAULT 0,
+          created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(product_id, location),
+          FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_products_name_tr ON products(name_tr);
+        CREATE INDEX IF NOT EXISTS idx_products_name_en ON products(name_en);
+        CREATE INDEX IF NOT EXISTS idx_product_reserve_locations_product
+          ON product_reserve_locations(product_id, sort_order);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {
