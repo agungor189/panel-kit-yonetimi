@@ -11,6 +11,7 @@ export interface ManagedUser {
   updated_at?: string | null;
   last_login_at?: string | null;
   notes?: string;
+  permissions?: Record<string, unknown>;
 }
 
 export interface Product {

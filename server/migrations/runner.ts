@@ -1776,6 +1776,205 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 52,
+    name: "add_warehouse_inbound_packages_and_print_queue",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS warehouse_sequences (
+          sequence_key TEXT PRIMARY KEY,
+          next_value INTEGER NOT NULL DEFAULT 1 CHECK(next_value > 0),
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS warehouse_locations (
+          id TEXT PRIMARY KEY,
+          code TEXT NOT NULL UNIQUE COLLATE NOCASE,
+          zone TEXT,
+          aisle TEXT,
+          rack TEXT,
+          shelf TEXT,
+          bin TEXT,
+          package_capacity INTEGER NOT NULL DEFAULT 1 CHECK(package_capacity > 0),
+          active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+          notes TEXT,
+          created_by TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS inbound_batches (
+          id TEXT PRIMARY KEY,
+          batch_number TEXT NOT NULL UNIQUE COLLATE NOCASE,
+          supplier_code TEXT NOT NULL COLLATE NOCASE,
+          supplier_name TEXT,
+          status TEXT NOT NULL DEFAULT 'DRAFT'
+            CHECK(status IN ('DRAFT','READY','RECEIVING','PLACING','COMPLETED','CANCELLED')),
+          source_filename TEXT,
+          expected_package_count INTEGER NOT NULL DEFAULT 0,
+          expected_unit_count REAL NOT NULL DEFAULT 0,
+          created_by TEXT NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          completed_at DATETIME,
+          FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS inbound_batch_lines (
+          id TEXT PRIMARY KEY,
+          batch_id TEXT NOT NULL,
+          line_number INTEGER NOT NULL,
+          supplier_code TEXT NOT NULL COLLATE NOCASE,
+          product_id TEXT NOT NULL,
+          sku_snapshot TEXT NOT NULL,
+          product_name_snapshot TEXT NOT NULL,
+          lot_number TEXT,
+          expected_package_count INTEGER NOT NULL CHECK(expected_package_count > 0),
+          units_per_package REAL NOT NULL CHECK(units_per_package > 0),
+          last_package_units REAL NOT NULL CHECK(last_package_units > 0),
+          total_units REAL NOT NULL CHECK(total_units > 0),
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(batch_id, line_number),
+          FOREIGN KEY(batch_id) REFERENCES inbound_batches(id) ON DELETE RESTRICT,
+          FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS label_templates (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          template_type TEXT NOT NULL DEFAULT 'PACKAGE' CHECK(template_type IN ('PACKAGE','LOCATION')),
+          version INTEGER NOT NULL DEFAULT 1,
+          template_json TEXT NOT NULL,
+          active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+          is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0, 1)),
+          created_by TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE SET NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_label_templates_one_default
+          ON label_templates(template_type) WHERE is_default = 1 AND active = 1;
+
+        CREATE TABLE IF NOT EXISTS warehouse_packages (
+          id TEXT PRIMARY KEY,
+          package_code TEXT NOT NULL UNIQUE COLLATE NOCASE,
+          batch_id TEXT NOT NULL,
+          batch_line_id TEXT NOT NULL,
+          product_id TEXT NOT NULL,
+          supplier_code TEXT NOT NULL COLLATE NOCASE,
+          package_number INTEGER NOT NULL CHECK(package_number > 0),
+          total_packages INTEGER NOT NULL CHECK(total_packages > 0),
+          planned_quantity REAL NOT NULL CHECK(planned_quantity > 0),
+          remaining_quantity REAL NOT NULL CHECK(remaining_quantity >= 0),
+          status TEXT NOT NULL DEFAULT 'EXPECTED'
+            CHECK(status IN ('EXPECTED','CLAIMED','LABEL_QUEUED','LABELED','PLACED','OPEN','EMPTY','PRINT_FAILED','MISSING','DAMAGED','QUARANTINED','CANCELLED')),
+          claim_token TEXT,
+          claimed_by TEXT,
+          claim_expires_at DATETIME,
+          label_template_id TEXT,
+          current_location_id TEXT,
+          print_count INTEGER NOT NULL DEFAULT 0,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          labeled_at DATETIME,
+          placed_at DATETIME,
+          UNIQUE(batch_line_id, package_number),
+          FOREIGN KEY(batch_id) REFERENCES inbound_batches(id) ON DELETE RESTRICT,
+          FOREIGN KEY(batch_line_id) REFERENCES inbound_batch_lines(id) ON DELETE RESTRICT,
+          FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT,
+          FOREIGN KEY(claimed_by) REFERENCES users(id) ON DELETE SET NULL,
+          FOREIGN KEY(label_template_id) REFERENCES label_templates(id) ON DELETE SET NULL,
+          FOREIGN KEY(current_location_id) REFERENCES warehouse_locations(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS print_jobs (
+          id TEXT PRIMARY KEY,
+          package_id TEXT NOT NULL,
+          template_id TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL UNIQUE,
+          status TEXT NOT NULL DEFAULT 'QUEUED'
+            CHECK(status IN ('QUEUED','PROCESSING','PRINTED','FAILED','CANCELLED')),
+          printer_name TEXT,
+          package_status_before TEXT NOT NULL DEFAULT 'CLAIMED',
+          attempts INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL DEFAULT 3,
+          error_message TEXT,
+          claimed_at DATETIME,
+          printed_at DATETIME,
+          created_by TEXT NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(package_id) REFERENCES warehouse_packages(id) ON DELETE RESTRICT,
+          FOREIGN KEY(template_id) REFERENCES label_templates(id) ON DELETE RESTRICT,
+          FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS package_placements (
+          id TEXT PRIMARY KEY,
+          package_id TEXT NOT NULL,
+          from_location_id TEXT,
+          to_location_id TEXT NOT NULL,
+          action TEXT NOT NULL CHECK(action IN ('PLACE','MOVE')),
+          idempotency_key TEXT NOT NULL UNIQUE,
+          override_reason TEXT,
+          actor_id TEXT NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(package_id) REFERENCES warehouse_packages(id) ON DELETE RESTRICT,
+          FOREIGN KEY(from_location_id) REFERENCES warehouse_locations(id) ON DELETE SET NULL,
+          FOREIGN KEY(to_location_id) REFERENCES warehouse_locations(id) ON DELETE RESTRICT,
+          FOREIGN KEY(actor_id) REFERENCES users(id) ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS warehouse_package_movements (
+          id TEXT PRIMARY KEY,
+          package_id TEXT NOT NULL,
+          product_id TEXT NOT NULL,
+          movement_type TEXT NOT NULL CHECK(movement_type IN ('INBOUND','PICK','COUNT_ADJUST','DAMAGE','CANCEL')),
+          quantity_delta REAL NOT NULL,
+          reference_type TEXT NOT NULL,
+          reference_id TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL UNIQUE,
+          actor_id TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(package_id) REFERENCES warehouse_packages(id) ON DELETE RESTRICT,
+          FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT,
+          FOREIGN KEY(actor_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS warehouse_stock_counts (
+          id TEXT PRIMARY KEY,
+          package_id TEXT NOT NULL,
+          location_id TEXT,
+          previous_quantity REAL NOT NULL,
+          counted_quantity REAL NOT NULL CHECK(counted_quantity >= 0),
+          idempotency_key TEXT NOT NULL UNIQUE,
+          actor_id TEXT NOT NULL,
+          note TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(package_id) REFERENCES warehouse_packages(id) ON DELETE RESTRICT,
+          FOREIGN KEY(location_id) REFERENCES warehouse_locations(id) ON DELETE SET NULL,
+          FOREIGN KEY(actor_id) REFERENCES users(id) ON DELETE RESTRICT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_inbound_batches_supplier_status
+          ON inbound_batches(supplier_code, status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_inbound_lines_batch
+          ON inbound_batch_lines(batch_id, line_number);
+        CREATE INDEX IF NOT EXISTS idx_warehouse_packages_claim
+          ON warehouse_packages(supplier_code, status, claim_expires_at, batch_id, batch_line_id, package_number);
+        CREATE INDEX IF NOT EXISTS idx_warehouse_packages_pick
+          ON warehouse_packages(product_id, status, batch_id, batch_line_id, package_number);
+        CREATE INDEX IF NOT EXISTS idx_warehouse_packages_location
+          ON warehouse_packages(current_location_id, status);
+        CREATE INDEX IF NOT EXISTS idx_print_jobs_worker
+          ON print_jobs(status, attempts, created_at);
+        CREATE INDEX IF NOT EXISTS idx_package_movements_product
+          ON warehouse_package_movements(product_id, created_at);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

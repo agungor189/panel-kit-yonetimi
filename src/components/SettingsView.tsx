@@ -38,6 +38,16 @@ interface SettingsViewProps {
   onUpdate: () => void;
 }
 
+const WAREHOUSE_PERMISSIONS = [
+  ['warehouse:receive', 'Mal kabul'],
+  ['warehouse:print_labels', 'Etiket basma'],
+  ['warehouse:place_packages', 'Paket yerleştirme'],
+  ['warehouse:move_stock', 'Stok taşıma / sıra atlama'],
+  ['warehouse:manage_locations', 'Lokasyon yönetimi'],
+  ['warehouse:count_stock', 'Stok sayımı'],
+  ['warehouse:edit_label_templates', 'Etiket şablonu düzenleme'],
+] as const;
+
 export default function SettingsView({ onUpdate }: SettingsViewProps) {
   const { role } = useAuth();
   const { refreshRate, activeRate } = useCurrency();
@@ -413,6 +423,7 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
         role: patch.role ?? user.role,
         is_active: patch.is_active ?? user.is_active,
         must_change_password: patch.must_change_password ?? user.must_change_password,
+        permissions: patch.permissions ?? user.permissions ?? {},
         notes: patch.notes ?? user.notes ?? '',
       });
       await loadUsers();
@@ -420,6 +431,12 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
       alert(err.message || "Kullanıcı güncellenemedi.");
       await loadUsers();
     }
+  };
+
+  const toggleWarehousePermission = async (user: ManagedUser, permission: string) => {
+    const permissions = { ...(user.permissions || {}) };
+    permissions[permission] = permissions[permission] !== true;
+    await updateUser(user, { permissions });
   };
 
   const resetUserPassword = async (user: ManagedUser) => {
@@ -819,6 +836,19 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
                 )}
               </tbody>
             </table>
+          </div>
+          <div className="border-t border-border-color bg-bg-main/40 p-6 lg:p-8">
+            <h4 className="text-xs font-black uppercase tracking-widest text-text-muted">Warehouse Admin yetkileri</h4>
+            <p className="mt-2 text-xs text-text-muted">Admin rolü tüm yetkilere sahiptir. Diğer kullanıcılarda erişim bu anahtarlarla hem menüde hem API'de denetlenir.</p>
+            <div className="mt-4 space-y-3">
+              {users.map((user) => <div key={`warehouse-${user.id}`} className="rounded-xl border border-border-color bg-white p-4">
+                <div className="mb-3 flex items-center justify-between"><b className="text-sm">{user.username}</b>{user.role === 'admin' && <span className="rounded-full bg-green-50 px-2 py-1 text-[10px] font-black text-green-700">TÜM YETKİLER</span>}</div>
+                <div className="flex flex-wrap gap-2">{WAREHOUSE_PERMISSIONS.map(([permission, label]) => {
+                  const active = user.role === 'admin' || user.permissions?.[permission] === true;
+                  return <button key={permission} disabled={user.role === 'admin'} onClick={() => void toggleWarehousePermission(user, permission)} className={cn('rounded-lg border px-3 py-2 text-[10px] font-black uppercase tracking-wide disabled:cursor-default', active ? 'border-green-200 bg-green-50 text-green-700' : 'border-border-color bg-white text-text-muted')}>{label}</button>;
+                })}</div>
+              </div>)}
+            </div>
           </div>
         </div>
       )}

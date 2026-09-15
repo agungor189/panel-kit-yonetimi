@@ -29,6 +29,7 @@ import { generateNormalizedFields } from "./server/utils/normalizeProductFields.
 import { restoreUploadEntry } from "./server/utils/restoreUploads.js";
 import { initializeDatabase, openDatabase } from "./server/db/initialize.js";
 import { importProductsFromCsvRows } from "./server/services/productCsvImport.js";
+import { startPrintQueueWorker } from "./server/services/printQueueWorker.js";
 import {
   PRODUCT_IMAGE_MAX_FILES,
   PRODUCT_IMAGE_MAX_FILE_SIZE,
@@ -1541,6 +1542,18 @@ async function startServer() {
   };
 
   const validUserRoles = new Set(['admin', 'user', 'readonly']);
+  const warehousePermissionKeys = new Set([
+    'warehouse:receive', 'warehouse:print_labels', 'warehouse:place_packages', 'warehouse:move_stock',
+    'warehouse:manage_locations', 'warehouse:count_stock', 'warehouse:edit_label_templates',
+  ]);
+  const sanitizePermissions = (value: unknown, fallback: Record<string, unknown> = {}) => {
+    const source = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    const result = { ...fallback };
+    for (const key of warehousePermissionKeys) {
+      if (Object.prototype.hasOwnProperty.call(source, key)) result[key] = source[key] === true;
+    }
+    return result;
+  };
   const hasOwn = (obj: unknown, key: string) => Object.prototype.hasOwnProperty.call(obj || {}, key);
 
   const toBit = (value: unknown, defaultValue: number) => {
@@ -1904,6 +1917,7 @@ async function startServer() {
       const isActive = toBit(req.body?.is_active, 1);
       const mustChangePassword = toBit(req.body?.must_change_password, 1);
       const notes = cleanText(req.body?.notes);
+      const permissions = sanitizePermissions(req.body?.permissions);
 
       if (username.length < 3) {
         return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Kullanıcı adı en az 3 karakter olmalıdır.' } });
@@ -1928,9 +1942,9 @@ async function startServer() {
 
       const id = uuidv4();
       db.prepare(`
-        INSERT INTO users (id, username, email, password_hash, role, is_active, must_change_password, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, username, email || null, bcrypt.hashSync(password, 10), role, isActive, mustChangePassword, notes || null);
+        INSERT INTO users (id, username, email, password_hash, role, is_active, must_change_password, permissions, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, username, email || null, bcrypt.hashSync(password, 10), role, isActive, mustChangePassword, JSON.stringify(permissions), notes || null);
 
       const created = getManageableUser(id);
       logActivity('USER_CREATED', 'user', id, { after: created }, req.user?.id);
@@ -1955,6 +1969,9 @@ async function startServer() {
         ? toBit(req.body.must_change_password, before.must_change_password ? 1 : 0)
         : (before.must_change_password ? 1 : 0);
       const notes = hasOwn(req.body, 'notes') ? cleanText(req.body.notes) : before.notes;
+      const permissions = hasOwn(req.body, 'permissions')
+        ? sanitizePermissions(req.body.permissions, before.permissions || {})
+        : before.permissions || {};
 
       if (username.length < 3) {
         return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Kullanıcı adı en az 3 karakter olmalıdır.' } });
@@ -1983,10 +2000,11 @@ async function startServer() {
             role = ?,
             is_active = ?,
             must_change_password = ?,
+            permissions = ?,
             notes = ?,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
-      `).run(username, email || null, role, isActive, mustChangePassword, notes || null, req.params.id);
+      `).run(username, email || null, role, isActive, mustChangePassword, JSON.stringify(permissions), notes || null, req.params.id);
 
       const after = getManageableUser(req.params.id);
       logActivity('USER_UPDATED', 'user', req.params.id, { before, after }, req.user?.id);
@@ -5820,6 +5838,7 @@ async function startServer() {
             id: auth.user.id,
             username: auth.user.username,
             role: auth.user.role,
+            permissions: auth.user.permissions,
             must_change_password: auth.user.must_change_password,
           };
         } catch {
@@ -5828,6 +5847,8 @@ async function startServer() {
       },
     }),
   );
+
+  startPrintQueueWorker(db);
 
   app.get("/api/public/health", (req, res) => {
     // Health doesn't require auth but we can validate it if present manually or just return ok

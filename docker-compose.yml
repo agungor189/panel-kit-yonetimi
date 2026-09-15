@@ -33,6 +33,13 @@ services:
       APP_URL: ${APP_URL:-http://localhost:3000}
       # Comma-separated allowed origins. Leave empty to allow all (tunnel / dev).
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      LABEL_RENDERER_URL: ${LABEL_RENDERER_URL:-}
+      LABEL_RENDERER_API_KEY: ${LABEL_RENDERER_API_KEY:-}
+      WAREHOUSE_PRINTER_NAME: ${WAREHOUSE_PRINTER_NAME:-}
+      WAREHOUSE_CLAIM_LEASE_SECONDS: ${WAREHOUSE_CLAIM_LEASE_SECONDS:-90}
+      WAREHOUSE_PRINT_WORKER_INTERVAL_MS: ${WAREHOUSE_PRINT_WORKER_INTERVAL_MS:-2000}
+      WAREHOUSE_PRINT_DRY_RUN: ${WAREHOUSE_PRINT_DRY_RUN:-false}
+      CUPS_SERVER: ${CUPS_SERVER:-}
     volumes:
       # SQLite database — use PANEL_DATA_DIR=/opt/dsdst-panel/data for visible host storage.
       - ${PANEL_DATA_DIR:-panel_data}:/data
@@ -40,6 +47,8 @@ services:
       - ${PANEL_UPLOADS_DIR:-panel_uploads}:/app/uploads
       # Automatic backup archives. Defaults to a visible ./backups folder.
       - ${PANEL_BACKUP_DIR:-./backups}:/backups
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/public/health"]
       interval: 30s

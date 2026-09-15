@@ -98,6 +98,49 @@ export class WarehouseService {
     private readonly writeActivity: ActivityWriter,
   ) {}
 
+  private hasPackageStockTables() {
+    return Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'warehouse_packages'").get());
+  }
+
+  private packageAllocations(productId: string, requiredQuantity: number) {
+    if (!this.hasPackageStockTables()) return { tracked: false, available: 0, allocations: [] as any[] };
+    const packages = this.db.prepare(`
+      SELECT p.id AS package_id, p.package_code, p.package_number, p.total_packages,
+             p.remaining_quantity, p.status, p.batch_id, p.batch_line_id,
+             l.code AS location_code, b.created_at AS batch_created_at, bl.line_number
+      FROM warehouse_packages p
+      JOIN inbound_batches b ON b.id = p.batch_id
+      JOIN inbound_batch_lines bl ON bl.id = p.batch_line_id
+      LEFT JOIN warehouse_locations l ON l.id = p.current_location_id
+      WHERE p.product_id = ? AND p.status IN ('PLACED','OPEN') AND p.remaining_quantity > 0
+      ORDER BY datetime(b.created_at), bl.line_number, p.package_number, p.package_code
+    `).all(productId) as any[];
+    const tracked = Boolean(this.db.prepare("SELECT 1 FROM warehouse_packages WHERE product_id = ? LIMIT 1").get(productId));
+    let needed = requiredQuantity;
+    const allocations = [] as any[];
+    for (const pkg of packages) {
+      if (needed <= 0) break;
+      const take = Math.min(needed, asNumber(pkg.remaining_quantity));
+      if (take > 0) {
+        allocations.push({
+          package_id: pkg.package_id,
+          package_code: pkg.package_code,
+          package_number: asNumber(pkg.package_number),
+          total_packages: asNumber(pkg.total_packages),
+          location_code: pkg.location_code || null,
+          available_quantity: asNumber(pkg.remaining_quantity),
+          pick_quantity: take,
+        });
+        needed -= take;
+      }
+    }
+    return {
+      tracked,
+      available: packages.reduce((sum, pkg) => sum + asNumber(pkg.remaining_quantity), 0),
+      allocations,
+    };
+  }
+
   listPickableOrders({ page, limit }: OrderListOptions) {
     const offset = (page - 1) * limit;
     const placeholders = PICKABLE_STATUSES.map(() => "?").join(", ");
@@ -368,6 +411,7 @@ export class WarehouseService {
       .map((item) => {
         const parentAssemblySkus = [...item.parentAssemblySkus].sort();
         const progress = progressByProduct.get(item.product_id);
+        const packageStock = this.packageAllocations(item.product_id, item.required_quantity);
         return {
           product_id: item.product_id,
           sku: item.sku,
@@ -377,6 +421,9 @@ export class WarehouseService {
           image_url: item.image_path ? `/api/warehouse/v1/products/${encodeURIComponent(item.product_id)}/image` : null,
           required_quantity: item.required_quantity,
           central_stock: item.central_stock,
+          available_stock: packageStock.tracked ? packageStock.available : item.central_stock,
+          package_tracking: packageStock.tracked,
+          package_allocations: packageStock.allocations,
           product_type: item.product_type,
           parent_assembly_sku: parentAssemblySkus.length === 1 ? parentAssemblySkus[0] : null,
           parent_assembly_skus: parentAssemblySkus,
@@ -391,13 +438,14 @@ export class WarehouseService {
       );
 
     const shortages = items
-      .filter((item) => item.central_stock < item.required_quantity)
+      .filter((item) => item.available_stock < item.required_quantity)
       .map((item) => ({
         product_id: item.product_id,
         sku: item.sku,
         required_quantity: item.required_quantity,
         central_stock: item.central_stock,
-        shortage_quantity: item.required_quantity - item.central_stock,
+        available_stock: item.available_stock,
+        shortage_quantity: item.required_quantity - item.available_stock,
       }));
 
     return {
@@ -721,6 +769,8 @@ export class WarehouseService {
         ["sku", item.sku],
         ["barcode", item.barcode],
         ["location", item.warehouse_location],
+        ["barcode", item.package_allocations?.[0]?.package_code],
+        ["location", item.package_allocations?.[0]?.location_code],
       ] as const;
       const match = matches.find(([, value]) => value && String(value).trim().toLocaleLowerCase("tr-TR") === normalizedCode);
       if (!match) {
@@ -781,6 +831,7 @@ export class WarehouseService {
       if (asNumber(progress.required_quantity) !== item.required_quantity) {
         throw new WarehouseServiceError(409, "PICK_PLAN_CHANGED", "Toplama planı değişti. Ürünü yeniden doğrulayın.");
       }
+      if (item.package_tracking) this.consumePackageStock(orderId, item, picker);
       this.db.prepare(`
         UPDATE warehouse_pick_progress
         SET picked_quantity = ?, completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
@@ -800,6 +851,40 @@ export class WarehouseService {
         SELECT * FROM warehouse_pick_progress WHERE order_id = ? AND product_id = ?
       `).get(orderId, productId);
     })();
+  }
+
+  private consumePackageStock(orderId: string, item: any, picker: WarehousePicker) {
+    const totalAllocated = (item.package_allocations || []).reduce((sum: number, allocation: any) => sum + asNumber(allocation.pick_quantity), 0);
+    if (totalAllocated !== asNumber(item.required_quantity)) {
+      throw new WarehouseServiceError(409, "PACKAGE_STOCK_CHANGED", "Paket stoğu değişti. Toplama planını yenileyin.");
+    }
+    for (const allocation of item.package_allocations) {
+      const idempotencyKey = `pick:${orderId}:${item.product_id}:${allocation.package_id}`;
+      const existing = this.db.prepare("SELECT id FROM warehouse_package_movements WHERE idempotency_key = ?").get(idempotencyKey);
+      if (existing) continue;
+      const changed = this.db.prepare(`
+        UPDATE warehouse_packages
+        SET remaining_quantity = remaining_quantity - ?,
+            status = CASE WHEN remaining_quantity - ? <= 0 THEN 'EMPTY' ELSE 'OPEN' END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status IN ('PLACED','OPEN') AND remaining_quantity >= ?
+      `).run(allocation.pick_quantity, allocation.pick_quantity, allocation.package_id, allocation.pick_quantity);
+      if (changed.changes !== 1) {
+        throw new WarehouseServiceError(409, "PACKAGE_STOCK_CHANGED", `${allocation.package_code} paketi başka bir işlemde değişti.`);
+      }
+      this.db.prepare(`
+        INSERT INTO warehouse_package_movements (
+          id, package_id, product_id, movement_type, quantity_delta, reference_type, reference_id, idempotency_key, actor_id
+        ) VALUES (?, ?, ?, 'PICK', ?, 'sale', ?, ?, ?)
+      `).run(randomUUID(), allocation.package_id, item.product_id, -allocation.pick_quantity, orderId, idempotencyKey, picker.id);
+    }
+    const changed = this.db.prepare(`
+      UPDATE products SET central_stock = central_stock - ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND COALESCE(central_stock, 0) >= ?
+    `).run(item.required_quantity, item.product_id, item.required_quantity);
+    if (changed.changes !== 1) throw new WarehouseServiceError(409, "CENTRAL_STOCK_CHANGED", "Merkez stok bakiyesi değişti.");
+    this.db.prepare("INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type) VALUES (?, ?, 'WAREHOUSE', ?, ?, 'OUT')")
+      .run(randomUUID(), item.product_id, -item.required_quantity, `Paketli sipariş toplama: ${orderId}`);
   }
 
   completePicking(orderId: string, picker: WarehousePicker, note?: string | null): StatusTransitionResult {

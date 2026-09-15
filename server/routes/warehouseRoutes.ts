@@ -2,9 +2,11 @@ import express from "express";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { WarehousePicker, WarehouseService, WarehouseServiceError } from "../services/warehouseService.js";
+import { WarehouseAdminService, type WarehouseActor } from "../services/warehouseAdminService.js";
 
 type WarehouseUser = WarehousePicker & {
   role: string;
+  permissions: Record<string, unknown>;
   must_change_password: boolean;
 };
 
@@ -43,6 +45,9 @@ export function createWarehouseRouter({
 }: WarehouseRouterDependencies) {
   const router = express.Router();
   const service = new WarehouseService(db, logActivity);
+  const adminService = new WarehouseAdminService(db, logActivity, {
+    claimLeaseSeconds: Number(process.env.WAREHOUSE_CLAIM_LEASE_SECONDS) || undefined,
+  });
 
   const authenticate = (requiredPermissions: string | string[]) => (
     req: express.Request,
@@ -149,6 +154,45 @@ export function createWarehouseRouter({
     res.locals.warehouseUser = user;
     next();
   };
+
+  const hasWarehousePermission = (user: Pick<WarehouseUser, "role" | "permissions">, permission: string) => {
+    if (user.role === "admin") return true;
+    const direct = user.permissions?.[permission];
+    if (direct === true) return true;
+    const warehouse = user.permissions?.warehouse;
+    const shortName = permission.replace(/^warehouse:/, "");
+    return Boolean(warehouse && typeof warehouse === "object" && (warehouse as Record<string, unknown>)[shortName] === true);
+  };
+
+  const requireWarehousePermission = (permission: string) => (
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction,
+  ) => {
+    const user = res.locals.warehouseUser as WarehouseUser | undefined;
+    if (!user || !hasWarehousePermission(user, permission)) {
+      logActivity("WAREHOUSE_PERMISSION_DENIED", "warehouse_permission", permission, {
+        path: req.path,
+        method: req.method,
+        required_permission: permission,
+      }, user?.id);
+      return errorResponse(res, 403, "FORBIDDEN", `Bu işlem için ${permission} yetkisi gerekli.`);
+    }
+    next();
+  };
+  const requireAnyWarehousePermission = (permissions: string[]) => (
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction,
+  ) => {
+    const user = res.locals.warehouseUser as WarehouseUser | undefined;
+    if (!user || !permissions.some((permission) => hasWarehousePermission(user, permission))) {
+      return errorResponse(res, 403, "FORBIDDEN", `Bu işlem için şu yetkilerden biri gerekli: ${permissions.join(", ")}.`);
+    }
+    next();
+  };
+
+  const actor = (res: express.Response) => res.locals.warehouseUser as WarehouseActor;
 
   const handleServiceError = (res: express.Response, error: unknown) => {
     if (error instanceof WarehouseServiceError) {
@@ -320,6 +364,87 @@ export function createWarehouseRouter({
     } catch (error) {
       return handleServiceError(res, error);
     }
+  });
+
+  // Warehouse Admin — the Panel database remains the sole source of truth.
+  router.get("/admin/batches", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (_req, res) => {
+    res.json({ success: true, data: adminService.listBatches() });
+  });
+  router.post("/admin/batches", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (req, res) => {
+    try { res.status(201).json({ success: true, data: adminService.createBatch(req.body || {}, actor(res)) }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
+  router.get("/admin/batches/:id", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (req, res) => {
+    try { res.json({ success: true, data: adminService.getBatch(req.params.id) }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/admin/batches/:id/import/preview", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (req, res) => {
+    try { res.json({ success: true, data: adminService.previewImport(req.params.id, req.body?.rows) }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/admin/batches/:id/import/apply", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (req, res) => {
+    try { res.json({ success: true, data: adminService.applyImport(req.params.id, req.body?.rows, String(req.body?.preview_hash || ""), actor(res)) }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
+
+  router.post("/admin/packages/claim-next", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:print_labels"), (req, res) => {
+    try { res.json({ success: true, data: adminService.claimNextPackage(String(req.body?.supplier_code || ""), actor(res)) }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
+  router.get("/admin/packages/by-code/:code", authenticate("read:products"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:print_labels", "warehouse:place_packages", "warehouse:move_stock", "warehouse:count_stock"]), (req, res) => {
+    try { res.json({ success: true, data: adminService.getPackageByCode(req.params.code) }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/admin/packages/:id/print", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:print_labels"), (req, res) => {
+    try {
+      const result = adminService.queuePrint(req.params.id, req.body || {}, actor(res));
+      res.json({ success: true, data: result, idempotent: result.idempotent });
+    } catch (error) { return handleServiceError(res, error); }
+  });
+  router.get("/admin/print-jobs", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:print_labels"), (req, res) => {
+    res.json({ success: true, data: adminService.listPrintJobs(Number(req.query.limit) || 100) });
+  });
+
+  router.get("/admin/locations", authenticate("read:products"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:manage_locations", "warehouse:place_packages", "warehouse:move_stock"]), (_req, res) => {
+    res.json({ success: true, data: adminService.listLocations() });
+  });
+  router.get("/admin/locations/suggestion", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:place_packages"), (_req, res) => {
+    try { res.json({ success: true, data: adminService.suggestLocation() }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/admin/locations", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:manage_locations"), (req, res) => {
+    try { res.status(201).json({ success: true, data: adminService.createLocation(req.body || {}, actor(res)) }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/admin/placements", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:place_packages"), (req, res) => {
+    const currentActor = actor(res);
+    if (req.body?.override_reason && !hasWarehousePermission(currentActor, "warehouse:move_stock")) {
+      return errorResponse(res, 403, "FORBIDDEN", "Sıra atlama için warehouse:move_stock yetkisi gerekli.");
+    }
+    try {
+      const result = adminService.placePackage(String(req.body?.package_code || ""), String(req.body?.location_code || ""), req.body || {}, currentActor);
+      res.json({ success: true, data: result, idempotent: result.idempotent });
+    } catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/admin/moves", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:move_stock"), (req, res) => {
+    try {
+      const result = adminService.movePackage(String(req.body?.package_code || ""), String(req.body?.location_code || ""), req.body || {}, actor(res));
+      res.json({ success: true, data: result, idempotent: result.idempotent });
+    } catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/admin/stock-counts", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:count_stock"), (req, res) => {
+    try {
+      const result = adminService.countPackage(String(req.body?.package_code || ""), req.body?.counted_quantity, req.body || {}, actor(res));
+      res.json({ success: true, data: result, idempotent: result.idempotent });
+    } catch (error) { return handleServiceError(res, error); }
+  });
+
+  router.get("/admin/label-templates", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:edit_label_templates"), (_req, res) => {
+    res.json({ success: true, data: adminService.listTemplates() });
+  });
+  router.post("/admin/label-templates", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:edit_label_templates"), (req, res) => {
+    try { res.json({ success: true, data: adminService.saveTemplate(req.body || {}, actor(res)) }); }
+    catch (error) { return handleServiceError(res, error); }
   });
 
   return router;

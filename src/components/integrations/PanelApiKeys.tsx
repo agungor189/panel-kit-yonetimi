@@ -10,7 +10,8 @@ const AVAILABLE_PERMISSIONS = [
   'orders:read', 'orders:write', 'sales:read',
   'expenses:read', 'expenses:write',
   'dashboard:read', 'movements:read', 'integrations:read',
-  'assistant:read'
+  'assistant:read',
+  'read:warehouse_orders', 'read:products', 'read:bom', 'write:warehouse_status'
 ];
 
 export default function PanelApiKeys() {

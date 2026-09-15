@@ -86,6 +86,13 @@ npm run dev        # Vite + Express birlikte localhost:3000
 | `APP_URL` | — | Uygulamanın dışarıdan erişilen URL'i |
 | `ALLOWED_ORIGINS` | — | İzin verilen CORS origin'leri (virgülle ayrılmış). Boş bırakılırsa hepsi izinli |
 | `GEMINI_API_KEY` | — | Google Gemini AI entegrasyonu için |
+| `LABEL_RENDERER_URL` | Etiket baskısında ✅ | Label Printer headless renderer adresi (örn. `http://label-printer:3010`) |
+| `LABEL_RENDERER_API_KEY` | Önerilir | Panel ve Label Printer arasında paylaşılan renderer anahtarı |
+| `WAREHOUSE_PRINTER_NAME` | Etiket baskısında ✅ | `lpstat -p` çıktısındaki CUPS yazıcı adı |
+| `WAREHOUSE_CLAIM_LEASE_SECONDS` | — | Sıradaki paketi ayırma süresi; varsayılan `90`, güvenli aralık 15–600 |
+| `WAREHOUSE_PRINT_WORKER_INTERVAL_MS` | — | Kuyruk worker kontrol aralığı; varsayılan `2000` |
+| `WAREHOUSE_PRINT_DRY_RUN` | — | `true` iken PDF'i doğrular ama `lp` çalıştırmaz; yalnız test için |
+| `CUPS_SERVER` | Docker baskısında | Panel container'ının ulaşacağı CUPS sunucusu (örn. `host.docker.internal:631`) |
 
 ---
 
@@ -157,6 +164,14 @@ Stok modeli tek merkezi depo stoğudur. Platform bazlı stok fiziksel stok deği
 Karbon çelik demonte ürünlerde müşteri final ürün SKU'sunu görür; depo stoğu ise H komponentleri ve aksesuar parçaları olarak tutulur. `product_bom` reçetesi final üründen hangi H parçasının kaç adet kullanılacağını belirler; satışta final ürün kaydedilirken stok hareketi otomatik olarak komponentlerden düşer. H parçaları ve vidalar satış kataloğunda/ürün analizlerinde görünmez.
 
 Ürün sınıflandırmasında `product_series` alanı seri/ürün ailesi için kullanılır. Cast iron standart seri `OYA`, premium seri `PRM` olarak tutulur; SKU yapısı değişse bile analiz ve sipariş önerileri bu ayrı seri alanından beslenir.
+
+### Warehouse Admin ve fiziksel paketler
+
+Migration v52 giriş partileri, fiziksel paketler, kapasiteli lokasyonlar, yerleştirme/taşıma, sayım, etiket şablonları ve baskı kuyruğunu ekler. Migration yalnız yeni tablo/index oluşturur; mevcut ürün, stok, satış veya toplama geçmişi verisini silmez. Paket yerleştirildiğinde miktar `products.central_stock` ve standart `stock_movements` ile birlikte artar. Paket farkındalıklı sipariş toplamada en eski parti ve en düşük `1/N` paket sırası tüketilir; aynı transaction paket bakiyesini, paket hareketini ve merkez stoğu azaltır. Paket kaydı olmayan eski stokların toplama davranışı değişmez.
+
+Kullanıcı izinleri Panel'de **Ayarlar → Kullanıcı Yönetimi → Warehouse Admin yetkileri** bölümünden verilir. `admin` tüm izinlere sahiptir; diğer roller için `warehouse:receive`, `warehouse:print_labels`, `warehouse:place_packages`, `warehouse:move_stock`, `warehouse:manage_locations`, `warehouse:count_stock` ve `warehouse:edit_label_templates` ayrı ayrı denetlenir.
+
+Worker, Label Printer renderer'dan PDF'i HTTP ile alır ve shell oluşturmadan `lp -d <printer> <file>` çağırır. Başarısız işler en fazla üç kez denenir; son hata paketi `PRINT_FAILED` durumuna taşır. Yeniden baskı yeni bir iş açar ama aynı global paket kodunu kullanır.
 
 ### Yedek & Geri Yükleme
 

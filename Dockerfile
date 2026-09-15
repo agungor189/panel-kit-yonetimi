@@ -23,7 +23,7 @@ WORKDIR /app
 
 # Cloud backup uploads use rclone. Secrets/config come from environment
 # variables, not from the image.
-RUN apk add --no-cache rclone
+RUN apk add --no-cache rclone cups-client
 
 # Copy compiled native modules and runtime deps from builder.
 # This avoids needing python3/make/g++ in the final image.
