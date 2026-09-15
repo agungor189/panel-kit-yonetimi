@@ -2114,6 +2114,84 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 55,
+    name: "receiving_v2_work_state_and_location_reservations",
+    up(db) {
+      const usersTableExists = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'users'").get());
+      if (!usersTableExists) return;
+      const packageColumns = new Set(
+        (db.prepare("PRAGMA table_info(warehouse_packages)").all() as { name: string }[]).map((column) => column.name),
+      );
+      const addPackageColumn = (name: string, definition: string) => {
+        if (!packageColumns.has(name)) db.exec(`ALTER TABLE warehouse_packages ADD COLUMN ${definition}`);
+      };
+      addPackageColumn("receiving_device_id", "receiving_device_id TEXT");
+      addPackageColumn("receiving_work_started_at", "receiving_work_started_at DATETIME");
+      addPackageColumn("receiving_last_activity_at", "receiving_last_activity_at DATETIME");
+      addPackageColumn("receiving_location_reserved_at", "receiving_location_reserved_at DATETIME");
+      addPackageColumn("placed_by_user_id", "placed_by_user_id TEXT");
+      addPackageColumn("placed_by_username", "placed_by_username TEXT");
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_warehouse_packages_receiving_owner
+          ON warehouse_packages(claimed_by, status, batch_id);
+        CREATE INDEX IF NOT EXISTS idx_warehouse_packages_location_reservation
+          ON warehouse_packages(recommended_location_id, receiving_location_reserved_at, status);
+      `);
+      if (usersTableExists) {
+        db.exec(`
+          UPDATE warehouse_packages
+          SET receiving_work_started_at = COALESCE(receiving_work_started_at, updated_at, created_at),
+              receiving_last_activity_at = COALESCE(receiving_last_activity_at, updated_at, created_at)
+          WHERE claimed_by IS NOT NULL
+            AND status IN ('CLAIMED','LABEL_QUEUED','LABELED','PRINT_FAILED');
+          UPDATE warehouse_packages
+          SET placed_by_user_id = COALESCE(placed_by_user_id, (
+            SELECT pp.actor_id FROM package_placements pp
+            WHERE pp.package_id = warehouse_packages.id AND pp.action = 'PLACE'
+            ORDER BY datetime(pp.created_at) DESC, pp.id DESC LIMIT 1
+          ))
+          WHERE status IN ('PLACED','OPEN','EMPTY');
+          UPDATE warehouse_packages
+          SET placed_by_username = COALESCE(placed_by_username, (
+            SELECT u.username FROM package_placements pp
+            LEFT JOIN users u ON u.id = pp.actor_id
+            WHERE pp.package_id = warehouse_packages.id AND pp.action = 'PLACE'
+            ORDER BY datetime(pp.created_at) DESC, pp.id DESC LIMIT 1
+          ))
+          WHERE status IN ('PLACED','OPEN','EMPTY');
+        `);
+      }
+
+      const normalize = (value: unknown) => String(value ?? "").trim().toUpperCase().replace(/\s+/g, "");
+      const validPhysicalCode = (value: string) => /^[A-Z]+\d+-K\d+-P\d+$/.test(value);
+      const locations = db.prepare("SELECT id, code FROM warehouse_locations").all() as Array<{ id: string; code: string }>;
+      const knownCodes = new Set(locations.map(({ code }) => normalize(code)));
+      const lines = db.prepare("SELECT id, planned_location_snapshot, reserve_locations_snapshot FROM inbound_batch_lines").all() as Array<{
+        id: string; planned_location_snapshot: string | null; reserve_locations_snapshot: string | null;
+      }>;
+      const insertLocation = db.prepare(`
+        INSERT INTO warehouse_locations (id, code, package_capacity, notes)
+        VALUES (lower(hex(randomblob(16))), ?, 1, 'Mal Kabul V2 master lokasyon senkronizasyonu')
+      `);
+      const updateLine = db.prepare("UPDATE inbound_batch_lines SET planned_location_snapshot = ?, reserve_locations_snapshot = ? WHERE id = ?");
+      for (const line of lines) {
+        const planned = normalize(line.planned_location_snapshot) || null;
+        let reserves: string[] = [];
+        try {
+          const parsed = JSON.parse(String(line.reserve_locations_snapshot || "[]"));
+          if (Array.isArray(parsed)) reserves = [...new Set(parsed.map(normalize).filter(Boolean))];
+        } catch { reserves = []; }
+        for (const code of [planned, ...reserves]) {
+          if (!code || knownCodes.has(code) || !validPhysicalCode(code) || !usersTableExists) continue;
+          insertLocation.run(code);
+          knownCodes.add(code);
+        }
+        updateLine.run(planned, JSON.stringify(reserves), line.id);
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

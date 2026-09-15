@@ -41,6 +41,14 @@ const asNumber = (value: unknown) => {
 };
 
 const clean = (value: unknown, max = 250) => String(value ?? "").trim().slice(0, max);
+export const normalizeWarehouseLocationCode = (value: unknown) => clean(value, 100).toUpperCase().replace(/\s+/g, "");
+export const isValidWarehouseLocationCode = (value: unknown) => /^[A-Z]+\d+-K\d+-P\d+$/.test(normalizeWarehouseLocationCode(value));
+const RECEIVING_ACTIVE_STATUSES = ["CLAIMED", "LABEL_QUEUED", "LABELED", "PRINT_FAILED"];
+const hasActorPermission = (actor: WarehouseActor, permission: string) => {
+  if (actor.role === "admin" || actor.permissions?.[permission] === true) return true;
+  const warehouse = actor.permissions?.warehouse;
+  return Boolean(warehouse && typeof warehouse === "object" && (warehouse as Record<string, unknown>)[permission.replace("warehouse:", "")] === true);
+};
 const keyOf = (value: unknown) => clean(value).toLocaleLowerCase("tr-TR").replace(/[^a-z0-9çğıöşü]+/gi, "_").replace(/^_+|_+$/g, "");
 
 const rowValue = (row: Record<string, unknown>, names: string[]) => {
@@ -178,6 +186,10 @@ export class WarehouseAdminService {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'EXPECTED', ?)
       `);
       lot.lines.forEach((source: any, index: number) => {
+        const plannedLocation = this.syncReceivingLocation(source.warehouse_location, actor, true);
+        const reserveLocations = [...new Set((source.reserve_locations || [])
+          .map((value: unknown) => this.syncReceivingLocation(value, actor, false))
+          .filter(Boolean))];
         const lineId = randomUUID();
         const lastPackageUnits = Number(source.total_units) - (Number(source.package_count) - 1) * Number(source.units_per_package);
         insertLine.run(
@@ -187,7 +199,7 @@ export class WarehouseAdminService {
           source.supplier_code, source.name_tr, source.name_en, source.material, source.product_series,
           source.model, source.form_code, source.size, source.weight_grams || 0,
           source.package_weight_kg || 0, source.total_weight_kg || 0, source.image_path,
-          clean(source.warehouse_location, 100) || null, JSON.stringify(source.reserve_locations || []),
+          plannedLocation, JSON.stringify(reserveLocations),
         );
         for (let packageNumber = 1; packageNumber <= Number(source.package_count); packageNumber += 1) {
           const quantity = packageNumber === Number(source.package_count) ? lastPackageUnits : Number(source.units_per_package);
@@ -218,7 +230,7 @@ export class WarehouseAdminService {
     `).all();
   }
 
-  getReceivingSession(id: string) {
+  getReceivingSession(id: string, options: { includeAdminDetail?: boolean } = { includeAdminDetail: true }) {
     const batch = this.db.prepare(`
       SELECT b.*, u.username AS started_by_name
       FROM inbound_batches b LEFT JOIN users u ON u.id = b.started_by
@@ -234,14 +246,27 @@ export class WarehouseAdminService {
     `).all(id) as any[];
     const placed = lines.reduce((sum, line) => sum + Number(line.completed_packages || 0), 0);
     const events = this.db.prepare(`
-      SELECT e.*, p.package_code FROM inbound_session_events e
+      SELECT e.*, p.package_code, p.package_number, p.total_packages,
+             l.sku_snapshot, l.product_name_snapshot, loc.code AS location_code
+      FROM inbound_session_events e
       LEFT JOIN warehouse_packages p ON p.id = e.package_id
+      LEFT JOIN inbound_batch_lines l ON l.id = p.batch_line_id
+      LEFT JOIN warehouse_locations loc ON loc.id = p.current_location_id
       WHERE e.batch_id = ? ORDER BY datetime(e.created_at) DESC, e.id DESC LIMIT 250
     `).all(id);
+    const supplierCodes = [...new Set(lines.map((line) => clean(line.supplier_code, 100)).filter(Boolean))];
+    const activePackages = options.includeAdminDetail ? this.db.prepare(`
+      SELECT p.id FROM warehouse_packages p
+      WHERE p.batch_id = ? AND p.claimed_by IS NOT NULL
+        AND p.status IN ('CLAIMED','LABEL_QUEUED','LABELED','PRINT_FAILED')
+      ORDER BY datetime(COALESCE(p.receiving_last_activity_at, p.updated_at)) DESC
+    `).all(id).map((row: any) => this.getPackage(row.id)) : [];
     return {
       ...batch,
-      lines,
-      events,
+      lines: options.includeAdminDetail ? lines : [],
+      supplier_codes: supplierCodes,
+      active_packages: activePackages,
+      events: (events as any[]).filter((event) => event.event_type !== "SESSION_JOINED"),
       progress: {
         sku_count: lines.length,
         total_packages: Number(batch.expected_package_count),
@@ -252,18 +277,65 @@ export class WarehouseAdminService {
     };
   }
 
+  getMyActiveReceivingPackage(actor: WarehouseActor, sessionIdValue?: string) {
+    const sessionId = clean(sessionIdValue, 100);
+    const row = this.db.prepare(`
+      SELECT p.id
+      FROM warehouse_packages p
+      JOIN inbound_batches b ON b.id = p.batch_id
+      WHERE p.claimed_by = ?
+        AND p.status IN ('CLAIMED','LABEL_QUEUED','LABELED','PRINT_FAILED')
+        AND b.lot_number IS NOT NULL
+        AND b.receiving_state NOT IN ('completed','cancelled')
+        AND (? = '' OR p.batch_id = ?)
+      ORDER BY datetime(COALESCE(p.receiving_last_activity_at, p.updated_at)) DESC, p.id DESC
+      LIMIT 1
+    `).get(actor.id, sessionId, sessionId) as any;
+    return row ? this.getPackage(row.id) : null;
+  }
+
+  listMyReceivingPackages(sessionIdValue: string, actor: WarehouseActor) {
+    const sessionId = clean(sessionIdValue, 100);
+    this.getReceivingSession(sessionId, { includeAdminDetail: false });
+    return this.db.prepare(`
+      SELECT p.id AS package_id, p.package_code, p.product_id, l.sku_snapshot AS sku,
+             l.product_name_snapshot AS product_name, l.supplier_no_snapshot AS supplier_no,
+             b.lot_number, p.package_number, p.total_packages, p.planned_quantity AS quantity,
+             l.package_weight_kg_snapshot AS package_weight_kg, l.image_path_snapshot,
+             loc.code AS location_code, p.placed_at,
+             COALESCE(p.placed_by_username, u.username) AS placed_by_username,
+             '/api/products/' || p.product_id || '/image' AS image_url
+      FROM warehouse_packages p
+      JOIN inbound_batches b ON b.id = p.batch_id
+      JOIN inbound_batch_lines l ON l.id = p.batch_line_id
+      LEFT JOIN warehouse_locations loc ON loc.id = p.current_location_id
+      LEFT JOIN users u ON u.id = p.placed_by_user_id
+      WHERE p.batch_id = ? AND p.placed_by_user_id = ?
+        AND p.status IN ('PLACED','OPEN','EMPTY')
+      ORDER BY datetime(p.placed_at) DESC, p.id DESC
+    `).all(sessionId, actor.id);
+  }
+
   setReceivingState(id: string, state: "active" | "paused" | "cancelled", actor: WarehouseActor, deviceId?: string) {
     const session = this.getReceivingSession(id) as any;
     if (session.receiving_state === "completed" || session.receiving_state === "cancelled") {
       throw new WarehouseServiceError(409, "SESSION_CLOSED", "Tamamlanmış veya iptal edilmiş mal kabul tekrar açılamaz.");
     }
-    this.db.prepare(`UPDATE inbound_batches SET receiving_state = ?,
-      paused_at = CASE WHEN ? = 'paused' THEN CURRENT_TIMESTAMP ELSE paused_at END,
-      cancelled_at = CASE WHEN ? = 'cancelled' THEN CURRENT_TIMESTAMP ELSE cancelled_at END,
-      status = CASE WHEN ? = 'cancelled' THEN 'CANCELLED' ELSE status END,
-      updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(state, state, state, state, id);
-    this.sessionEvent(id, null, `SESSION_${state.toUpperCase()}`, actor, deviceId);
-    this.audit(`WAREHOUSE_RECEIVING_SESSION_${state.toUpperCase()}`, "inbound_batch", id, {}, actor);
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE inbound_batches SET receiving_state = ?,
+        paused_at = CASE WHEN ? = 'paused' THEN CURRENT_TIMESTAMP ELSE paused_at END,
+        cancelled_at = CASE WHEN ? = 'cancelled' THEN CURRENT_TIMESTAMP ELSE cancelled_at END,
+        status = CASE WHEN ? = 'cancelled' THEN 'CANCELLED' ELSE status END,
+        updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(state, state, state, state, id);
+      if (state === "cancelled") {
+        this.db.prepare(`UPDATE warehouse_packages SET claimed_by = NULL, claim_token = NULL, claim_expires_at = NULL,
+          receiving_device_id = NULL, receiving_last_activity_at = CURRENT_TIMESTAMP,
+          receiving_location_reserved_at = NULL, recommended_location_id = NULL, updated_at = CURRENT_TIMESTAMP
+          WHERE batch_id = ? AND status NOT IN ('PLACED','OPEN','EMPTY')`).run(id);
+      }
+      this.sessionEvent(id, null, `SESSION_${state.toUpperCase()}`, actor, deviceId);
+      this.audit(`WAREHOUSE_RECEIVING_SESSION_${state.toUpperCase()}`, "inbound_batch", id, {}, actor);
+    })();
     return this.getReceivingSession(id);
   }
 
@@ -279,6 +351,12 @@ export class WarehouseAdminService {
     this.db.prepare(`UPDATE inbound_batches SET receiving_state='completed', status='COMPLETED', completed_at=CURRENT_TIMESTAMP,
       force_completed_by=?, force_complete_reason=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
       .run(remaining > 0 ? actor.id : null, remaining > 0 ? forceReason : null, id);
+    if (remaining > 0) {
+      this.db.prepare(`UPDATE warehouse_packages SET claimed_by = NULL, claim_token = NULL, claim_expires_at = NULL,
+        receiving_device_id = NULL, receiving_last_activity_at = CURRENT_TIMESTAMP,
+        receiving_location_reserved_at = NULL, recommended_location_id = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE batch_id = ? AND status NOT IN ('PLACED','OPEN','EMPTY')`).run(id);
+    }
     this.sessionEvent(id, null, remaining > 0 ? "SESSION_FORCE_COMPLETED" : "SESSION_COMPLETED", actor, deviceId, { remaining_packages: remaining, reason: forceReason || null });
     this.audit(remaining > 0 ? "WAREHOUSE_RECEIVING_FORCE_COMPLETED" : "WAREHOUSE_RECEIVING_COMPLETED", "inbound_batch", id, { remaining_packages: remaining, reason: forceReason || null }, actor);
     return { ...this.getReceivingSession(id), idempotent: false };
@@ -449,23 +527,51 @@ export class WarehouseAdminService {
       if (!supplierInSession) throw new WarehouseServiceError(404, "PRODUCT_NOT_IN_ACTIVE_LOT", "Bu ürün aktif partide bulunamadı.");
     }
     return this.db.transaction(() => {
-      const candidate = this.db.prepare(`
+      if (sessionId) {
+        const activePackage = this.getMyActiveReceivingPackage(actor) as any;
+        if (activePackage) {
+          const target = activePackage.recommended_location_code ? ` ${activePackage.recommended_location_code} rafına` : "";
+          throw new WarehouseServiceError(409, "ACTIVE_PACKAGE_EXISTS",
+            `${activePackage.sku_snapshot} ${activePackage.package_number}/${activePackage.total_packages} paketini önce${target} yerleştirin.`);
+        }
+      }
+      const candidate = sessionId ? this.db.prepare(`
         SELECT p.id
         FROM warehouse_packages p
         JOIN inbound_batches b ON b.id = p.batch_id
         JOIN inbound_batch_lines l ON l.id = p.batch_line_id
-        WHERE ((? IS NULL AND p.supplier_code = ? COLLATE NOCASE)
-            OR (? IS NOT NULL AND l.supplier_code = ? COLLATE NOCASE))
-          AND (? IS NULL OR p.batch_id = ?)
+        WHERE p.batch_id = ? AND l.supplier_code = ? COLLATE NOCASE
+          AND b.status NOT IN ('COMPLETED','CANCELLED') AND b.receiving_state = 'active'
+          AND (p.status = 'EXPECTED' OR (
+            p.status IN ('CLAIMED','LABEL_QUEUED','LABELED','PRINT_FAILED') AND p.claimed_by IS NULL
+          ))
+        ORDER BY CASE WHEN p.status = 'EXPECTED' THEN 1 ELSE 0 END,
+                 l.line_number, p.package_number
+        LIMIT 1
+      `).get(sessionId, code) as any : this.db.prepare(`
+        SELECT p.id
+        FROM warehouse_packages p
+        JOIN inbound_batches b ON b.id = p.batch_id
+        JOIN inbound_batch_lines l ON l.id = p.batch_line_id
+        WHERE p.supplier_code = ? COLLATE NOCASE
           AND b.status NOT IN ('COMPLETED','CANCELLED')
           AND COALESCE(b.receiving_state, 'active') = 'active'
           AND (p.status = 'EXPECTED' OR (p.status = 'CLAIMED' AND datetime(p.claim_expires_at) <= datetime('now')))
         ORDER BY datetime(b.created_at), l.line_number, p.package_number
         LIMIT 1
-      `).get(sessionId, code, sessionId, code, sessionId, sessionId) as any;
+      `).get(code) as any;
       if (!candidate) throw new WarehouseServiceError(404, "NO_PACKAGE_AVAILABLE", sessionId ? "Bu ürün için aktif partide bekleyen paket yok." : "Bu tedarikçi kodu için bekleyen paket yok.");
       const claimToken = randomUUID();
-      const result = this.db.prepare(`
+      const result = sessionId ? this.db.prepare(`
+        UPDATE warehouse_packages
+        SET status = CASE WHEN status = 'EXPECTED' THEN 'CLAIMED' ELSE status END,
+            claim_token = ?, claimed_by = ?, claim_expires_at = NULL,
+            receiving_device_id = ?, receiving_work_started_at = COALESCE(receiving_work_started_at, CURRENT_TIMESTAMP),
+            receiving_last_activity_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND (status = 'EXPECTED' OR (
+          status IN ('CLAIMED','LABEL_QUEUED','LABELED','PRINT_FAILED') AND claimed_by IS NULL
+        ))
+      `).run(claimToken, actor.id, clean(deviceId, 150) || null, candidate.id) : this.db.prepare(`
         UPDATE warehouse_packages
         SET status = 'CLAIMED', claim_token = ?, claimed_by = ?,
             claim_expires_at = datetime('now', ?), updated_at = CURRENT_TIMESTAMP
@@ -475,7 +581,7 @@ export class WarehouseAdminService {
       this.db.prepare("UPDATE inbound_batches SET status = 'RECEIVING', updated_at = CURRENT_TIMESTAMP WHERE id = (SELECT batch_id FROM warehouse_packages WHERE id = ?) AND status = 'READY'").run(candidate.id);
       const claimed = this.getPackage(candidate.id) as any;
       this.sessionEvent(claimed.batch_id, claimed.id, "PACKAGE_CLAIMED", actor, deviceId, { supplier_code: code });
-      this.audit("WAREHOUSE_PACKAGE_CLAIMED", "warehouse_package", candidate.id, { claim_seconds: this.claimLeaseSeconds }, actor);
+      this.audit("WAREHOUSE_PACKAGE_CLAIMED", "warehouse_package", candidate.id, { claim_seconds: sessionId ? null : this.claimLeaseSeconds, persistent_receiving_work: Boolean(sessionId) }, actor);
       return claimed;
     }).immediate();
   }
@@ -517,9 +623,15 @@ export class WarehouseAdminService {
       }
       const pkg = this.db.prepare("SELECT * FROM warehouse_packages WHERE id = ?").get(packageId) as any;
       if (!pkg) throw new WarehouseServiceError(404, "PACKAGE_NOT_FOUND", "Paket bulunamadı.");
+      const receivingSession = this.db.prepare("SELECT lot_number FROM inbound_batches WHERE id = ?").get(pkg.batch_id) as any;
+      const persistentReceivingWork = Boolean(receivingSession?.lot_number) && RECEIVING_ACTIVE_STATUSES.includes(pkg.status);
+      if (persistentReceivingWork && pkg.claimed_by !== actor.id) {
+        throw new WarehouseServiceError(409, "PACKAGE_OWNED_BY_ANOTHER_USER", "Bu paket başka bir kullanıcının devam eden mal kabul işidir.");
+      }
       const reprint = ["LABELED", "PLACED", "OPEN", "EMPTY", "PRINT_FAILED"].includes(pkg.status);
       if (!reprint) {
-        if (pkg.status !== "CLAIMED" || pkg.claimed_by !== actor.id || pkg.claim_token !== clean(input.claim_token, 100) || new Date(`${pkg.claim_expires_at}Z`).getTime() <= Date.now()) {
+        const expired = !persistentReceivingWork && new Date(`${pkg.claim_expires_at}Z`).getTime() <= Date.now();
+        if (pkg.status !== "CLAIMED" || pkg.claimed_by !== actor.id || pkg.claim_token !== clean(input.claim_token, 100) || expired) {
           throw new WarehouseServiceError(409, "CLAIM_EXPIRED", "Paket rezervasyonu geçersiz veya süresi dolmuş; tekrar okutun.");
         }
       }
@@ -534,7 +646,8 @@ export class WarehouseAdminService {
       this.db.prepare(`
         UPDATE warehouse_packages SET status = CASE WHEN status IN ('PLACED','OPEN','EMPTY') THEN status ELSE 'LABEL_QUEUED' END,
           label_template_id = ?, claim_token = NULL,
-          claim_expires_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+          claim_expires_at = NULL, receiving_last_activity_at = CASE WHEN claimed_by IS NOT NULL THEN CURRENT_TIMESTAMP ELSE receiving_last_activity_at END,
+          updated_at = CURRENT_TIMESTAMP WHERE id = ?
       `).run(templateId, packageId);
       this.sessionEvent(pkg.batch_id, pkg.id, reprint ? "LABEL_REPRINT_QUEUED" : "LABEL_QUEUED", actor, clean(input.device_id, 150), { job_id: jobId });
       this.audit(reprint ? "WAREHOUSE_LABEL_REPRINT_QUEUED" : "WAREHOUSE_LABEL_QUEUED", "warehouse_package", packageId, { job_id: jobId }, actor);
@@ -552,9 +665,10 @@ export class WarehouseAdminService {
   }
 
   createLocation(input: Record<string, unknown>, actor: WarehouseActor) {
-    const code = clean(input.code, 100).toUpperCase();
+    const code = normalizeWarehouseLocationCode(input.code);
     const capacity = Math.trunc(asNumber(input.package_capacity) || 1);
     if (!code || capacity < 1) throw new WarehouseServiceError(400, "VALIDATION_ERROR", "Lokasyon kodu ve pozitif kapasite zorunludur.");
+    if (this.findWarehouseLocation(code)) throw new WarehouseServiceError(409, "LOCATION_EXISTS", "Bu fiziksel lokasyon katalogda zaten bulunuyor.");
     const id = randomUUID();
     this.db.prepare(`
       INSERT INTO warehouse_locations (id, code, zone, aisle, rack, shelf, bin, package_capacity, notes, created_by)
@@ -566,10 +680,16 @@ export class WarehouseAdminService {
 
   listLocations() {
     return this.db.prepare(`
-      SELECT l.*, COUNT(p.id) AS occupied_packages,
-             MAX(0, l.package_capacity - COUNT(p.id)) AS available_capacity
+      SELECT l.*,
+             COUNT(DISTINCT p.id) AS occupied_packages,
+             COUNT(DISTINCT reservation.id) AS reserved_packages,
+             MAX(0, l.package_capacity - COUNT(DISTINCT p.id) - COUNT(DISTINCT reservation.id)) AS available_capacity
       FROM warehouse_locations l
       LEFT JOIN warehouse_packages p ON p.current_location_id = l.id AND p.status IN ('PLACED','OPEN')
+      LEFT JOIN warehouse_packages reservation ON reservation.recommended_location_id = l.id
+        AND reservation.receiving_location_reserved_at IS NOT NULL
+        AND reservation.current_location_id IS NULL
+        AND reservation.status IN ('CLAIMED','LABEL_QUEUED','LABELED','PRINT_FAILED')
       GROUP BY l.id ORDER BY l.code COLLATE NOCASE
     `).all();
   }
@@ -600,46 +720,65 @@ export class WarehouseAdminService {
     return row;
   }
 
-  getReceivingLocation(packageIdValue: string) {
+  getReceivingLocation(packageIdValue: string, actor?: WarehouseActor) {
     const packageId = clean(packageIdValue, 100);
-    const pkg = this.db.prepare(`
-      SELECT p.id, p.status, p.recommended_location_id, l.planned_location_snapshot,
-             l.reserve_locations_snapshot, b.lot_number
-      FROM warehouse_packages p
-      JOIN inbound_batch_lines l ON l.id = p.batch_line_id
-      JOIN inbound_batches b ON b.id = p.batch_id
-      WHERE p.id = ?
-    `).get(packageId) as any;
-    if (!pkg) throw new WarehouseServiceError(404, "PACKAGE_NOT_FOUND", "Paket bulunamadı.");
-    if (!pkg.lot_number) return this.suggestLocation(packageId);
-    if (pkg.status !== "LABELED") throw new WarehouseServiceError(409, "PACKAGE_NOT_LABELED", "Yerleştirme rafı etiket basıldıktan sonra yüklenir.");
-    const plannedCode = clean(pkg.planned_location_snapshot, 100);
-    if (!plannedCode) throw new WarehouseServiceError(409, "PLANNED_LOCATION_MISSING", "Bu ürün için master veride planlanan lokasyon bulunmuyor.");
-    let reserves: string[] = [];
-    try {
-      const parsed = JSON.parse(String(pkg.reserve_locations_snapshot || "[]"));
-      if (Array.isArray(parsed)) reserves = parsed.map((value) => clean(value, 100)).filter(Boolean);
-    } catch { reserves = []; }
-    const candidates = [plannedCode, ...reserves.filter((code) => code.toLocaleUpperCase("tr-TR") !== plannedCode.toLocaleUpperCase("tr-TR"))];
-    for (const code of candidates) {
-      const location = this.db.prepare(`
-        SELECT l.*, COUNT(p.id) AS occupied_packages,
-               l.package_capacity - COUNT(p.id) AS available_capacity
-        FROM warehouse_locations l
-        LEFT JOIN warehouse_packages p ON p.current_location_id = l.id AND p.status IN ('PLACED','OPEN')
-        WHERE l.code = ? COLLATE NOCASE AND l.active = 1
-        GROUP BY l.id
-      `).get(code) as any;
-      if (!location) {
-        if (code === plannedCode) throw new WarehouseServiceError(409, "PLANNED_LOCATION_NOT_FOUND", `${plannedCode} planlanan lokasyonu depo lokasyonlarında bulunamadı.`);
-        continue;
+    return this.db.transaction(() => {
+      const pkg = this.db.prepare(`
+        SELECT p.id, p.status, p.claimed_by, p.recommended_location_id, l.planned_location_snapshot,
+               l.reserve_locations_snapshot, b.lot_number
+        FROM warehouse_packages p
+        JOIN inbound_batch_lines l ON l.id = p.batch_line_id
+        JOIN inbound_batches b ON b.id = p.batch_id
+        WHERE p.id = ?
+      `).get(packageId) as any;
+      if (!pkg) throw new WarehouseServiceError(404, "PACKAGE_NOT_FOUND", "Paket bulunamadı.");
+      if (!pkg.lot_number) return this.suggestLocation(packageId);
+      if (actor && pkg.claimed_by && pkg.claimed_by !== actor.id && !hasActorPermission(actor, "warehouse:manage_receiving_sessions")) {
+        throw new WarehouseServiceError(409, "PACKAGE_OWNED_BY_ANOTHER_USER", "Bu paket başka bir kullanıcının devam eden mal kabul işidir.");
       }
-      if (Number(location.available_capacity) <= 0) continue;
-      this.db.prepare("UPDATE warehouse_packages SET recommended_location_id = ?, recommended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-        .run(location.id, packageId);
-      return { ...location, planned_location: plannedCode, using_reserve: code.toLocaleUpperCase("tr-TR") !== plannedCode.toLocaleUpperCase("tr-TR") };
-    }
-    throw new WarehouseServiceError(409, "PLANNED_LOCATION_FULL", `${plannedCode} planlanan lokasyonu dolu. Uygun rezerv lokasyon bulunamadı.`);
+      if (pkg.status !== "LABELED") throw new WarehouseServiceError(409, "PACKAGE_NOT_LABELED", "Yerleştirme rafı etiket basıldıktan sonra yüklenir.");
+      const plannedCode = normalizeWarehouseLocationCode(pkg.planned_location_snapshot);
+      if (!plannedCode) throw new WarehouseServiceError(409, "PLANNED_LOCATION_MISSING", "Bu ürün için master veride planlanan lokasyon bulunmuyor.");
+      if (!isValidWarehouseLocationCode(plannedCode) && !this.findWarehouseLocation(plannedCode)) {
+        throw new WarehouseServiceError(409, "PLANNED_LOCATION_NOT_FOUND", `${plannedCode} planlanan rafı depo lokasyonlarında bulunamadı. Master ürün lokasyonunu kontrol edin.`);
+      }
+      let reserves: string[] = [];
+      try {
+        const parsed = JSON.parse(String(pkg.reserve_locations_snapshot || "[]"));
+        if (Array.isArray(parsed)) reserves = parsed.map(normalizeWarehouseLocationCode).filter(Boolean);
+      } catch { reserves = []; }
+      const candidates = [plannedCode, ...reserves.filter((code) => code !== plannedCode)];
+      for (const code of candidates) {
+        if (!this.findWarehouseLocation(code) && actor && isValidWarehouseLocationCode(code)) {
+          this.syncReceivingLocation(code, actor, code === plannedCode);
+        }
+        const location = this.findWarehouseLocation(code);
+        if (!location || !location.active) {
+          if (code === plannedCode) {
+            throw new WarehouseServiceError(409, "PLANNED_LOCATION_NOT_FOUND", `${plannedCode} planlanan rafı depo lokasyonlarında bulunamadı. Master ürün lokasyonunu kontrol edin.`);
+          }
+          continue;
+        }
+        const usage = this.locationUsage(location.id, packageId);
+        const reservation = this.db.prepare("SELECT receiving_location_reserved_at FROM warehouse_packages WHERE id = ?").get(packageId) as any;
+        const alreadyReservedHere = pkg.recommended_location_id === location.id && Boolean(reservation?.receiving_location_reserved_at);
+        if (!alreadyReservedHere && usage.occupied + usage.reserved >= Number(location.package_capacity)) continue;
+        this.db.prepare(`UPDATE warehouse_packages SET recommended_location_id = ?, recommended_at = CURRENT_TIMESTAMP,
+          receiving_location_reserved_at = COALESCE(receiving_location_reserved_at, CURRENT_TIMESTAMP),
+          receiving_last_activity_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+          .run(location.id, packageId);
+        const reservedAfter = usage.reserved + (alreadyReservedHere ? 0 : 1);
+        return {
+          ...location,
+          occupied_packages: usage.occupied,
+          reserved_packages: reservedAfter,
+          available_capacity: Math.max(0, Number(location.package_capacity) - usage.occupied - reservedAfter),
+          planned_location: plannedCode,
+          using_reserve: code !== plannedCode,
+        };
+      }
+      throw new WarehouseServiceError(409, "PLANNED_LOCATION_FULL", `${plannedCode} planlanan lokasyonu dolu. Uygun rezerv lokasyon bulunamadı.`);
+    }).immediate();
   }
 
   placePackage(packageCode: string, locationCode: string, input: Record<string, unknown>, actor: WarehouseActor) {
@@ -654,20 +793,24 @@ export class WarehouseAdminService {
       }
       const pkg = this.db.prepare("SELECT * FROM warehouse_packages WHERE package_code = ? COLLATE NOCASE").get(clean(packageCode, 100)) as any;
       if (!pkg) throw new WarehouseServiceError(404, "PACKAGE_NOT_FOUND", "Paket bulunamadı.");
-      const location = this.db.prepare("SELECT * FROM warehouse_locations WHERE code = ? COLLATE NOCASE AND active = 1").get(clean(locationCode, 100)) as any;
+      const location = this.findWarehouseLocation(locationCode);
       if (!location) throw new WarehouseServiceError(404, "LOCATION_NOT_FOUND", "Aktif lokasyon bulunamadı.");
+      if (!location.active) throw new WarehouseServiceError(404, "LOCATION_NOT_FOUND", "Aktif lokasyon bulunamadı.");
       if (pkg.status !== "LABELED") throw new WarehouseServiceError(409, "PACKAGE_NOT_LABELED", "Yerleştirmeden önce paket etiketi başarıyla basılmalıdır.");
-      if (!pkg.recommended_location_id && !clean(input.override_reason, 1000)) {
-        const session = this.db.prepare("SELECT lot_number FROM inbound_batches WHERE id = ?").get(pkg.batch_id) as any;
-        if (session?.lot_number) pkg.recommended_location_id = (this.getReceivingLocation(pkg.id) as any).id;
-      }
+      const receivingSession = this.db.prepare("SELECT lot_number FROM inbound_batches WHERE id = ?").get(pkg.batch_id) as any;
       const overrideReason = clean(input.override_reason, 1000);
+      if (receivingSession?.lot_number && pkg.claimed_by !== actor.id && !hasActorPermission(actor, "warehouse:manage_receiving_sessions")) {
+        throw new WarehouseServiceError(409, "PACKAGE_OWNED_BY_ANOTHER_USER", "Bu paket başka bir kullanıcının devam eden mal kabul işidir.");
+      }
+      if (!pkg.recommended_location_id && !clean(input.override_reason, 1000)) {
+        if (receivingSession?.lot_number) pkg.recommended_location_id = (this.getReceivingLocation(pkg.id, actor) as any).id;
+      }
       if (pkg.recommended_location_id && pkg.recommended_location_id !== location.id && !overrideReason) {
         const recommended = this.db.prepare("SELECT code FROM warehouse_locations WHERE id = ?").get(pkg.recommended_location_id) as any;
         throw new WarehouseServiceError(409, "WRONG_LOCATION", `Yanlış lokasyon. Paketi ${recommended?.code || "önerilen lokasyona"} yerleştirin.`);
       }
-      const occupied = this.db.prepare("SELECT COUNT(*) AS count FROM warehouse_packages WHERE current_location_id = ? AND status IN ('PLACED','OPEN')").get(location.id) as any;
-      if (Number(occupied.count) >= Number(location.package_capacity)) throw new WarehouseServiceError(409, "LOCATION_FULL", "Lokasyon kapasitesi dolu.");
+      const usage = this.locationUsage(location.id, pkg.id);
+      if (usage.occupied + usage.reserved >= Number(location.package_capacity)) throw new WarehouseServiceError(409, "LOCATION_FULL", "Lokasyon kapasitesi dolu.");
       const lowerPending = this.db.prepare(`
         SELECT package_code FROM warehouse_packages
         WHERE batch_line_id = ? AND package_number < ?
@@ -684,8 +827,10 @@ export class WarehouseAdminService {
       `).run(placementId, pkg.id, location.id, idempotencyKey, overrideReason || null, actor.id);
       this.db.prepare(`
         UPDATE warehouse_packages SET status = 'PLACED', current_location_id = ?, placed_at = CURRENT_TIMESTAMP,
+          receiving_location_reserved_at = NULL, receiving_last_activity_at = CURRENT_TIMESTAMP,
+          receiving_device_id = NULL, placed_by_user_id = ?, placed_by_username = ?,
           updated_at = CURRENT_TIMESTAMP WHERE id = ?
-      `).run(location.id, pkg.id);
+      `).run(location.id, actor.id, actor.username, pkg.id);
       this.recordStockMovement(pkg, "INBOUND", pkg.planned_quantity, "package_placement", placementId, `place:${pkg.id}`, actor);
       this.db.prepare("UPDATE products SET central_stock = COALESCE(central_stock, 0) + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(pkg.planned_quantity, pkg.product_id);
       this.db.prepare("INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type) VALUES (?, ?, 'WAREHOUSE', ?, ?, 'IN')")
@@ -699,6 +844,31 @@ export class WarehouseAdminService {
       this.audit("WAREHOUSE_PACKAGE_PLACED", "warehouse_package", pkg.id, { location_code: location.code, quantity: pkg.planned_quantity, override_reason: overrideReason || null }, actor);
       return { placement: this.db.prepare("SELECT * FROM package_placements WHERE id = ?").get(placementId), package: this.getPackage(pkg.id), idempotent: false };
     })();
+  }
+
+  releaseReceivingPackage(packageIdValue: string, actor: WarehouseActor, deviceId?: string) {
+    const packageId = clean(packageIdValue, 100);
+    return this.db.transaction(() => {
+      const pkg = this.db.prepare(`
+        SELECT p.*, b.lot_number FROM warehouse_packages p
+        JOIN inbound_batches b ON b.id = p.batch_id WHERE p.id = ?
+      `).get(packageId) as any;
+      if (!pkg || !pkg.lot_number) throw new WarehouseServiceError(404, "PACKAGE_NOT_FOUND", "Mal kabul paketi bulunamadı.");
+      if (!RECEIVING_ACTIVE_STATUSES.includes(pkg.status)) {
+        throw new WarehouseServiceError(409, "PACKAGE_NOT_ACTIVE", "Paket serbest bırakılabilir aktif iş durumunda değil.");
+      }
+      this.db.prepare(`UPDATE warehouse_packages SET
+        status = CASE WHEN status = 'CLAIMED' THEN 'EXPECTED' ELSE status END,
+        claimed_by = NULL, claim_token = NULL, claim_expires_at = NULL,
+        receiving_device_id = NULL, receiving_work_started_at = NULL,
+        receiving_last_activity_at = CURRENT_TIMESTAMP,
+        receiving_location_reserved_at = NULL, recommended_location_id = NULL,
+        recommended_at = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?`).run(packageId);
+      this.sessionEvent(pkg.batch_id, pkg.id, "PACKAGE_CLAIM_RELEASED", actor, deviceId, { previous_user_id: pkg.claimed_by });
+      this.audit("WAREHOUSE_PACKAGE_CLAIM_RELEASED", "warehouse_package", pkg.id, { previous_user_id: pkg.claimed_by }, actor);
+      return this.getPackage(pkg.id);
+    }).immediate();
   }
 
   movePackage(packageCode: string, locationCode: string, input: Record<string, unknown>, actor: WarehouseActor) {
@@ -716,8 +886,8 @@ export class WarehouseAdminService {
       const location = this.db.prepare("SELECT * FROM warehouse_locations WHERE code = ? COLLATE NOCASE AND active = 1").get(clean(locationCode, 100)) as any;
       if (!location) throw new WarehouseServiceError(404, "LOCATION_NOT_FOUND", "Aktif lokasyon bulunamadı.");
       if (location.id === pkg.current_location_id) throw new WarehouseServiceError(409, "SAME_LOCATION", "Paket zaten bu lokasyonda.");
-      const occupied = this.db.prepare("SELECT COUNT(*) AS count FROM warehouse_packages WHERE current_location_id = ? AND status IN ('PLACED','OPEN')").get(location.id) as any;
-      if (Number(occupied.count) >= Number(location.package_capacity)) throw new WarehouseServiceError(409, "LOCATION_FULL", "Lokasyon kapasitesi dolu.");
+      const usage = this.locationUsage(location.id, pkg.id);
+      if (usage.occupied + usage.reserved >= Number(location.package_capacity)) throw new WarehouseServiceError(409, "LOCATION_FULL", "Lokasyon kapasitesi dolu veya Mal Kabul için rezerve edildi.");
       const placementId = randomUUID();
       this.db.prepare(`
         INSERT INTO package_placements (id, package_id, from_location_id, to_location_id, action, idempotency_key, actor_id)
@@ -791,6 +961,58 @@ export class WarehouseAdminService {
       this.audit("WAREHOUSE_LABEL_TEMPLATE_SAVED", "label_template", id, { name }, actor);
     })();
     return this.listTemplates().find((item: any) => item.id === id);
+  }
+
+  private findWarehouseLocation(codeValue: unknown) {
+    const code = normalizeWarehouseLocationCode(codeValue);
+    if (!code) return null;
+    const locations = this.db.prepare("SELECT * FROM warehouse_locations ORDER BY active DESC, created_at, id").all() as any[];
+    const matches = locations.filter((location) => normalizeWarehouseLocationCode(location.code) === code);
+    const location = matches[0] || null;
+    if (location && matches.length === 1 && location.code !== code) {
+      this.db.prepare("UPDATE warehouse_locations SET code = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(code, location.id);
+      location.code = code;
+    }
+    return location;
+  }
+
+  private syncReceivingLocation(codeValue: unknown, actor: WarehouseActor, required: boolean): string | null {
+    const code = normalizeWarehouseLocationCode(codeValue);
+    if (!code) return null;
+    const existing = this.findWarehouseLocation(code);
+    if (existing) {
+      if (!existing.active) {
+        if (required) throw new WarehouseServiceError(409, "PLANNED_LOCATION_NOT_FOUND", `${code} planlanan rafı depo lokasyonlarında bulunamadı. Master ürün lokasyonunu kontrol edin.`);
+        return null;
+      }
+      return code;
+    }
+    if (!isValidWarehouseLocationCode(code)) {
+      if (required) throw new WarehouseServiceError(409, "PLANNED_LOCATION_NOT_FOUND", `${code} planlanan rafı depo lokasyonlarında bulunamadı. Master ürün lokasyonunu kontrol edin.`);
+      return null;
+    }
+    const id = randomUUID();
+    this.db.prepare(`
+      INSERT INTO warehouse_locations (id, code, package_capacity, notes, created_by)
+      VALUES (?, ?, 1, 'Mal Kabul V2 master lokasyon senkronizasyonu', ?)
+    `).run(id, code, actor.id);
+    this.audit("WAREHOUSE_LOCATION_SYNCED_FROM_MASTER", "warehouse_location", id, { code, package_capacity: 1 }, actor);
+    return code;
+  }
+
+  private locationUsage(locationId: string, excludePackageId = "") {
+    const occupied = this.db.prepare(`
+      SELECT COUNT(*) AS count FROM warehouse_packages
+      WHERE current_location_id = ? AND status IN ('PLACED','OPEN')
+    `).get(locationId) as any;
+    const reserved = this.db.prepare(`
+      SELECT COUNT(*) AS count FROM warehouse_packages
+      WHERE recommended_location_id = ? AND receiving_location_reserved_at IS NOT NULL
+        AND current_location_id IS NULL
+        AND status IN ('CLAIMED','LABEL_QUEUED','LABELED','PRINT_FAILED')
+        AND id != ?
+    `).get(locationId, excludePackageId) as any;
+    return { occupied: Number(occupied.count), reserved: Number(reserved.count) };
   }
 
   private nextBatchNumber() {

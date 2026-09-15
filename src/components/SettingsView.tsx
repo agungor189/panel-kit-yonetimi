@@ -40,6 +40,7 @@ interface SettingsViewProps {
 
 const WAREHOUSE_PERMISSIONS = [
   ['warehouse:receive', 'Mal kabul'],
+  ['warehouse:manage_receiving_sessions', 'Mal kabul oturumu yönetimi'],
   ['warehouse:print_labels', 'Etiket basma'],
   ['warehouse:place_packages', 'Paket yerleştirme'],
   ['warehouse:move_stock', 'Stok taşıma / sıra atlama'],

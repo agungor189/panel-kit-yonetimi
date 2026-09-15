@@ -33,6 +33,15 @@ const permissionsFor = (rawPermissions: unknown): string[] => {
   }
 };
 
+export const userHasWarehousePermission = (user: Pick<WarehouseUser, "role" | "permissions">, permission: string) => {
+  if (user.role === "admin") return true;
+  const direct = user.permissions?.[permission];
+  if (direct === true) return true;
+  const warehouse = user.permissions?.warehouse;
+  const shortName = permission.replace(/^warehouse:/, "");
+  return Boolean(warehouse && typeof warehouse === "object" && (warehouse as Record<string, unknown>)[shortName] === true);
+};
+
 const errorResponse = (res: express.Response, status: number, code: string, message: string) =>
   res.status(status).json({ success: false, error: { code, message } });
 
@@ -155,22 +164,13 @@ export function createWarehouseRouter({
     next();
   };
 
-  const hasWarehousePermission = (user: Pick<WarehouseUser, "role" | "permissions">, permission: string) => {
-    if (user.role === "admin") return true;
-    const direct = user.permissions?.[permission];
-    if (direct === true) return true;
-    const warehouse = user.permissions?.warehouse;
-    const shortName = permission.replace(/^warehouse:/, "");
-    return Boolean(warehouse && typeof warehouse === "object" && (warehouse as Record<string, unknown>)[shortName] === true);
-  };
-
   const requireWarehousePermission = (permission: string) => (
     req: express.Request,
     res: express.Response,
     next: express.NextFunction,
   ) => {
     const user = res.locals.warehouseUser as WarehouseUser | undefined;
-    if (!user || !hasWarehousePermission(user, permission)) {
+    if (!user || !userHasWarehousePermission(user, permission)) {
       logActivity("WAREHOUSE_PERMISSION_DENIED", "warehouse_permission", permission, {
         path: req.path,
         method: req.method,
@@ -186,7 +186,7 @@ export function createWarehouseRouter({
     next: express.NextFunction,
   ) => {
     const user = res.locals.warehouseUser as WarehouseUser | undefined;
-    if (!user || !permissions.some((permission) => hasWarehousePermission(user, permission))) {
+    if (!user || !permissions.some((permission) => userHasWarehousePermission(user, permission))) {
       return errorResponse(res, 403, "FORBIDDEN", `Bu işlem için şu yetkilerden biri gerekli: ${permissions.join(", ")}.`);
     }
     next();
@@ -387,32 +387,41 @@ export function createWarehouseRouter({
     catch (error) { return handleServiceError(res, error); }
   });
 
-  router.get("/admin/receiving/lots/:lot", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (req, res) => {
+  router.get("/admin/receiving/lots/:lot", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:manage_receiving_sessions"), (req, res) => {
     try { res.json({ success: true, data: adminService.getLot(req.params.lot) }); }
     catch (error) { return handleServiceError(res, error); }
   });
   router.get("/admin/receiving/sessions", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (_req, res) => {
     res.json({ success: true, data: adminService.listReceivingSessions() });
   });
-  router.post("/admin/receiving/sessions", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (req, res) => {
+  router.post("/admin/receiving/sessions", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:manage_receiving_sessions"), (req, res) => {
     try { res.status(201).json({ success: true, data: adminService.startReceivingSession(String(req.body?.lot_number || ""), actor(res), String(req.body?.device_id || "")) }); }
     catch (error) { return handleServiceError(res, error); }
   });
   router.get("/admin/receiving/sessions/:id", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (req, res) => {
-    try { res.json({ success: true, data: adminService.getReceivingSession(req.params.id) }); }
+    try { res.json({ success: true, data: adminService.getReceivingSession(req.params.id, { includeAdminDetail: userHasWarehousePermission(actor(res), "warehouse:manage_receiving_sessions") }) }); }
     catch (error) { return handleServiceError(res, error); }
   });
-  router.post("/admin/receiving/sessions/:id/state", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (req, res) => {
+  router.get("/admin/receiving/my-active-package", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (_req, res) => {
+    try { res.json({ success: true, data: adminService.getMyActiveReceivingPackage(actor(res)) }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
+  router.get("/admin/receiving/sessions/:id/my-active-package", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (req, res) => {
+    try { res.json({ success: true, data: adminService.getMyActiveReceivingPackage(actor(res), req.params.id) }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
+  router.get("/admin/receiving/sessions/:id/my-packages", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (req, res) => {
+    try { res.json({ success: true, data: adminService.listMyReceivingPackages(req.params.id, actor(res)) }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/admin/receiving/sessions/:id/state", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:manage_receiving_sessions"), (req, res) => {
     const state = String(req.body?.state || "") as "active" | "paused" | "cancelled";
     if (!["active", "paused", "cancelled"].includes(state)) return errorResponse(res, 400, "VALIDATION_ERROR", "Geçerli session state zorunludur.");
     try { res.json({ success: true, data: adminService.setReceivingState(req.params.id, state, actor(res), String(req.body?.device_id || "")) }); }
     catch (error) { return handleServiceError(res, error); }
   });
-  router.post("/admin/receiving/sessions/:id/complete", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (req, res) => {
+  router.post("/admin/receiving/sessions/:id/complete", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:manage_receiving_sessions"), (req, res) => {
     const currentActor = actor(res);
-    if (req.body?.force_reason && !hasWarehousePermission(currentActor, "warehouse:move_stock")) {
-      return errorResponse(res, 403, "FORBIDDEN", "Eksik paketle tamamlama için warehouse:move_stock yetkisi gerekli.");
-    }
     try { res.json({ success: true, data: adminService.completeReceivingSession(req.params.id, req.body?.force_reason, currentActor, String(req.body?.device_id || "")) }); }
     catch (error) { return handleServiceError(res, error); }
   });
@@ -431,6 +440,10 @@ export function createWarehouseRouter({
       res.json({ success: true, data: result, idempotent: result.idempotent });
     } catch (error) { return handleServiceError(res, error); }
   });
+  router.post("/admin/packages/:id/release-receiving", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:manage_receiving_sessions"), (req, res) => {
+    try { res.json({ success: true, data: adminService.releaseReceivingPackage(req.params.id, actor(res), String(req.body?.device_id || "")) }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
   router.get("/admin/print-jobs", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:print_labels"), (req, res) => {
     res.json({ success: true, data: adminService.listPrintJobs(Number(req.query.limit) || 100) });
   });
@@ -443,7 +456,7 @@ export function createWarehouseRouter({
     catch (error) { return handleServiceError(res, error); }
   });
   router.get("/admin/packages/:id/receiving-location", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (req, res) => {
-    try { res.json({ success: true, data: adminService.getReceivingLocation(req.params.id) }); }
+    try { res.json({ success: true, data: adminService.getReceivingLocation(req.params.id, actor(res)) }); }
     catch (error) { return handleServiceError(res, error); }
   });
   router.post("/admin/locations", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:manage_locations"), (req, res) => {
@@ -452,7 +465,7 @@ export function createWarehouseRouter({
   });
   router.post("/admin/placements", authenticate("write:warehouse_status"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:place_packages", "warehouse:receive"]), (req, res) => {
     const currentActor = actor(res);
-    if (req.body?.override_reason && !hasWarehousePermission(currentActor, "warehouse:move_stock")) {
+    if (req.body?.override_reason && !userHasWarehousePermission(currentActor, "warehouse:move_stock")) {
       return errorResponse(res, 403, "FORBIDDEN", "Sıra atlama için warehouse:move_stock yetkisi gerekli.");
     }
     try {

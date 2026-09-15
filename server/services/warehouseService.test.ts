@@ -334,7 +334,7 @@ test("v49 mevcut email kolonu olmayan panel veritabanını güvenle yükseltir",
   legacy.close();
 });
 
-test("v54 mevcut aktif mal kabul satırlarının planlı ve rezerv raflarını silmeden snapshot eder", () => {
+test("v54-v55 mevcut aktif mal kabulü snapshot, katalog ve kullanıcı işiyle kayıpsız yükseltir", () => {
   const legacy = new Database(":memory:");
   applySchema(legacy);
   runMigrations(legacy);
@@ -353,5 +353,18 @@ test("v54 mevcut aktif mal kabul satırlarının planlı ve rezerv raflarını s
   const line = legacy.prepare("SELECT planned_location_snapshot, reserve_locations_snapshot FROM inbound_batch_lines WHERE id = 'legacy-line'").get() as any;
   assert.equal(line.planned_location_snapshot, "A3-K2-P5");
   assert.deepEqual(JSON.parse(line.reserve_locations_snapshot), ["A3-K2-P6"]);
+  legacy.prepare(`INSERT INTO warehouse_packages (
+    id, package_code, batch_id, batch_line_id, product_id, supplier_code,
+    package_number, total_packages, planned_quantity, remaining_quantity, status, claimed_by
+  ) VALUES ('legacy-package', 'PKG-LEGACY', 'legacy-batch', 'legacy-line', 'legacy-product', 'SUP-1', 1, 1, 5, 5, 'LABELED', 'legacy-user')`).run();
+  legacy.prepare("UPDATE inbound_batch_lines SET planned_location_snapshot = ' a3 - k2 - p5 '").run();
+  legacy.prepare("DELETE FROM schema_migrations WHERE version = 55").run();
+
+  runMigrations(legacy);
+
+  assert.ok(legacy.prepare("SELECT id FROM warehouse_locations WHERE code = 'A3-K2-P5'").get());
+  const activePackage = legacy.prepare("SELECT receiving_work_started_at, receiving_last_activity_at FROM warehouse_packages WHERE id = 'legacy-package'").get() as any;
+  assert.ok(activePackage.receiving_work_started_at);
+  assert.ok(activePackage.receiving_last_activity_at);
   legacy.close();
 });

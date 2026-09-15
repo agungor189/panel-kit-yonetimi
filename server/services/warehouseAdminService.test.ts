@@ -7,6 +7,8 @@ import { WarehouseAdminService } from "./warehouseAdminService.js";
 import { WarehouseService, WarehouseServiceError } from "./warehouseService.js";
 import { startPrintQueueWorker } from "./printQueueWorker.js";
 import { createServer } from "node:http";
+import express from "express";
+import { createWarehouseRouter, userHasWarehousePermission } from "../routes/warehouseRoutes.js";
 
 const actor = { id: "warehouse-user", username: "Depocu", role: "admin", permissions: {} };
 let db: Database.Database;
@@ -55,6 +57,45 @@ beforeEach(() => {
 });
 
 describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
+  test("admin session yönetebilir, yalnız receive yetkili normal kullanıcı yeni session yönetemez", () => {
+    assert.equal(userHasWarehousePermission(actor, "warehouse:manage_receiving_sessions"), true);
+    const operator = { role: "user", permissions: { "warehouse:receive": true } } as any;
+    assert.equal(userHasWarehousePermission(operator, "warehouse:receive"), true);
+    assert.equal(userHasWarehousePermission(operator, "warehouse:manage_receiving_sessions"), false);
+  });
+
+  test("session yönetimi API'de admin ile operator arasında zorunlu ayrılır", async () => {
+    db.prepare(`INSERT INTO panel_api_keys (id, name, key_prefix, key_hash, last4, permissions)
+      VALUES ('warehouse-key', 'Warehouse', 'test', 'secret', 'cret', ?)`)
+      .run(JSON.stringify(["read:warehouse_orders", "read:products", "write:warehouse_status"]));
+    db.prepare(`INSERT INTO inbound_lot_lines (
+      id, lot_number, product_id, supplier_code, package_count, units_per_package, total_units
+    ) VALUES ('permission-lot', 'LOT-PERMISSION', 'product-1', 'SUP-SKU-1', 1, 5, 5)`).run();
+    const operator = { id: "warehouse-user-2", username: "Ayşe", role: "user", permissions: { "warehouse:receive": true }, must_change_password: false };
+    const adminUser = { ...actor, must_change_password: false };
+    const app = express();
+    app.use(express.json());
+    app.use("/api/warehouse/v1", createWarehouseRouter({
+      db, hashApiKey: (value) => value, logActivity: () => {}, uploadsDir: process.cwd(),
+      authenticateUserToken: (token) => token === "admin-token" ? adminUser : token === "operator-token" ? operator : null,
+    }));
+    const http = createServer(app);
+    await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
+    const address = http.address();
+    assert.ok(address && typeof address !== "string");
+    const request = (path: string, token: string, init: RequestInit = {}) => fetch(`http://127.0.0.1:${address.port}/api/warehouse/v1${path}`, {
+      ...init, headers: { "x-api-key": "secret", authorization: `Bearer ${token}`, "content-type": "application/json", ...init.headers },
+    });
+    const denied = await request("/admin/receiving/sessions", "operator-token", { method: "POST", body: JSON.stringify({ lot_number: "LOT-PERMISSION" }) });
+    assert.equal(denied.status, 403);
+    assert.equal((await denied.json() as any).error.code, "FORBIDDEN");
+    const started = await request("/admin/receiving/sessions", "admin-token", { method: "POST", body: JSON.stringify({ lot_number: "LOT-PERMISSION" }) });
+    assert.equal(started.status, 201);
+    const visible = await request("/admin/receiving/sessions", "operator-token");
+    assert.equal(visible.status, 200);
+    assert.equal((await visible.json() as any).data.length, 1);
+    await new Promise<void>((resolve, reject) => http.close((error) => error ? reject(error) : resolve()));
+  });
   test("kuru çalıştırma veritabanına yazmadan doğrular", () => {
     const batch = service.createBatch({ supplier_code: "SUP-1" }, actor) as any;
     const preview = service.previewImport(batch.id, importRows());
@@ -194,48 +235,51 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
   });
 
   test("master rafı ve rezervler session başlangıcında snapshot edilir", () => {
-    const session = createLotSession("LOT-SNAPSHOT", 1, 5, { planned: "A3-K2-P5", reserve: ["A3-K2-P6", "A3-K2-P7"] });
+    service.createLocation({ code: " a3 - k2 - p5 ", package_capacity: 2 }, actor);
+    const session = createLotSession("LOT-SNAPSHOT", 1, 5, { planned: " a3 - k2 - p5 ", reserve: ["A3-K2-P6", "A3-K2-P7"] });
     db.prepare("UPDATE products SET warehouse_location = 'Z9' WHERE id = 'product-1'").run();
     db.prepare("DELETE FROM product_reserve_locations WHERE product_id = 'product-1'").run();
     const line = db.prepare("SELECT planned_location_snapshot, reserve_locations_snapshot FROM inbound_batch_lines WHERE batch_id = ?").get(session.id) as any;
     assert.equal(line.planned_location_snapshot, "A3-K2-P5");
     assert.deepEqual(JSON.parse(line.reserve_locations_snapshot), ["A3-K2-P6", "A3-K2-P7"]);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM warehouse_locations WHERE code IN ('A3-K2-P5','A3-K2-P6','A3-K2-P7')").get() as any).count, 3);
     assert.equal((service.getLot("LOT-SNAPSHOT") as any).lines[0].warehouse_location, "Z9");
   });
 
   test("aynı SKU başka rafta olsa da LABELED paket master planlı rafı kullanır ve yanlış rafı reddeder", () => {
-    const session = createLotSession("LOT-PLANNED", 2, 5, { planned: "A1" });
+    const session = createLotSession("LOT-PLANNED", 2, 5, { planned: "A1-K1-P1" });
     const packages = db.prepare("SELECT * FROM warehouse_packages WHERE batch_id = ? ORDER BY package_number").all(session.id) as any[];
-    const a1 = service.createLocation({ code: "A1", package_capacity: 2 }, actor) as any;
-    const b1 = service.createLocation({ code: "B1", package_capacity: 2 }, actor) as any;
+    const a1 = db.prepare("SELECT * FROM warehouse_locations WHERE code = 'A1-K1-P1'").get() as any;
+    db.prepare("UPDATE warehouse_locations SET package_capacity = 2 WHERE id = ?").run(a1.id);
+    const b1 = service.createLocation({ code: "B1-K1-P1", package_capacity: 2 }, actor) as any;
     db.prepare("UPDATE warehouse_packages SET status='PLACED', current_location_id=? WHERE id=?").run(b1.id, packages[0].id);
     db.prepare("UPDATE warehouse_packages SET status='LABELED' WHERE id=?").run(packages[1].id);
     const target = service.getReceivingLocation(packages[1].id) as any;
-    assert.equal(target.code, "A1");
+    assert.equal(target.code, "A1-K1-P1");
     assert.equal(target.using_reserve, false);
-    assert.throws(() => service.placePackage(packages[1].package_code, "B1", { idempotency_key: "wrong-master" }, actor),
+    assert.throws(() => service.placePackage(packages[1].package_code, "B1-K1-P1", { idempotency_key: "wrong-master" }, actor),
       (error: unknown) => error instanceof WarehouseServiceError && error.code === "WRONG_LOCATION");
-    assert.equal((service.placePackage(packages[1].package_code, "A1", { idempotency_key: "right-master" }, actor) as any).package.location_code, "A1");
-    assert.equal(a1.code, "A1");
+    assert.equal((service.placePackage(packages[1].package_code, "A1-K1-P1", { idempotency_key: "right-master" }, actor) as any).package.location_code, "A1-K1-P1");
+    assert.equal(a1.code, "A1-K1-P1");
   });
 
   test("planlı raf doluysa sıradaki rezervi kullanır; hepsi doluysa durur ve override korunur", () => {
-    const session = createLotSession("LOT-RESERVE", 3, 5, { planned: "A1", reserve: ["R1"] });
+    const session = createLotSession("LOT-RESERVE", 3, 5, { planned: "A1-K1-P1", reserve: ["R1-K1-P1"] });
     const packages = db.prepare("SELECT * FROM warehouse_packages WHERE batch_id = ? ORDER BY package_number").all(session.id) as any[];
-    const a1 = service.createLocation({ code: "A1", package_capacity: 1 }, actor) as any;
-    const r1 = service.createLocation({ code: "R1", package_capacity: 1 }, actor) as any;
-    service.createLocation({ code: "OVERRIDE", package_capacity: 1 }, actor);
+    const a1 = db.prepare("SELECT * FROM warehouse_locations WHERE code = 'A1-K1-P1'").get() as any;
+    const r1 = db.prepare("SELECT * FROM warehouse_locations WHERE code = 'R1-K1-P1'").get() as any;
+    service.createLocation({ code: "O1-K1-P1", package_capacity: 1 }, actor);
     db.prepare("UPDATE warehouse_packages SET status='PLACED', current_location_id=? WHERE id=?").run(a1.id, packages[0].id);
     db.prepare("UPDATE warehouse_packages SET status='LABELED' WHERE id=?").run(packages[1].id);
     const reserveTarget = service.getReceivingLocation(packages[1].id) as any;
-    assert.equal(reserveTarget.code, "R1");
+    assert.equal(reserveTarget.code, "R1-K1-P1");
     assert.equal(reserveTarget.using_reserve, true);
     db.prepare("UPDATE warehouse_packages SET status='PLACED', current_location_id=? WHERE id=?").run(r1.id, packages[1].id);
     db.prepare("UPDATE warehouse_packages SET status='LABELED' WHERE id=?").run(packages[2].id);
     assert.throws(() => service.getReceivingLocation(packages[2].id),
-      (error: unknown) => error instanceof WarehouseServiceError && error.code === "PLANNED_LOCATION_FULL" && error.message === "A1 planlanan lokasyonu dolu. Uygun rezerv lokasyon bulunamadı.");
-    const overridden = service.placePackage(packages[2].package_code, "OVERRIDE", { idempotency_key: "planned-override", override_reason: "Raflar dolu" }, actor) as any;
-    assert.equal(overridden.package.location_code, "OVERRIDE");
+      (error: unknown) => error instanceof WarehouseServiceError && error.code === "PLANNED_LOCATION_FULL" && error.message === "A1-K1-P1 planlanan lokasyonu dolu. Uygun rezerv lokasyon bulunamadı.");
+    const overridden = service.placePackage(packages[2].package_code, "O1-K1-P1", { idempotency_key: "planned-override", override_reason: "Raflar dolu" }, actor) as any;
+    assert.equal(overridden.package.location_code, "O1-K1-P1");
   });
 
   test("lot-scope claim farklı kullanıcıları farklı paketlere ayırır ve aynı paketi iki kez vermez", () => {
@@ -248,7 +292,90 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     assert.notEqual(first.id, second.id);
     assert.deepEqual([first.package_number, second.package_number], [1, 2]);
     assert.throws(() => service.claimNextPackage("SUP-SKU-1", secondActor, session.id),
-      (error: unknown) => error instanceof WarehouseServiceError && error.code === "NO_PACKAGE_AVAILABLE");
+      (error: unknown) => error instanceof WarehouseServiceError && error.code === "ACTIVE_PACKAGE_EXISTS");
+  });
+
+  test("claim kullanıcıya placement'a kadar bağlı kalır ve refresh sonrası bütün aşamalarda geri yüklenir", () => {
+    const session = createLotSession("LOT-RESTORE", 1, 5, { planned: "A2-K1-P1" });
+    const claimed = service.claimNextPackage("SUP-SKU-1", actor, session.id, "phone-a") as any;
+    assert.equal((service.getMyActiveReceivingPackage(actor) as any).id, claimed.id);
+    const freshService = new WarehouseAdminService(db, () => {});
+    assert.equal((freshService.getMyActiveReceivingPackage(actor, session.id) as any).status, "CLAIMED");
+
+    service.queuePrint(claimed.id, { claim_token: claimed.claim_token, idempotency_key: "restore-print" }, actor);
+    assert.equal((freshService.getMyActiveReceivingPackage(actor) as any).status, "LABEL_QUEUED");
+    db.prepare("UPDATE warehouse_packages SET status = 'LABELED' WHERE id = ?").run(claimed.id);
+    assert.equal((freshService.getMyActiveReceivingPackage(actor) as any).status, "LABELED");
+    const target = service.getReceivingLocation(claimed.id, actor) as any;
+    service.placePackage(claimed.package_code, target.code, { idempotency_key: "restore-place" }, actor);
+    assert.equal(service.getMyActiveReceivingPackage(actor), null);
+    const placed = db.prepare("SELECT current_location_id, receiving_location_reserved_at FROM warehouse_packages WHERE id = ?").get(claimed.id) as any;
+    assert.equal(placed.current_location_id, target.id);
+    assert.equal(placed.receiving_location_reserved_at, null);
+    const location = (service.listLocations() as any[]).find((item) => item.id === target.id);
+    assert.equal(location.occupied_packages, 1);
+    assert.equal(location.reserved_packages, 0);
+  });
+
+  test("aktif receiving işi varken aynı kullanıcı ikinci paket claim edemez", () => {
+    const session = createLotSession("LOT-ONE-WORK", 2, 5);
+    const first = service.claimNextPackage("SUP-SKU-1", actor, session.id) as any;
+    assert.throws(() => service.claimNextPackage("SUP-SKU-1", actor, session.id),
+      (error: unknown) => error instanceof WarehouseServiceError && error.code === "ACTIVE_PACKAGE_EXISTS" && error.message.includes(`${first.sku_snapshot} 1/2`));
+  });
+
+  test("iki kullanıcının benim yerleştirdiklerim geçmişi birbirinden izole kalır", () => {
+    const secondActor = { ...actor, id: "warehouse-user-2", username: "Ayşe" };
+    const session = createLotSession("LOT-MY-HISTORY", 2, 5, { planned: "A4-K1-P1" });
+    db.prepare("UPDATE warehouse_locations SET package_capacity = 2 WHERE code = 'A4-K1-P1'").run();
+    const first = service.claimNextPackage("SUP-SKU-1", actor, session.id) as any;
+    db.prepare("UPDATE warehouse_packages SET status = 'LABELED' WHERE id = ?").run(first.id);
+    service.getReceivingLocation(first.id, actor);
+    service.placePackage(first.package_code, "A4-K1-P1", { idempotency_key: "history-alper" }, actor);
+    const second = service.claimNextPackage("SUP-SKU-1", secondActor, session.id) as any;
+    db.prepare("UPDATE warehouse_packages SET status = 'LABELED' WHERE id = ?").run(second.id);
+    service.getReceivingLocation(second.id, secondActor);
+    service.placePackage(second.package_code, "A4-K1-P1", { idempotency_key: "history-ayse" }, secondActor);
+
+    assert.deepEqual((service.listMyReceivingPackages(session.id, actor) as any[]).map((pkg) => pkg.package_code), [first.package_code]);
+    const ayseHistory = service.listMyReceivingPackages(session.id, secondActor) as any[];
+    assert.deepEqual(ayseHistory.map((pkg) => pkg.package_code), [second.package_code]);
+    assert.equal(ayseHistory[0].image_url, "/api/products/product-1/image");
+    assert.equal((service.getReceivingSession(session.id) as any).lines.length, 1);
+    assert.equal((service.getReceivingSession(session.id, { includeAdminDetail: false }) as any).lines.length, 0);
+  });
+
+  test("son kapasite transaction içinde rezerve edilir ve claim reset rezervasyonu serbest bırakır", () => {
+    const secondActor = { ...actor, id: "warehouse-user-2", username: "Ayşe" };
+    const session = createLotSession("LOT-RESERVATION", 2, 5, { planned: "A5-K1-P1" });
+    const first = service.claimNextPackage("SUP-SKU-1", actor, session.id) as any;
+    const second = service.claimNextPackage("SUP-SKU-1", secondActor, session.id) as any;
+    db.prepare("UPDATE warehouse_packages SET status = 'LABELED' WHERE id IN (?, ?)").run(first.id, second.id);
+    assert.equal((service.getReceivingLocation(first.id, actor) as any).code, "A5-K1-P1");
+    assert.throws(() => service.getReceivingLocation(second.id, secondActor),
+      (error: unknown) => error instanceof WarehouseServiceError && error.code === "PLANNED_LOCATION_FULL");
+    service.releaseReceivingPackage(first.id, actor);
+    assert.equal((service.getReceivingLocation(second.id, secondActor) as any).code, "A5-K1-P1");
+  });
+
+  test("session iptali aktif iş claim ve lokasyon rezervasyonunu serbest bırakır", () => {
+    const session = createLotSession("LOT-CANCEL-RESERVATION", 1, 5, { planned: "A6-K1-P1" });
+    const claimed = service.claimNextPackage("SUP-SKU-1", actor, session.id) as any;
+    db.prepare("UPDATE warehouse_packages SET status = 'LABELED' WHERE id = ?").run(claimed.id);
+    service.getReceivingLocation(claimed.id, actor);
+    service.setReceivingState(session.id, "cancelled", actor);
+    const cancelled = db.prepare(`SELECT claimed_by, recommended_location_id, receiving_location_reserved_at
+      FROM warehouse_packages WHERE id = ?`).get(claimed.id) as any;
+    assert.equal(cancelled.claimed_by, null);
+    assert.equal(cancelled.recommended_location_id, null);
+    assert.equal(cancelled.receiving_location_reserved_at, null);
+  });
+
+  test("format dışı ve katalogda bulunmayan master rafı kör şekilde oluşturulmaz", () => {
+    assert.throws(() => createLotSession("LOT-BAD-LOCATION", 1, 5, { planned: "yanlış raf" }),
+      (error: unknown) => error instanceof WarehouseServiceError && error.code === "PLANNED_LOCATION_NOT_FOUND" && error.message.includes("Master ürün lokasyonunu kontrol edin"));
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM warehouse_locations").get() as any).count, 0);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM inbound_batches WHERE lot_number = 'LOT-BAD-LOCATION'").get() as any).count, 0);
   });
 
   test("aynı SKU farklı lotlarda karışmaz", () => {
@@ -257,10 +384,11 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
       VALUES ('lot-b', 'LOT-B', 'product-1', 'SUP-SKU-1', 1, 7, 7)`).run();
     const second = service.startReceivingSession("LOT-B", actor) as any;
     const firstPackage = service.claimNextPackage("SUP-SKU-1", actor, first.id) as any;
-    const secondPackage = service.claimNextPackage("SUP-SKU-1", actor, second.id) as any;
+    const secondPackage = service.claimNextPackage("SUP-SKU-1", { ...actor, id: "warehouse-user-2", username: "Ayşe" }, second.id) as any;
     assert.equal(firstPackage.lot_number, "LOT-A");
     assert.equal(secondPackage.lot_number, "LOT-B");
     assert.equal(secondPackage.planned_quantity, 7);
+    assert.equal((service.listReceivingSessions() as any[]).filter((item) => item.receiving_state === "active").length, 2);
   });
 
   test("önerilmeyen rafı reddeder, tekrar yerleştirmede stoğu bir kez artırır ve sessionı tamamlar", () => {
