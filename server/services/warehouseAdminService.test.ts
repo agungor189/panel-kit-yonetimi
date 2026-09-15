@@ -11,6 +11,7 @@ import { createServer } from "node:http";
 const actor = { id: "warehouse-user", username: "Depocu", role: "admin", permissions: {} };
 let db: Database.Database;
 let service: WarehouseAdminService;
+let activities: Array<{ action: string; actorId?: string }>;
 
 const importRows = (overrides: Record<string, unknown> = {}) => [{
   SKU: "SKU-1",
@@ -33,8 +34,10 @@ beforeEach(() => {
   applySchema(db);
   runMigrations(db);
   db.prepare("INSERT INTO users (id, username, password_hash, role, is_active) VALUES (?, ?, 'hash', 'admin', 1)").run(actor.id, actor.username);
+  db.prepare("INSERT INTO users (id, username, password_hash, role, is_active) VALUES ('warehouse-user-2', 'Ayşe', 'hash', 'user', 1)").run();
   db.prepare("INSERT INTO products (id, title, name, sku, supplier_code, central_stock, product_type, status) VALUES ('product-1', 'Test ürün', 'Test ürün', 'SKU-1', 'SUP-SKU-1', 0, 'simple', 'Active')").run();
-  service = new WarehouseAdminService(db, () => {}, { claimLeaseSeconds: 90 });
+  activities = [];
+  service = new WarehouseAdminService(db, (action, _entityType, _entityId, _details, actorId) => activities.push({ action, actorId }), { claimLeaseSeconds: 90 });
 });
 
 describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
@@ -137,6 +140,10 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     const replay = service.placePackage(packages[0].package_code, "A1-K1-P1", { idempotency_key: "place-1" }, actor) as any;
     assert.equal(placed.placement.id, replay.placement.id);
     assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'product-1'").get() as any).central_stock, 6);
+    assert.throws(() => service.placePackage(packages[0].package_code, "A1-K1-P1", { idempotency_key: "competing-place" }, { ...actor, id: "warehouse-user-2", username: "Ayşe" }),
+      (error: unknown) => error instanceof WarehouseServiceError && error.code === "PACKAGE_NOT_LABELED");
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM package_placements WHERE package_id = ?").get(packages[0].id) as any).count, 1);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM warehouse_package_movements WHERE package_id = ? AND movement_type = 'INBOUND'").get(packages[0].id) as any).count, 1);
     assert.throws(() => service.placePackage(packages[1].package_code, "A1-K1-P1", { idempotency_key: "place-full" }, actor),
       (error: unknown) => error instanceof WarehouseServiceError && error.code === "LOCATION_FULL");
   });
@@ -155,24 +162,38 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'product-1'").get() as any).central_stock, 4);
   });
 
-  test("paket farkındalıklı toplama 1/N sırasıyla böler, ilk paketi EMPTY ikinciyi OPEN yapar", () => {
-    const batch = createImportedBatch();
+  test("iki farklı kullanıcı audit kayıtlarında doğru kimlikle korunur", () => {
+    service.createLocation({ code: "A1", package_capacity: 1 }, actor);
+    service.createLocation({ code: "B1", package_capacity: 1 }, { ...actor, id: "warehouse-user-2", username: "Ayşe" });
+    assert.deepEqual(activities.filter((entry) => entry.action === "WAREHOUSE_LOCATION_CREATED").map((entry) => entry.actorId), [actor.id, "warehouse-user-2"]);
+  });
+
+  test("75'lik paketlerde 40 sonra 50 toplama 35+15 bölünür ve ikinci pakette 60 bırakır", () => {
+    const batch = createImportedBatch(importRows({ "Paket Sayısı": 2, "Paket İçi Adet": 75, "Toplam Adet": 150 }));
     const packages = db.prepare("SELECT * FROM warehouse_packages WHERE batch_id = ? ORDER BY package_number").all(batch.id) as any[];
     service.createLocation({ code: "A1", package_capacity: 2 }, actor);
     for (const [index, pkg] of packages.entries()) {
       db.prepare("UPDATE warehouse_packages SET status = 'LABELED' WHERE id = ?").run(pkg.id);
       service.placePackage(pkg.package_code, "A1", { idempotency_key: `place-${index}` }, actor);
     }
-    db.prepare("INSERT INTO sales (id, order_code, status, total_quantity) VALUES ('order-1', 'DS-1', 'Hazırlanıyor', 8)").run();
-    db.prepare("INSERT INTO sale_items (id, sale_id, product_id, product_name, quantity, weight) VALUES ('item-1', 'order-1', 'product-1', 'Test ürün', 8, 0)").run();
+    db.prepare("INSERT INTO sales (id, order_code, status, total_quantity) VALUES ('order-1', 'DS-1', 'Hazırlanıyor', 40)").run();
+    db.prepare("INSERT INTO sale_items (id, sale_id, product_id, product_name, quantity, weight) VALUES ('item-1', 'order-1', 'product-1', 'Test ürün', 40, 0)").run();
     const picking = new WarehouseService(db, () => {});
-    const plan = picking.buildPickPlan("order-1")!;
-    assert.deepEqual(plan.items[0].package_allocations.map((allocation: any) => allocation.pick_quantity), [6, 2]);
     picking.startPicking("order-1", actor);
     picking.verifyPick("order-1", "product-1", packages[0].package_code, actor);
-    picking.completePickItem("order-1", "product-1", 8, actor);
-    const after = db.prepare("SELECT status, remaining_quantity FROM warehouse_packages WHERE batch_id = ? ORDER BY package_number").all(batch.id) as any[];
-    assert.deepEqual(after.map((pkg) => [pkg.status, pkg.remaining_quantity]), [["EMPTY", 0], ["OPEN", 4]]);
-    assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'product-1'").get() as any).central_stock, 4);
+    picking.completePickItem("order-1", "product-1", 40, actor);
+    let after = db.prepare("SELECT status, remaining_quantity FROM warehouse_packages WHERE batch_id = ? ORDER BY package_number").all(batch.id) as any[];
+    assert.deepEqual(after.map((pkg) => [pkg.status, pkg.remaining_quantity]), [["OPEN", 35], ["PLACED", 75]]);
+
+    db.prepare("INSERT INTO sales (id, order_code, status, total_quantity) VALUES ('order-2', 'DS-2', 'Hazırlanıyor', 50)").run();
+    db.prepare("INSERT INTO sale_items (id, sale_id, product_id, product_name, quantity, weight) VALUES ('item-2', 'order-2', 'product-1', 'Test ürün', 50, 0)").run();
+    const plan = picking.buildPickPlan("order-2")!;
+    assert.deepEqual(plan.items[0].package_allocations.map((allocation: any) => allocation.pick_quantity), [35, 15]);
+    picking.startPicking("order-2", actor);
+    picking.verifyPick("order-2", "product-1", packages[0].package_code, actor);
+    picking.completePickItem("order-2", "product-1", 50, actor);
+    after = db.prepare("SELECT status, remaining_quantity FROM warehouse_packages WHERE batch_id = ? ORDER BY package_number").all(batch.id) as any[];
+    assert.deepEqual(after.map((pkg) => [pkg.status, pkg.remaining_quantity]), [["EMPTY", 0], ["OPEN", 60]]);
+    assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'product-1'").get() as any).central_stock, 60);
   });
 });
