@@ -286,6 +286,23 @@ describe("WarehouseService güvenli toplama akışı", () => {
     }).sessions.length, 0);
   });
 
+  test("iki farklı kullanıcının tamamladığı toplamaları doğru kullanıcıyla gösterir", () => {
+    seed();
+    completeCurrentPlan(alper);
+    db.prepare("INSERT INTO sales (id, order_code, status, total_quantity) VALUES (?, ?, ?, ?)")
+      .run("order-2", "DS-1043", "Hazırlanıyor", 3);
+    db.prepare("INSERT INTO sale_items (id, sale_id, product_id, product_name, quantity, weight) VALUES (?, ?, ?, ?, ?, ?)")
+      .run("item-2", "order-2", "product-1", "Test ürünü", 3, 0);
+    service.startPicking("order-2", ayse);
+    service.verifyPick("order-2", "product-1", "SKU-1", ayse);
+    service.completePickItem("order-2", "product-1", 3, ayse);
+    service.completePicking("order-2", ayse);
+
+    const sessions = service.listPickHistory({ page: 1, limit: 25 }).sessions;
+    assert.equal(sessions.find((row) => row.order_code === "DS-1042")?.completed_by.name, "Alper");
+    assert.equal(sessions.find((row) => row.order_code === "DS-1043")?.completed_by.name, "Ayşe");
+  });
+
   test("pick plan ilk sıralı ürün görselini güvenli API yolu olarak döndürür", () => {
     seed();
     const plan = service.buildPickPlan("order-1")!;
