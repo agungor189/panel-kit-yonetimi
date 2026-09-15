@@ -111,16 +111,21 @@ export class WarehouseAdminService {
   getLot(lotNumberValue: string) {
     const lotNumber = clean(lotNumberValue, 150);
     if (!lotNumber) throw new WarehouseServiceError(400, "VALIDATION_ERROR", "Parti/Lot zorunludur.");
-    const lines = this.db.prepare(`
+    const sourceLines = this.db.prepare(`
       SELECT ll.*, p.sku, p.name_tr, p.name_en, p.title, p.material, p.product_series,
-             p.model, p.form_code, p.size, p.weight_grams, p.central_stock,
+             p.model, p.form_code, p.size, p.weight_grams, p.central_stock, p.warehouse_location,
              (SELECT pi.path FROM product_images pi WHERE pi.product_id = p.id ORDER BY pi.sort_order, pi.id LIMIT 1) AS image_path
       FROM inbound_lot_lines ll
       JOIN products p ON p.id = ll.product_id
       WHERE ll.lot_number = ? COLLATE NOCASE AND COALESCE(p.status, 'Active') != 'deleted'
       ORDER BY p.sku COLLATE NOCASE
     `).all(lotNumber) as any[];
-    if (!lines.length) throw new WarehouseServiceError(404, "LOT_NOT_FOUND", "Bu parti/lot Panel master verisinde bulunamadı.");
+    if (!sourceLines.length) throw new WarehouseServiceError(404, "LOT_NOT_FOUND", "Bu parti/lot Panel master verisinde bulunamadı.");
+    const reserveStatement = this.db.prepare("SELECT location FROM product_reserve_locations WHERE product_id = ? ORDER BY sort_order, created_at, id");
+    const lines = sourceLines.map((line) => ({
+      ...line,
+      reserve_locations: (reserveStatement.all(line.product_id) as Array<{ location: string }>).map((item) => item.location),
+    }));
     return {
       lot_number: lotNumber,
       lines,
@@ -162,8 +167,9 @@ export class WarehouseAdminService {
           lot_number, expected_package_count, units_per_package, last_package_units, total_units,
           supplier_no_snapshot, name_tr_snapshot, name_en_snapshot, material_snapshot, series_snapshot,
           model_snapshot, form_snapshot, size_snapshot, unit_weight_g_snapshot,
-          package_weight_kg_snapshot, total_weight_kg_snapshot, image_path_snapshot
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          package_weight_kg_snapshot, total_weight_kg_snapshot, image_path_snapshot,
+          planned_location_snapshot, reserve_locations_snapshot
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const insertPackage = this.db.prepare(`
         INSERT INTO warehouse_packages (
@@ -181,6 +187,7 @@ export class WarehouseAdminService {
           source.supplier_code, source.name_tr, source.name_en, source.material, source.product_series,
           source.model, source.form_code, source.size, source.weight_grams || 0,
           source.package_weight_kg || 0, source.total_weight_kg || 0, source.image_path,
+          clean(source.warehouse_location, 100) || null, JSON.stringify(source.reserve_locations || []),
         );
         for (let packageNumber = 1; packageNumber <= Number(source.package_count); packageNumber += 1) {
           const quantity = packageNumber === Number(source.package_count) ? lastPackageUnits : Number(source.units_per_package);
@@ -593,6 +600,48 @@ export class WarehouseAdminService {
     return row;
   }
 
+  getReceivingLocation(packageIdValue: string) {
+    const packageId = clean(packageIdValue, 100);
+    const pkg = this.db.prepare(`
+      SELECT p.id, p.status, p.recommended_location_id, l.planned_location_snapshot,
+             l.reserve_locations_snapshot, b.lot_number
+      FROM warehouse_packages p
+      JOIN inbound_batch_lines l ON l.id = p.batch_line_id
+      JOIN inbound_batches b ON b.id = p.batch_id
+      WHERE p.id = ?
+    `).get(packageId) as any;
+    if (!pkg) throw new WarehouseServiceError(404, "PACKAGE_NOT_FOUND", "Paket bulunamadı.");
+    if (!pkg.lot_number) return this.suggestLocation(packageId);
+    if (pkg.status !== "LABELED") throw new WarehouseServiceError(409, "PACKAGE_NOT_LABELED", "Yerleştirme rafı etiket basıldıktan sonra yüklenir.");
+    const plannedCode = clean(pkg.planned_location_snapshot, 100);
+    if (!plannedCode) throw new WarehouseServiceError(409, "PLANNED_LOCATION_MISSING", "Bu ürün için master veride planlanan lokasyon bulunmuyor.");
+    let reserves: string[] = [];
+    try {
+      const parsed = JSON.parse(String(pkg.reserve_locations_snapshot || "[]"));
+      if (Array.isArray(parsed)) reserves = parsed.map((value) => clean(value, 100)).filter(Boolean);
+    } catch { reserves = []; }
+    const candidates = [plannedCode, ...reserves.filter((code) => code.toLocaleUpperCase("tr-TR") !== plannedCode.toLocaleUpperCase("tr-TR"))];
+    for (const code of candidates) {
+      const location = this.db.prepare(`
+        SELECT l.*, COUNT(p.id) AS occupied_packages,
+               l.package_capacity - COUNT(p.id) AS available_capacity
+        FROM warehouse_locations l
+        LEFT JOIN warehouse_packages p ON p.current_location_id = l.id AND p.status IN ('PLACED','OPEN')
+        WHERE l.code = ? COLLATE NOCASE AND l.active = 1
+        GROUP BY l.id
+      `).get(code) as any;
+      if (!location) {
+        if (code === plannedCode) throw new WarehouseServiceError(409, "PLANNED_LOCATION_NOT_FOUND", `${plannedCode} planlanan lokasyonu depo lokasyonlarında bulunamadı.`);
+        continue;
+      }
+      if (Number(location.available_capacity) <= 0) continue;
+      this.db.prepare("UPDATE warehouse_packages SET recommended_location_id = ?, recommended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .run(location.id, packageId);
+      return { ...location, planned_location: plannedCode, using_reserve: code.toLocaleUpperCase("tr-TR") !== plannedCode.toLocaleUpperCase("tr-TR") };
+    }
+    throw new WarehouseServiceError(409, "PLANNED_LOCATION_FULL", `${plannedCode} planlanan lokasyonu dolu. Uygun rezerv lokasyon bulunamadı.`);
+  }
+
   placePackage(packageCode: string, locationCode: string, input: Record<string, unknown>, actor: WarehouseActor) {
     const idempotencyKey = clean(input.idempotency_key, 200);
     if (!idempotencyKey) throw new WarehouseServiceError(400, "IDEMPOTENCY_KEY_REQUIRED", "idempotency_key zorunludur.");
@@ -608,6 +657,10 @@ export class WarehouseAdminService {
       const location = this.db.prepare("SELECT * FROM warehouse_locations WHERE code = ? COLLATE NOCASE AND active = 1").get(clean(locationCode, 100)) as any;
       if (!location) throw new WarehouseServiceError(404, "LOCATION_NOT_FOUND", "Aktif lokasyon bulunamadı.");
       if (pkg.status !== "LABELED") throw new WarehouseServiceError(409, "PACKAGE_NOT_LABELED", "Yerleştirmeden önce paket etiketi başarıyla basılmalıdır.");
+      if (!pkg.recommended_location_id && !clean(input.override_reason, 1000)) {
+        const session = this.db.prepare("SELECT lot_number FROM inbound_batches WHERE id = ?").get(pkg.batch_id) as any;
+        if (session?.lot_number) pkg.recommended_location_id = (this.getReceivingLocation(pkg.id) as any).id;
+      }
       const overrideReason = clean(input.override_reason, 1000);
       if (pkg.recommended_location_id && pkg.recommended_location_id !== location.id && !overrideReason) {
         const recommended = this.db.prepare("SELECT code FROM warehouse_locations WHERE id = ?").get(pkg.recommended_location_id) as any;

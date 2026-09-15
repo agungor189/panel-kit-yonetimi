@@ -333,3 +333,25 @@ test("v49 mevcut email kolonu olmayan panel veritabanını güvenle yükseltir",
   assert.equal((legacy.prepare("SELECT COUNT(*) AS count FROM users").get() as { count: number }).count, 1);
   legacy.close();
 });
+
+test("v54 mevcut aktif mal kabul satırlarının planlı ve rezerv raflarını silmeden snapshot eder", () => {
+  const legacy = new Database(":memory:");
+  applySchema(legacy);
+  runMigrations(legacy);
+  legacy.prepare("INSERT INTO users (id, username, password_hash) VALUES ('legacy-user', 'Legacy', 'hash')").run();
+  legacy.prepare("INSERT INTO products (id, title, sku, warehouse_location) VALUES ('legacy-product', 'Legacy ürün', 'LEG-1', 'A3-K2-P5')").run();
+  legacy.prepare("INSERT INTO product_reserve_locations (id, product_id, location, sort_order) VALUES ('legacy-reserve', 'legacy-product', 'A3-K2-P6', 0)").run();
+  legacy.prepare("INSERT INTO inbound_batches (id, batch_number, supplier_code, created_by) VALUES ('legacy-batch', 'LEGACY-BATCH', 'SUP-1', 'legacy-user')").run();
+  legacy.prepare(`INSERT INTO inbound_batch_lines (
+    id, batch_id, line_number, supplier_code, product_id, sku_snapshot, product_name_snapshot,
+    expected_package_count, units_per_package, last_package_units, total_units
+  ) VALUES ('legacy-line', 'legacy-batch', 1, 'SUP-1', 'legacy-product', 'LEG-1', 'Legacy ürün', 1, 5, 5, 5)`).run();
+  legacy.prepare("DELETE FROM schema_migrations WHERE version = 54").run();
+
+  runMigrations(legacy);
+
+  const line = legacy.prepare("SELECT planned_location_snapshot, reserve_locations_snapshot FROM inbound_batch_lines WHERE id = 'legacy-line'").get() as any;
+  assert.equal(line.planned_location_snapshot, "A3-K2-P5");
+  assert.deepEqual(JSON.parse(line.reserve_locations_snapshot), ["A3-K2-P6"]);
+  legacy.close();
+});

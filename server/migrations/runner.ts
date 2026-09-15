@@ -2069,6 +2069,51 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 54,
+    name: "snapshot_receiving_planned_locations",
+    up(db) {
+      const lineColumns = new Set(
+        (db.prepare("PRAGMA table_info(inbound_batch_lines)").all() as { name: string }[]).map((column) => column.name),
+      );
+      if (!lineColumns.has("planned_location_snapshot")) {
+        db.exec("ALTER TABLE inbound_batch_lines ADD COLUMN planned_location_snapshot TEXT COLLATE NOCASE");
+      }
+      if (!lineColumns.has("reserve_locations_snapshot")) {
+        db.exec("ALTER TABLE inbound_batch_lines ADD COLUMN reserve_locations_snapshot TEXT");
+      }
+      const productColumns = new Set(
+        (db.prepare("PRAGMA table_info(products)").all() as { name: string }[]).map((column) => column.name),
+      );
+      const plannedLocationColumn = productColumns.has("warehouse_location") ? "p.warehouse_location" : "NULL";
+      const existingLines = db.prepare(`
+        SELECT l.id, l.product_id, ${plannedLocationColumn} AS warehouse_location
+        FROM inbound_batch_lines l
+        LEFT JOIN products p ON p.id = l.product_id
+        WHERE l.planned_location_snapshot IS NULL
+          AND l.reserve_locations_snapshot IS NULL
+      `).all() as Array<{ id: string; product_id: string; warehouse_location: string | null }>;
+      const reserves = db.prepare(`
+        SELECT location
+        FROM product_reserve_locations
+        WHERE product_id = ?
+        ORDER BY sort_order, created_at, id
+      `);
+      const snapshot = db.prepare(`
+        UPDATE inbound_batch_lines
+        SET planned_location_snapshot = ?, reserve_locations_snapshot = ?
+        WHERE id = ?
+      `);
+      for (const line of existingLines) {
+        const reserveLocations = (reserves.all(line.product_id) as Array<{ location: string }>).map(({ location }) => location);
+        snapshot.run(line.warehouse_location || null, JSON.stringify(reserveLocations), line.id);
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_inbound_lines_planned_location
+          ON inbound_batch_lines(planned_location_snapshot);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

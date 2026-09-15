@@ -442,6 +442,10 @@ export function createWarehouseRouter({
     try { res.json({ success: true, data: adminService.suggestLocation(queryText(req.query.package_id, 100)) }); }
     catch (error) { return handleServiceError(res, error); }
   });
+  router.get("/admin/packages/:id/receiving-location", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (req, res) => {
+    try { res.json({ success: true, data: adminService.getReceivingLocation(req.params.id) }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
   router.post("/admin/locations", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:manage_locations"), (req, res) => {
     try { res.status(201).json({ success: true, data: adminService.createLocation(req.body || {}, actor(res)) }); }
     catch (error) { return handleServiceError(res, error); }

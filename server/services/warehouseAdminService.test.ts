@@ -28,7 +28,13 @@ const createImportedBatch = (rows = importRows()) => {
   return service.applyImport(batch.id, rows, preview.preview_hash, actor) as any;
 };
 
-const createLotSession = (lotNumber = "LOT-SESSION", packageCount = 4, unitsPerPackage = 5) => {
+const createLotSession = (lotNumber = "LOT-SESSION", packageCount = 4, unitsPerPackage = 5, locations?: { planned?: string; reserve?: string[] }) => {
+  db.prepare("UPDATE products SET warehouse_location = ? WHERE id = 'product-1'").run(locations?.planned || null);
+  db.prepare("DELETE FROM product_reserve_locations WHERE product_id = 'product-1'").run();
+  for (const [index, location] of (locations?.reserve || []).entries()) {
+    db.prepare("INSERT INTO product_reserve_locations (id, product_id, location, sort_order) VALUES (?, 'product-1', ?, ?)")
+      .run(`reserve-${lotNumber}-${index}`, location, index);
+  }
   db.prepare(`INSERT INTO inbound_lot_lines (
     id, lot_number, product_id, supplier_code, package_count, units_per_package, total_units, package_weight_kg, total_weight_kg
   ) VALUES (?, ?, 'product-1', 'SUP-SKU-1', ?, ?, ?, 2.5, ?)`)
@@ -185,6 +191,51 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     assert.equal(resumed.resumed, true);
     const freshService = new WarehouseAdminService(db, () => {});
     assert.equal((freshService.listReceivingSessions() as any[])[0].id, session.id);
+  });
+
+  test("master rafı ve rezervler session başlangıcında snapshot edilir", () => {
+    const session = createLotSession("LOT-SNAPSHOT", 1, 5, { planned: "A3-K2-P5", reserve: ["A3-K2-P6", "A3-K2-P7"] });
+    db.prepare("UPDATE products SET warehouse_location = 'Z9' WHERE id = 'product-1'").run();
+    db.prepare("DELETE FROM product_reserve_locations WHERE product_id = 'product-1'").run();
+    const line = db.prepare("SELECT planned_location_snapshot, reserve_locations_snapshot FROM inbound_batch_lines WHERE batch_id = ?").get(session.id) as any;
+    assert.equal(line.planned_location_snapshot, "A3-K2-P5");
+    assert.deepEqual(JSON.parse(line.reserve_locations_snapshot), ["A3-K2-P6", "A3-K2-P7"]);
+    assert.equal((service.getLot("LOT-SNAPSHOT") as any).lines[0].warehouse_location, "Z9");
+  });
+
+  test("aynı SKU başka rafta olsa da LABELED paket master planlı rafı kullanır ve yanlış rafı reddeder", () => {
+    const session = createLotSession("LOT-PLANNED", 2, 5, { planned: "A1" });
+    const packages = db.prepare("SELECT * FROM warehouse_packages WHERE batch_id = ? ORDER BY package_number").all(session.id) as any[];
+    const a1 = service.createLocation({ code: "A1", package_capacity: 2 }, actor) as any;
+    const b1 = service.createLocation({ code: "B1", package_capacity: 2 }, actor) as any;
+    db.prepare("UPDATE warehouse_packages SET status='PLACED', current_location_id=? WHERE id=?").run(b1.id, packages[0].id);
+    db.prepare("UPDATE warehouse_packages SET status='LABELED' WHERE id=?").run(packages[1].id);
+    const target = service.getReceivingLocation(packages[1].id) as any;
+    assert.equal(target.code, "A1");
+    assert.equal(target.using_reserve, false);
+    assert.throws(() => service.placePackage(packages[1].package_code, "B1", { idempotency_key: "wrong-master" }, actor),
+      (error: unknown) => error instanceof WarehouseServiceError && error.code === "WRONG_LOCATION");
+    assert.equal((service.placePackage(packages[1].package_code, "A1", { idempotency_key: "right-master" }, actor) as any).package.location_code, "A1");
+    assert.equal(a1.code, "A1");
+  });
+
+  test("planlı raf doluysa sıradaki rezervi kullanır; hepsi doluysa durur ve override korunur", () => {
+    const session = createLotSession("LOT-RESERVE", 3, 5, { planned: "A1", reserve: ["R1"] });
+    const packages = db.prepare("SELECT * FROM warehouse_packages WHERE batch_id = ? ORDER BY package_number").all(session.id) as any[];
+    const a1 = service.createLocation({ code: "A1", package_capacity: 1 }, actor) as any;
+    const r1 = service.createLocation({ code: "R1", package_capacity: 1 }, actor) as any;
+    service.createLocation({ code: "OVERRIDE", package_capacity: 1 }, actor);
+    db.prepare("UPDATE warehouse_packages SET status='PLACED', current_location_id=? WHERE id=?").run(a1.id, packages[0].id);
+    db.prepare("UPDATE warehouse_packages SET status='LABELED' WHERE id=?").run(packages[1].id);
+    const reserveTarget = service.getReceivingLocation(packages[1].id) as any;
+    assert.equal(reserveTarget.code, "R1");
+    assert.equal(reserveTarget.using_reserve, true);
+    db.prepare("UPDATE warehouse_packages SET status='PLACED', current_location_id=? WHERE id=?").run(r1.id, packages[1].id);
+    db.prepare("UPDATE warehouse_packages SET status='LABELED' WHERE id=?").run(packages[2].id);
+    assert.throws(() => service.getReceivingLocation(packages[2].id),
+      (error: unknown) => error instanceof WarehouseServiceError && error.code === "PLANNED_LOCATION_FULL" && error.message === "A1 planlanan lokasyonu dolu. Uygun rezerv lokasyon bulunamadı.");
+    const overridden = service.placePackage(packages[2].package_code, "OVERRIDE", { idempotency_key: "planned-override", override_reason: "Raflar dolu" }, actor) as any;
+    assert.equal(overridden.package.location_code, "OVERRIDE");
   });
 
   test("lot-scope claim farklı kullanıcıları farklı paketlere ayırır ve aynı paketi iki kez vermez", () => {
