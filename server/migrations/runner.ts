@@ -1666,6 +1666,116 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 51,
+    name: "add_pick_history_and_packaging_foundation",
+    up(db) {
+      const productColumns = new Set(
+        (db.prepare("PRAGMA table_info(products)").all() as { name: string }[]).map((column) => column.name),
+      );
+      if (!productColumns.has("length_mm")) db.exec("ALTER TABLE products ADD COLUMN length_mm REAL");
+      if (!productColumns.has("width_mm")) db.exec("ALTER TABLE products ADD COLUMN width_mm REAL");
+      if (!productColumns.has("height_mm")) db.exec("ALTER TABLE products ADD COLUMN height_mm REAL");
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS pick_sessions (
+          id TEXT PRIMARY KEY,
+          pick_number TEXT NOT NULL UNIQUE,
+          order_id TEXT NOT NULL UNIQUE,
+          order_code_snapshot TEXT,
+          external_order_id_snapshot TEXT,
+          status TEXT NOT NULL DEFAULT 'PICKED'
+            CHECK(status IN ('WAITING', 'PICKING', 'PICKED', 'PACKING', 'PACKED', 'SHIPPED', 'CANCELLED')),
+          started_by_user_id TEXT NOT NULL,
+          started_by_name_snapshot TEXT NOT NULL,
+          completed_by_user_id TEXT NOT NULL,
+          completed_by_name_snapshot TEXT NOT NULL,
+          started_at DATETIME NOT NULL,
+          completed_at DATETIME NOT NULL,
+          total_product_types INTEGER NOT NULL DEFAULT 0,
+          total_sale_product_quantity REAL NOT NULL DEFAULT 0,
+          total_physical_item_quantity REAL NOT NULL DEFAULT 0,
+          total_net_weight_g REAL NOT NULL DEFAULT 0,
+          note TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(order_id) REFERENCES sales(id) ON DELETE RESTRICT,
+          FOREIGN KEY(started_by_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+          FOREIGN KEY(completed_by_user_id) REFERENCES users(id) ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS pick_session_items (
+          id TEXT PRIMARY KEY,
+          pick_session_id TEXT NOT NULL,
+          sale_item_id TEXT,
+          product_id TEXT,
+          sku_snapshot TEXT NOT NULL,
+          product_name_snapshot TEXT NOT NULL,
+          product_type_snapshot TEXT NOT NULL,
+          ordered_quantity REAL NOT NULL,
+          picked_quantity REAL NOT NULL,
+          unit_weight_g_snapshot REAL NOT NULL DEFAULT 0,
+          total_weight_g REAL NOT NULL DEFAULT 0,
+          total_component_quantity REAL NOT NULL DEFAULT 0,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(pick_session_id) REFERENCES pick_sessions(id) ON DELETE RESTRICT,
+          FOREIGN KEY(sale_item_id) REFERENCES sale_items(id) ON DELETE SET NULL,
+          FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS pick_session_components (
+          id TEXT PRIMARY KEY,
+          pick_session_item_id TEXT NOT NULL,
+          component_product_id TEXT,
+          component_sku_snapshot TEXT NOT NULL,
+          component_name_snapshot TEXT NOT NULL,
+          quantity_per_product REAL NOT NULL,
+          picked_product_quantity REAL NOT NULL,
+          total_component_quantity REAL NOT NULL,
+          unit_weight_g_snapshot REAL NOT NULL DEFAULT 0,
+          total_weight_g REAL NOT NULL DEFAULT 0,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(pick_session_item_id) REFERENCES pick_session_items(id) ON DELETE RESTRICT,
+          FOREIGN KEY(component_product_id) REFERENCES products(id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_pick_sessions_completed ON pick_sessions(completed_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_pick_sessions_picker ON pick_sessions(completed_by_user_id, completed_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_pick_session_items_session ON pick_session_items(pick_session_id);
+        CREATE INDEX IF NOT EXISTS idx_pick_session_items_search ON pick_session_items(sku_snapshot, product_name_snapshot);
+        CREATE INDEX IF NOT EXISTS idx_pick_session_components_item ON pick_session_components(pick_session_item_id);
+
+        CREATE TABLE IF NOT EXISTS packaging_types (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          type TEXT NOT NULL,
+          inner_length_mm REAL,
+          inner_width_mm REAL,
+          inner_height_mm REAL,
+          outer_length_mm REAL,
+          outer_width_mm REAL,
+          outer_height_mm REAL,
+          empty_weight_g REAL DEFAULT 0,
+          max_weight_g REAL,
+          cost REAL DEFAULT 0,
+          active INTEGER DEFAULT 1,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS shipping_volume_rules (
+          id TEXT PRIMARY KEY,
+          carrier_code TEXT NOT NULL,
+          service_code TEXT,
+          divisor_cm3 REAL NOT NULL CHECK(divisor_cm3 > 0),
+          active INTEGER DEFAULT 1,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(carrier_code, service_code)
+        );
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

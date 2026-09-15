@@ -157,6 +157,16 @@ export function createWarehouseRouter({
     throw error;
   };
 
+  const queryText = (value: unknown, maxLength = 120) => {
+    const source = Array.isArray(value) ? value[0] : value;
+    return typeof source === "string" ? source.trim().slice(0, maxLength) : "";
+  };
+
+  const queryDate = (value: unknown) => {
+    const source = queryText(value, 40);
+    return source && Number.isFinite(new Date(source).getTime()) ? source : undefined;
+  };
+
   router.get("/orders", authenticate("read:warehouse_orders"), (req, res) => {
     const page = Math.max(1, Math.trunc(Number(req.query.page)) || 1);
     const limit = Math.min(100, Math.max(1, Math.trunc(Number(req.query.limit)) || 25));
@@ -164,6 +174,51 @@ export function createWarehouseRouter({
     auditRead(req);
     res.json({ success: true, data: result.orders, pagination: result.pagination });
   });
+
+  router.get(
+    "/pick-history",
+    authenticate("read:warehouse_orders"),
+    requireWarehouseUser,
+    (req, res) => {
+      const page = Math.max(1, Math.trunc(Number(req.query.page)) || 1);
+      const limit = Math.min(100, Math.max(1, Math.trunc(Number(req.query.limit)) || 25));
+      const allowedStatuses = new Set(["WAITING", "PICKING", "PICKED", "PACKING", "PACKED", "SHIPPED", "CANCELLED"]);
+      const requestedStatus = queryText(req.query.status, 20).toUpperCase();
+      const result = service.listPickHistory({
+        page,
+        limit,
+        dateFrom: queryDate(req.query.date_from),
+        dateTo: queryDate(req.query.date_to),
+        summaryFrom: queryDate(req.query.summary_from),
+        summaryTo: queryDate(req.query.summary_to),
+        pickerUserId: queryText(req.query.picker_user_id, 80) || undefined,
+        sku: queryText(req.query.sku) || undefined,
+        productName: queryText(req.query.product_name) || undefined,
+        orderNumber: queryText(req.query.order_number) || undefined,
+        status: allowedStatuses.has(requestedStatus) ? requestedStatus : undefined,
+      });
+      auditRead(req);
+      res.json({
+        success: true,
+        data: result.sessions,
+        pagination: result.pagination,
+        summary: result.today_summary,
+        filters: { users: result.users },
+      });
+    },
+  );
+
+  router.get(
+    "/pick-history/:id",
+    authenticate("read:warehouse_orders"),
+    requireWarehouseUser,
+    (req, res) => {
+      const history = service.getPickHistory(req.params.id);
+      if (!history) return errorResponse(res, 404, "PICK_SESSION_NOT_FOUND", "Toplama kaydı bulunamadı.");
+      auditRead(req);
+      res.json({ success: true, data: history });
+    },
+  );
 
   router.get("/orders/:id", authenticate("read:warehouse_orders"), (req, res) => {
     const order = service.getOrder(req.params.id);
@@ -258,8 +313,9 @@ export function createWarehouseRouter({
   );
 
   router.post("/orders/:id/complete", authenticate("write:warehouse_status"), requireWarehouseUser, (req, res) => {
+    const note = typeof req.body?.note === "string" ? req.body.note.trim().slice(0, 2000) : null;
     try {
-      const result = service.completePicking(req.params.id, res.locals.warehouseUser);
+      const result = service.completePicking(req.params.id, res.locals.warehouseUser, note);
       res.json({ success: true, data: result.order, idempotent: result.idempotent });
     } catch (error) {
       return handleServiceError(res, error);

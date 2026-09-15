@@ -4,6 +4,10 @@
 
 **Stack:** React 19 + TypeScript (Vite) / Express + SQLite (better-sqlite3) / JWT Auth
 
+Toplama tamamlandığında `pick_sessions`, `pick_session_items` ve `pick_session_components` tablolarına satış ürünü ile BOM snapshot'ı tek transaction içinde yazılır. `sales.id` başına unique session, tekrar gelen tamamlamaları idempotent yapar. Warehouse API'deki `GET /api/warehouse/v1/pick-history` ve `GET /api/warehouse/v1/pick-history/:id` rotaları kalıcı kayıtları filtreli/özetli olarak sunar; silme rotası yoktur.
+
+Paketleme için ürünlerde ölçü kolonları, boş `packaging_types` kataloğu ve taşıyıcı bazlı `shipping_volume_rules.divisor_cm3` yapılandırması hazırdır. Bu aşamada koli seed'i, desi hesabı veya paket öneri motoru çalıştırılmaz.
+
 ---
 
 ## Hızlı Başlangıç

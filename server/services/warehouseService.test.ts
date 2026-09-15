@@ -23,7 +23,8 @@ const createSchema = () => db.exec(`
   );
   CREATE TABLE products (
     id TEXT PRIMARY KEY, sku TEXT, barcode TEXT, name TEXT, title TEXT,
-    warehouse_location TEXT, central_stock REAL, product_type TEXT, status TEXT
+    warehouse_location TEXT, central_stock REAL, product_type TEXT, status TEXT,
+    weight REAL DEFAULT 0, weight_grams REAL DEFAULT 0
   );
   CREATE TABLE sale_items (
     id TEXT PRIMARY KEY, sale_id TEXT, product_id TEXT, product_name TEXT,
@@ -43,9 +44,36 @@ const createSchema = () => db.exec(`
     created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (order_id, product_id)
   );
+  CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT);
+  CREATE TABLE pick_sessions (
+    id TEXT PRIMARY KEY, pick_number TEXT NOT NULL UNIQUE, order_id TEXT NOT NULL UNIQUE,
+    order_code_snapshot TEXT, external_order_id_snapshot TEXT, status TEXT NOT NULL,
+    started_by_user_id TEXT NOT NULL, started_by_name_snapshot TEXT NOT NULL,
+    completed_by_user_id TEXT NOT NULL, completed_by_name_snapshot TEXT NOT NULL,
+    started_at TEXT NOT NULL, completed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    total_product_types INTEGER NOT NULL DEFAULT 0, total_sale_product_quantity REAL NOT NULL DEFAULT 0,
+    total_physical_item_quantity REAL NOT NULL DEFAULT 0, total_net_weight_g REAL NOT NULL DEFAULT 0,
+    note TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE pick_session_items (
+    id TEXT PRIMARY KEY, pick_session_id TEXT NOT NULL, sale_item_id TEXT, product_id TEXT,
+    sku_snapshot TEXT NOT NULL, product_name_snapshot TEXT NOT NULL, product_type_snapshot TEXT NOT NULL,
+    ordered_quantity REAL NOT NULL, picked_quantity REAL NOT NULL,
+    unit_weight_g_snapshot REAL NOT NULL DEFAULT 0, total_weight_g REAL NOT NULL DEFAULT 0,
+    total_component_quantity REAL NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE pick_session_components (
+    id TEXT PRIMARY KEY, pick_session_item_id TEXT NOT NULL, component_product_id TEXT,
+    component_sku_snapshot TEXT NOT NULL, component_name_snapshot TEXT NOT NULL,
+    quantity_per_product REAL NOT NULL, picked_product_quantity REAL NOT NULL,
+    total_component_quantity REAL NOT NULL, unit_weight_g_snapshot REAL NOT NULL DEFAULT 0,
+    total_weight_g REAL NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 const seed = (stock = 20) => {
+  db.prepare("INSERT OR IGNORE INTO users (id, username) VALUES (?, ?), (?, ?)")
+    .run(alper.id, alper.username, ayse.id, ayse.username);
   db.prepare("INSERT INTO sales (id, order_code, status, total_quantity) VALUES (?, ?, ?, ?)")
     .run("order-1", "DS-1042", "Hazırlanıyor", 12);
   db.prepare("INSERT INTO products (id, sku, barcode, name, title, warehouse_location, central_stock, product_type, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
@@ -56,6 +84,16 @@ const seed = (stock = 20) => {
     .run("image-2", "product-1", "/uploads/second.jpg", 2);
   db.prepare("INSERT INTO product_images (id, product_id, path, sort_order) VALUES (?, ?, ?, ?)")
     .run("image-1", "product-1", "/uploads/first.jpg", 1);
+};
+
+const completeCurrentPlan = (picker = alper) => {
+  service.startPicking("order-1", picker);
+  const plan = service.buildPickPlan("order-1")!;
+  for (const item of plan.items) {
+    service.verifyPick("order-1", item.product_id, item.sku, picker);
+    service.completePickItem("order-1", item.product_id, item.required_quantity, picker);
+  }
+  return service.completePicking("order-1", picker);
 };
 
 const expectServiceError = (fn: () => unknown, code: string, statusCode = 409) => {
@@ -172,6 +210,82 @@ describe("WarehouseService güvenli toplama akışı", () => {
     ]);
   });
 
+  test("normal ürün toplaması kalıcı geçmiş, parça adedi ve gram ağırlığı üretir", () => {
+    seed();
+    db.prepare("UPDATE sale_items SET quantity = 5 WHERE id = 'item-1'").run();
+    db.prepare("UPDATE products SET weight_grams = 850 WHERE id = 'product-1'").run();
+    completeCurrentPlan();
+
+    const history = service.listPickHistory({ page: 1, limit: 25 });
+    assert.equal(history.sessions.length, 1);
+    assert.equal(history.sessions[0].total_sale_product_quantity, 5);
+    assert.equal(history.sessions[0].total_physical_item_quantity, 5);
+    assert.equal(history.sessions[0].total_net_weight_g, 4250);
+    const detail = service.getPickHistory(history.sessions[0].id)!;
+    assert.equal(detail.items[0].picked_quantity, 5);
+    assert.equal(detail.items[0].components[0].total_component_quantity, 5);
+  });
+
+  test("iki kit BOM üzerinden 18 fiziksel parça ve doğru ağırlık snapshot'ı üretir", () => {
+    seed();
+    db.prepare("DELETE FROM sale_items WHERE id = 'item-1'").run();
+    db.prepare("INSERT INTO products (id, sku, name, title, warehouse_location, central_stock, product_type, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run("kit-1", "KIT-001", "Kit", "Test kit", "K1", 10, "assembly", "Active");
+    const insertProduct = db.prepare("INSERT INTO products (id, sku, name, title, warehouse_location, central_stock, product_type, status, weight_grams) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    insertProduct.run("elb", "ELB", "Dirsek", "Dirsek", "A1", 100, "component", "Active", 320);
+    insertProduct.run("tee", "TEE", "T parça", "T parça", "A2", 100, "component", "Active", 410);
+    insertProduct.run("profile", "PROFILE", "Profil", "Profil", "A3", 100, "component", "Active", 900);
+    db.prepare("INSERT INTO sale_items (id, sale_id, product_id, product_name, quantity, weight) VALUES (?, ?, ?, ?, ?, ?)")
+      .run("kit-item", "order-1", "kit-1", "Test kit", 2, 0);
+    const insertBom = db.prepare("INSERT INTO product_bom (parent_product_id, component_product_id, quantity_per_unit) VALUES (?, ?, ?)");
+    insertBom.run("kit-1", "elb", 4);
+    insertBom.run("kit-1", "tee", 2);
+    insertBom.run("kit-1", "profile", 3);
+
+    completeCurrentPlan();
+    const session = service.listPickHistory({ page: 1, limit: 25 }).sessions[0];
+    assert.equal(session.total_sale_product_quantity, 2);
+    assert.equal(session.total_physical_item_quantity, 18);
+    assert.equal(session.total_net_weight_g, 9600);
+  });
+
+  test("BOM değişikliği tamamlanmış toplamanın component snapshot'ını değiştirmez", () => {
+    seed();
+    db.prepare("UPDATE products SET product_type = 'assembly' WHERE id = 'product-1'").run();
+    db.prepare("INSERT INTO products (id, sku, name, title, warehouse_location, central_stock, product_type, status, weight_grams) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run("component-1", "CMP-1", "Parça", "Snapshot parçası", "B1", 100, "component", "Active", 100);
+    db.prepare("INSERT INTO product_bom (parent_product_id, component_product_id, quantity_per_unit) VALUES (?, ?, ?)")
+      .run("product-1", "component-1", 4);
+    db.prepare("UPDATE sale_items SET quantity = 2 WHERE id = 'item-1'").run();
+    completeCurrentPlan();
+    const sessionId = service.listPickHistory({ page: 1, limit: 25 }).sessions[0].id;
+
+    db.prepare("UPDATE product_bom SET quantity_per_unit = 6 WHERE parent_product_id = 'product-1'").run();
+    const detail = service.getPickHistory(sessionId)!;
+    assert.equal(detail.items[0].components[0].quantity_per_product, 4);
+    assert.equal(detail.items[0].components[0].total_component_quantity, 8);
+  });
+
+  test("aynı siparişi ikinci kez tamamlama duplicate geçmiş üretmez", () => {
+    seed();
+    completeCurrentPlan();
+    const duplicate = service.completePicking("order-1", alper);
+    assert.equal(duplicate.idempotent, true);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM pick_sessions").get() as { count: number }).count, 1);
+  });
+
+  test("geçmiş tarih aralığı ve kullanıcı filtresini uygular", () => {
+    seed();
+    completeCurrentPlan();
+    db.prepare("UPDATE pick_sessions SET completed_at = '2026-09-14 12:00:00'").run();
+    assert.equal(service.listPickHistory({
+      page: 1, limit: 25, dateFrom: "2026-09-14T00:00:00Z", dateTo: "2026-09-15T00:00:00Z", pickerUserId: alper.id,
+    }).sessions.length, 1);
+    assert.equal(service.listPickHistory({
+      page: 1, limit: 25, dateFrom: "2026-09-15T00:00:00Z", dateTo: "2026-09-16T00:00:00Z",
+    }).sessions.length, 0);
+  });
+
   test("pick plan ilk sıralı ürün görselini güvenli API yolu olarak döndürür", () => {
     seed();
     const plan = service.buildPickPlan("order-1")!;
@@ -195,7 +309,10 @@ test("v49 mevcut email kolonu olmayan panel veritabanını güvenle yükseltir",
   const saleColumns = legacy.prepare("PRAGMA table_info(sales)").all() as Array<{ name: string }>;
   assert.ok(userColumns.some(({ name }) => name === "email"));
   assert.ok(saleColumns.some(({ name }) => name === "warehouse_picker_user_id"));
+  assert.ok((legacy.prepare("PRAGMA table_info(products)").all() as Array<{ name: string }>).some(({ name }) => name === "length_mm"));
   assert.ok(legacy.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'warehouse_pick_progress'").get());
+  assert.ok(legacy.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pick_sessions'").get());
+  assert.ok(legacy.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'packaging_types'").get());
   assert.equal((legacy.prepare("SELECT COUNT(*) AS count FROM users").get() as { count: number }).count, 1);
   legacy.close();
 });
