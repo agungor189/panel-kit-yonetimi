@@ -368,3 +368,23 @@ test("v54-v55 mevcut aktif mal kabulü snapshot, katalog ve kullanıcı işiyle 
   assert.ok(activePackage.receiving_last_activity_at);
   legacy.close();
 });
+
+test("v56 yalnız otomatik senkronize edilmiş kapasitesi 1 olan rafları 4'e yükseltir", () => {
+  const legacy = new Database(":memory:");
+  applySchema(legacy);
+  runMigrations(legacy);
+  legacy.prepare(`INSERT INTO warehouse_locations (id, code, package_capacity, notes)
+    VALUES ('auto-location', 'A8-K1-P1', 1, 'Mal Kabul V2 master lokasyon senkronizasyonu')`).run();
+  legacy.prepare(`INSERT INTO warehouse_locations (id, code, package_capacity, notes)
+    VALUES ('manual-location', 'A8-K1-P2', 1, 'Kullanıcı tarafından tanımlandı')`).run();
+  legacy.prepare(`INSERT INTO warehouse_locations (id, code, package_capacity, notes)
+    VALUES ('customized-auto-location', 'A8-K1-P3', 2, 'Mal Kabul V2 master lokasyon senkronizasyonu')`).run();
+  legacy.prepare("DELETE FROM schema_migrations WHERE version = 56").run();
+
+  runMigrations(legacy);
+
+  assert.equal((legacy.prepare("SELECT package_capacity FROM warehouse_locations WHERE id = 'auto-location'").get() as any).package_capacity, 4);
+  assert.equal((legacy.prepare("SELECT package_capacity FROM warehouse_locations WHERE id = 'manual-location'").get() as any).package_capacity, 1);
+  assert.equal((legacy.prepare("SELECT package_capacity FROM warehouse_locations WHERE id = 'customized-auto-location'").get() as any).package_capacity, 2);
+  legacy.close();
+});

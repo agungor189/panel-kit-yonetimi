@@ -243,6 +243,8 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     assert.equal(line.planned_location_snapshot, "A3-K2-P5");
     assert.deepEqual(JSON.parse(line.reserve_locations_snapshot), ["A3-K2-P6", "A3-K2-P7"]);
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM warehouse_locations WHERE code IN ('A3-K2-P5','A3-K2-P6','A3-K2-P7')").get() as any).count, 3);
+    assert.equal((db.prepare("SELECT package_capacity FROM warehouse_locations WHERE code = 'A3-K2-P5'").get() as any).package_capacity, 2);
+    assert.equal((db.prepare("SELECT package_capacity FROM warehouse_locations WHERE code = 'A3-K2-P6'").get() as any).package_capacity, 4);
     assert.equal((service.getLot("LOT-SNAPSHOT") as any).lines[0].warehouse_location, "Z9");
   });
 
@@ -268,6 +270,7 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     const packages = db.prepare("SELECT * FROM warehouse_packages WHERE batch_id = ? ORDER BY package_number").all(session.id) as any[];
     const a1 = db.prepare("SELECT * FROM warehouse_locations WHERE code = 'A1-K1-P1'").get() as any;
     const r1 = db.prepare("SELECT * FROM warehouse_locations WHERE code = 'R1-K1-P1'").get() as any;
+    db.prepare("UPDATE warehouse_locations SET package_capacity = 1 WHERE id IN (?, ?)").run(a1.id, r1.id);
     service.createLocation({ code: "O1-K1-P1", package_capacity: 1 }, actor);
     db.prepare("UPDATE warehouse_packages SET status='PLACED', current_location_id=? WHERE id=?").run(a1.id, packages[0].id);
     db.prepare("UPDATE warehouse_packages SET status='LABELED' WHERE id=?").run(packages[1].id);
@@ -348,6 +351,7 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
   test("son kapasite transaction içinde rezerve edilir ve claim reset rezervasyonu serbest bırakır", () => {
     const secondActor = { ...actor, id: "warehouse-user-2", username: "Ayşe" };
     const session = createLotSession("LOT-RESERVATION", 2, 5, { planned: "A5-K1-P1" });
+    db.prepare("UPDATE warehouse_locations SET package_capacity = 1 WHERE code = 'A5-K1-P1'").run();
     const first = service.claimNextPackage("SUP-SKU-1", actor, session.id) as any;
     const second = service.claimNextPackage("SUP-SKU-1", secondActor, session.id) as any;
     db.prepare("UPDATE warehouse_packages SET status = 'LABELED' WHERE id IN (?, ?)").run(first.id, second.id);
@@ -356,6 +360,41 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
       (error: unknown) => error instanceof WarehouseServiceError && error.code === "PLANNED_LOCATION_FULL");
     service.releaseReceivingPackage(first.id, actor);
     assert.equal((service.getReceivingLocation(second.id, secondActor) as any).code, "A5-K1-P1");
+  });
+
+  test("otomatik raf dört placement/reservation kabul eder ve beşinci paketi reddeder", () => {
+    const workers = [
+      actor,
+      { ...actor, id: "warehouse-user-2", username: "Ayşe" },
+      { ...actor, id: "warehouse-user-3", username: "Mehmet" },
+      { ...actor, id: "warehouse-user-4", username: "Zeynep" },
+      { ...actor, id: "warehouse-user-5", username: "Can" },
+    ];
+    for (const worker of workers.slice(2)) {
+      db.prepare("INSERT INTO users (id, username, password_hash, role, is_active) VALUES (?, ?, 'hash', 'user', 1)")
+        .run(worker.id, worker.username);
+    }
+    const session = createLotSession("LOT-AUTO-CAPACITY", 5, 5, { planned: "A7-K1-P1" });
+    assert.equal((db.prepare("SELECT package_capacity FROM warehouse_locations WHERE code = 'A7-K1-P1'").get() as any).package_capacity, 4);
+
+    for (let index = 0; index < 4; index += 1) {
+      const claimed = service.claimNextPackage("SUP-SKU-1", workers[index], session.id) as any;
+      db.prepare("UPDATE warehouse_packages SET status = 'LABELED' WHERE id = ?").run(claimed.id);
+      const target = service.getReceivingLocation(claimed.id, workers[index]) as any;
+      assert.equal(target.code, "A7-K1-P1");
+      if (index < 2) {
+        service.placePackage(claimed.package_code, target.code, { idempotency_key: `auto-capacity-place-${index}` }, workers[index]);
+      }
+    }
+
+    const fifth = service.claimNextPackage("SUP-SKU-1", workers[4], session.id) as any;
+    db.prepare("UPDATE warehouse_packages SET status = 'LABELED' WHERE id = ?").run(fifth.id);
+    assert.throws(() => service.getReceivingLocation(fifth.id, workers[4]),
+      (error: unknown) => error instanceof WarehouseServiceError && error.code === "PLANNED_LOCATION_FULL");
+    const usage = (service.listLocations() as any[]).find((location) => location.code === "A7-K1-P1");
+    assert.equal(usage.occupied_packages, 2);
+    assert.equal(usage.reserved_packages, 2);
+    assert.equal(usage.available_capacity, 0);
   });
 
   test("session iptali aktif iş claim ve lokasyon rezervasyonunu serbest bırakır", () => {

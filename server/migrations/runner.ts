@@ -2192,6 +2192,20 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 56,
+    name: "raise_auto_synced_receiving_location_capacity",
+    up(db) {
+      const locationsTableExists = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'warehouse_locations'").get());
+      if (!locationsTableExists) return;
+      db.prepare(`
+        UPDATE warehouse_locations
+        SET package_capacity = 4, updated_at = CURRENT_TIMESTAMP
+        WHERE package_capacity = 1
+          AND notes = 'Mal Kabul V2 master lokasyon senkronizasyonu'
+      `).run();
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

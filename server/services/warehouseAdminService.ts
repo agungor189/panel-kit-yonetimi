@@ -994,9 +994,9 @@ export class WarehouseAdminService {
     const id = randomUUID();
     this.db.prepare(`
       INSERT INTO warehouse_locations (id, code, package_capacity, notes, created_by)
-      VALUES (?, ?, 1, 'Mal Kabul V2 master lokasyon senkronizasyonu', ?)
+      VALUES (?, ?, 4, 'Mal Kabul V2 master lokasyon senkronizasyonu', ?)
     `).run(id, code, actor.id);
-    this.audit("WAREHOUSE_LOCATION_SYNCED_FROM_MASTER", "warehouse_location", id, { code, package_capacity: 1 }, actor);
+    this.audit("WAREHOUSE_LOCATION_SYNCED_FROM_MASTER", "warehouse_location", id, { code, package_capacity: 4 }, actor);
     return code;
   }
 
