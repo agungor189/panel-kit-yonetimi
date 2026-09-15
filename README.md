@@ -189,6 +189,12 @@ Migration v52 giriş partileri, fiziksel paketler, kapasiteli lokasyonlar, yerle
 
 Migration v53 lot bazlı ortak mal kabul oturumlarını ekler. Panel ürün CSV importu `Parti/Lot` (`party_lot` / `batch_lot`) ve isteğe bağlı `Lot Adedi` alanlarını tanır; lot satırı varsa `Toplam Adet` mevcut stoğu overwrite etmek yerine beklenen giriş adedi olarak yorumlanır. `Kutu sayısı` ve `Kutu içi adet` mevcut `1/N` fiziksel paketlerini üretir. Warehouse lotu Panel'den açar; claim, baskı, önerilen lokasyon, okutma, stok artışı, kullanıcı/cihaz audit'i ve ilerleme tamamen Panel SQLite üzerinde paylaşılır.
 
+Migration v58 mevcut `warehouse_layouts` sürüm modelini genişletir; `warehouse_layout_assignments`, `warehouse_layout_reserve_locations` ve `warehouse_rack_metadata` tablolarını ekler. `warehouse_locations.purpose` ile `reserve_weight_preference` alanları PICK/RESERVE operasyon metadata'sını taşır. C2 başlangıçta `RESTRICTED / LAST_RESORT` olarak seed edilir.
+
+Yerleşim CSV'si yalnız `sku,pick_face_location,reserve_locations` taşır; ürün adı, materyal, profil ve ölçü her zaman `products` tablosundan okunur. Önizleme API'si SKU, lokasyon, fiziksel kat/pozisyon, purpose ve çakışmaları doğrular. Apply tek transaction içinde yeni sürümü aktif eder, önceki sürümü arşivler ve fiziksel stok oluşturmaz. Aktif atama Mal Kabul session başlangıcında planlanan ve rezerv lokasyon snapshot'larına kopyalanır.
+
+Ürün master CSV'sindeki eski depo lokasyonu kolonları artık uygulanmaz ve import raporunda yönlendirici uyarı döner. Mevcut legacy kolonlar veri kaybı yaratmamak için şemada tutulur.
+
 Kullanıcı izinleri Panel'de **Ayarlar → Kullanıcı Yönetimi → Warehouse Admin yetkileri** bölümünden verilir. `admin` tüm izinlere sahiptir; diğer roller için `warehouse:receive`, `warehouse:print_labels`, `warehouse:place_packages`, `warehouse:move_stock`, `warehouse:manage_locations`, `warehouse:count_stock` ve `warehouse:edit_label_templates` ayrı ayrı denetlenir.
 
 Worker, Label Printer renderer'dan PDF'i HTTP ile alır ve shell oluşturmadan `lp -d <printer> <file>` çağırır. Başarısız işler en fazla üç kez denenir; son hata paketi `PRINT_FAILED` durumuna taşır. Yeniden baskı yeni bir iş açar ama aynı global paket kodunu kullanır.

@@ -2231,6 +2231,76 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 58,
+    name: "add_product_placement_layouts",
+    up(db) {
+      const layoutColumns = new Set((db.prepare("PRAGMA table_info(warehouse_layouts)").all() as Array<{ name: string }>).map((column) => column.name));
+      if (!layoutColumns.has("source_filename")) db.exec("ALTER TABLE warehouse_layouts ADD COLUMN source_filename TEXT");
+      if (!layoutColumns.has("status")) db.exec("ALTER TABLE warehouse_layouts ADD COLUMN status TEXT NOT NULL DEFAULT 'ARCHIVED'");
+      if (!layoutColumns.has("notes")) db.exec("ALTER TABLE warehouse_layouts ADD COLUMN notes TEXT");
+      db.exec("UPDATE warehouse_layouts SET status = CASE WHEN active = 1 THEN 'ACTIVE' ELSE 'ARCHIVED' END");
+
+      const locationColumns = new Set((db.prepare("PRAGMA table_info(warehouse_locations)").all() as Array<{ name: string }>).map((column) => column.name));
+      if (!locationColumns.has("purpose")) db.exec("ALTER TABLE warehouse_locations ADD COLUMN purpose TEXT");
+      if (!locationColumns.has("reserve_weight_preference")) db.exec("ALTER TABLE warehouse_locations ADD COLUMN reserve_weight_preference TEXT");
+      db.exec(`
+        UPDATE warehouse_locations SET purpose = CASE
+          WHEN code LIKE '%-K1-%' OR code LIKE '%-K2-%' THEN 'PICK'
+          WHEN code LIKE '%-K3-%' OR code LIKE '%-K4-%' THEN 'RESERVE'
+          ELSE 'RESERVE' END
+        WHERE purpose IS NULL OR TRIM(purpose) = '';
+        UPDATE warehouse_locations SET reserve_weight_preference = CASE
+          WHEN code LIKE '%-K3-%' THEN 'HEAVY'
+          WHEN code LIKE '%-K4-%' THEN 'LIGHT'
+          ELSE 'ANY' END
+        WHERE reserve_weight_preference IS NULL OR TRIM(reserve_weight_preference) = '';
+
+        CREATE TABLE IF NOT EXISTS warehouse_layout_assignments (
+          id TEXT PRIMARY KEY,
+          layout_id TEXT NOT NULL,
+          product_id TEXT NOT NULL,
+          pick_face_location_id TEXT NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(layout_id, product_id),
+          UNIQUE(layout_id, pick_face_location_id),
+          FOREIGN KEY(layout_id) REFERENCES warehouse_layouts(id) ON DELETE CASCADE,
+          FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT,
+          FOREIGN KEY(pick_face_location_id) REFERENCES warehouse_locations(id) ON DELETE RESTRICT
+        );
+        CREATE TABLE IF NOT EXISTS warehouse_layout_reserve_locations (
+          id TEXT PRIMARY KEY,
+          assignment_id TEXT NOT NULL,
+          location_id TEXT NOT NULL,
+          priority INTEGER NOT NULL DEFAULT 0,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(assignment_id, location_id),
+          UNIQUE(assignment_id, priority),
+          FOREIGN KEY(assignment_id) REFERENCES warehouse_layout_assignments(id) ON DELETE CASCADE,
+          FOREIGN KEY(location_id) REFERENCES warehouse_locations(id) ON DELETE RESTRICT
+        );
+        CREATE TABLE IF NOT EXISTS warehouse_rack_metadata (
+          rack_code TEXT PRIMARY KEY COLLATE NOCASE,
+          status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','RESERVE','RESTRICTED','DISABLED')),
+          placement_priority TEXT NOT NULL DEFAULT 'NORMAL' CHECK(placement_priority IN ('NORMAL','LOW','LAST_RESORT')),
+          notes TEXT,
+          updated_by TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(updated_by) REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_warehouse_layout_assignments_layout
+          ON warehouse_layout_assignments(layout_id, product_id);
+        CREATE INDEX IF NOT EXISTS idx_warehouse_layout_reserves_assignment
+          ON warehouse_layout_reserve_locations(assignment_id, priority);
+      `);
+      const usersTableExists = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'users'").get());
+      if (usersTableExists) {
+        db.prepare(`INSERT OR IGNORE INTO warehouse_rack_metadata (rack_code, status, placement_priority, notes)
+          VALUES ('C2', 'RESTRICTED', 'LAST_RESORT', 'Kısıtlı erişim / Son çare')`).run();
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

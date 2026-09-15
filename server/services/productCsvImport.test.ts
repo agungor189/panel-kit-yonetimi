@@ -41,7 +41,7 @@ test("safe numeric parser accepts currency and both decimal conventions", () => 
   assert.ok(Number.isNaN(parseCsvNumber("abc")));
 });
 
-test("import persists localized names, grams, logistics, multiple reserve locations and BOM", () => {
+test("import persists product master data but ignores warehouse placement columns", () => {
   const db = database();
   const headers = [
     "SKU", "Tedarik NO", " Olcu ", "Malzeme", "Profil Tipi", "İsim - TR", "Isim - EN",
@@ -81,10 +81,9 @@ test("import persists localized names, grams, logistics, multiple reserve locati
   assert.equal(component.weight_grams, 125);
   assert.equal(component.product_type, "component");
 
-  assert.deepEqual(
-    (db.prepare("SELECT location FROM product_reserve_locations WHERE product_id = ? ORDER BY sort_order").all(component.id) as any[]).map((row) => row.location),
-    ["R-01", "R-02"],
-  );
+  assert.equal(component.warehouse_location, null);
+  assert.equal((db.prepare("SELECT COUNT(*) AS count FROM product_reserve_locations WHERE product_id = ?").get(component.id) as any).count, 0);
+  assert.ok(applied.warnings.some((warning) => warning.includes("Depo lokasyonu kolonları")));
   assert.deepEqual(
     db.prepare("SELECT box_count, units_per_box, box_weight_kg, total_weight_kg FROM product_logistics WHERE product_id = ?").get(component.id),
     { box_count: 2, units_per_box: 5, box_weight_kg: 0.75, total_weight_kg: 1.5 },
@@ -173,7 +172,8 @@ test("v50 preserves legacy names and weights while standardizing BOM parents", (
   const markApplied = db.prepare("INSERT INTO schema_migrations (version, name) VALUES (?, ?)");
   for (let version = 1; version <= 49; version++) markApplied.run(version, `legacy-${version}`);
 
-  runMigrations(db);
+  try { runMigrations(db); }
+  catch (error) { throw new Error(`Legacy migration failed: ${error instanceof Error ? error.message : String(error)}`); }
 
   const simple = db.prepare("SELECT name_tr, product_type, weight, weight_grams FROM products WHERE id = 'simple'").get() as any;
   const assembly = db.prepare("SELECT name_tr, product_type, weight, weight_grams FROM products WHERE id = 'assembly'").get() as any;

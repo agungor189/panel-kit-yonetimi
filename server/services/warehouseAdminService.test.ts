@@ -72,6 +72,50 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     assert.equal(JSON.stringify(snapshot.warehouse.layout).includes("IMPORT-ETME"), false);
   });
 
+  test("yerleşim CSV önizlenir, atomik sürümlenir ve Mal Kabul hedefini aktif layouttan alır", () => {
+    for (const [code, purpose] of [["A1-K1-P1", "PICK"], ["A1-K3-P1", "RESERVE"], ["A1-K4-P1", "RESERVE"]] as const) {
+      service.createLocation({ code, package_capacity: 2, purpose }, actor);
+    }
+    service.importLegacyLayout({
+      warehouseConfig: { name: "DSDST Depo", width: 10, length: 5, height: 4 },
+      objects: [{ id: "rack-a1", type: "rack", name: "A1 Rafı", rackCode: "A1", x: 1, z: 1, width: 2, depth: .6, height: 2, shelfCount: 4, binsPerShelf: 2 }],
+    }, actor);
+    const csvText = "sku,pick_face_location,reserve_locations\nSKU-1,A1-K1-P1,A1-K3-P1|A1-K4-P1\n";
+    const preview = service.previewPlacementLayout({ source_filename: "yerlesim.csv", csv_text: csvText }) as any;
+    assert.equal(preview.valid, true);
+    assert.deepEqual(preview.summary, { rows_read: 1, matched_skus: 1, unknown_skus: 0, invalid_locations: 0, pick_face_conflicts: 0, warnings: 0, errors: 0 });
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM warehouse_layout_assignments").get() as any).count, 0);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM warehouse_packages").get() as any).count, 0);
+
+    const applied = service.applyPlacementLayout({ source_filename: "yerlesim.csv", csv_text: csvText, preview_hash: preview.preview_hash }, actor) as any;
+    assert.equal(applied.active.layout_version, 2);
+    assert.equal(applied.active.status, "ACTIVE");
+    assert.equal(applied.assignments[0].pick_group, "Belirsiz / Belirsiz / Belirsiz");
+    assert.deepEqual(applied.assignments[0].reserve_locations.map((item: any) => item.code), ["A1-K3-P1", "A1-K4-P1"]);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM warehouse_packages").get() as any).count, 0);
+
+    db.prepare(`INSERT INTO inbound_lot_lines
+      (id, lot_number, product_id, supplier_code, package_count, units_per_package, total_units)
+      VALUES ('layout-lot', 'LOT-LAYOUT', 'product-1', 'SUP-SKU-1', 1, 5, 5)`).run();
+    const session = service.startReceivingSession("LOT-LAYOUT", actor, "device-layout") as any;
+    const line = db.prepare("SELECT planned_location_snapshot, reserve_locations_snapshot FROM inbound_batch_lines WHERE batch_id = ?").get(session.id) as any;
+    assert.equal(line.planned_location_snapshot, "A1-K1-P1");
+    assert.deepEqual(JSON.parse(line.reserve_locations_snapshot), ["A1-K3-P1", "A1-K4-P1"]);
+  });
+
+  test("yerleşim CSV bilinmeyen SKU, geçersiz lokasyon ve pick-face çakışmasını uygulatmaz", () => {
+    service.createLocation({ code: "A1-K1-P1", package_capacity: 2 }, actor);
+    db.prepare("INSERT INTO products (id, title, name, sku, central_stock, product_type, status) VALUES ('product-2', 'İkinci', 'İkinci', 'SKU-2', 0, 'simple', 'Active')").run();
+    service.importLegacyLayout({ warehouseConfig: { name: "Depo", width: 5, length: 5, height: 4 }, objects: [{ id: "rack", type: "rack", name: "A1", rackCode: "A1", x: 0, z: 0, width: 2, depth: 1, height: 2, shelfCount: 1, binsPerShelf: 1 }] }, actor);
+    const csvText = "sku,pick_face_location,reserve_locations\nSKU-1,A1-K1-P1,\nSKU-2,A1-K1-P1,\nBILINMEYEN,A1-K9-P9,\n";
+    const preview = service.previewPlacementLayout({ csv_text: csvText }) as any;
+    assert.equal(preview.valid, false);
+    assert.ok(preview.issues.some((issue: any) => issue.code === "UNKNOWN_SKU"));
+    assert.ok(preview.issues.some((issue: any) => issue.code === "PICK_FACE_CONFLICT"));
+    assert.ok(preview.issues.some((issue: any) => issue.code === "LOCATION_NOT_DEFINED"));
+    assert.throws(() => service.applyPlacementLayout({ csv_text: csvText, preview_hash: preview.preview_hash }, actor), /Kritik doğrulama/);
+  });
+
   test("hareket ve kullanıcı akışları tüm anlamlı depo olaylarını güvenle listeler", () => {
     db.prepare(`INSERT INTO activity_logs (id, action, entity_type, entity_id, details, user_id, actor_username)
       VALUES ('activity-1', 'WAREHOUSE_RECEIVING_SESSION_STARTED', 'inbound_batch', 'batch-1', 'geçersiz-json', ?, ?),
@@ -122,6 +166,9 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     const denied = await request("/admin/receiving/sessions", "operator-token", { method: "POST", body: JSON.stringify({ lot_number: "LOT-PERMISSION" }) });
     assert.equal(denied.status, 403);
     assert.equal((await denied.json() as any).error.code, "FORBIDDEN");
+    const layoutDenied = await request("/admin/layouts/placement/preview", "operator-token", { method: "POST", body: JSON.stringify({ csv_text: "sku,pick_face_location\nSKU-1,A1-K1-P1" }) });
+    assert.equal(layoutDenied.status, 403);
+    assert.equal((await layoutDenied.json() as any).error.code, "FORBIDDEN");
     const started = await request("/admin/receiving/sessions", "admin-token", { method: "POST", body: JSON.stringify({ lot_number: "LOT-PERMISSION" }) });
     assert.equal(started.status, 201);
     const visible = await request("/admin/receiving/sessions", "operator-token");

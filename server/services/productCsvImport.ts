@@ -3,7 +3,6 @@ import type Database from "better-sqlite3";
 import {
   canonicalProductType,
   csvValue,
-  parseReserveLocations,
   resolveProductCsvHeaders,
   type ProductCsvField,
   type ProductType,
@@ -231,6 +230,9 @@ export function importProductsFromCsvRows(
   const resolution = resolveProductCsvHeaders(headers);
   const errors: ValidationError[] = [];
   const warnings: string[] = [];
+  if (resolution.byField.warehouse_location || resolution.byField.reserve_locations) {
+    warnings.push("Depo lokasyonu kolonları ürün master importunda yok sayıldı; yerleşimi Warehouse Depo Yerleşimi CSV akışından yönetin.");
+  }
 
   for (const field of resolution.missingRequiredFields) {
     errors.push({ field: "headers", code: "MISSING_REQUIRED_COLUMN", message: `${field} için zorunlu CSV kolonu bulunamadı.` });
@@ -352,7 +354,7 @@ export function importProductsFromCsvRows(
     const size = clean(csvValue(row, resolution, "size")) || clean(existing?.size) || null;
     const profileType = clean(csvValue(row, resolution, "profile_type")) || clean(existing?.tube_type_code) || null;
     const description = clean(csvValue(row, resolution, "description")) || clean(existing?.description) || null;
-    const warehouseLocation = clean(csvValue(row, resolution, "warehouse_location")) || clean(existing?.warehouse_location) || null;
+    const warehouseLocation = clean(existing?.warehouse_location) || null;
     const barcode = clean(csvValue(row, resolution, "barcode")) || clean(existing?.barcode) || null;
     const notes = clean(csvValue(row, resolution, "notes")) || clean(existing?.notes) || null;
     const explicitSeries = clean(csvValue(row, resolution, "product_series")) || null;
@@ -384,7 +386,7 @@ export function importProductsFromCsvRows(
     const id = existing?.id || crypto.randomUUID();
     productIdBySku.set(identityKey(sku), id);
     const previousLogistics = existing ? existingLogistics.get(existing.id) : null;
-    const reserveRaw = csvValue(row, resolution, "reserve_locations");
+    const reserveRaw = undefined;
 
     preparedProducts.push({
       sourceRow,
@@ -429,8 +431,8 @@ export function importProductsFromCsvRows(
         total_weight_kg: totalWeightKg ?? previousLogistics?.total_weight_kg ?? null,
         has_value: [boxCount, unitsPerBox, boxWeightKg, totalWeightKg].some((value) => value !== null),
       },
-      reserve_locations: parseReserveLocations(reserveRaw),
-      has_reserve_locations_value: clean(reserveRaw) !== "",
+      reserve_locations: [],
+      has_reserve_locations_value: false,
       receiving: {
         lot_number: lotNumber || null,
         package_count: boxCount,
@@ -595,10 +597,6 @@ export function importProductsFromCsvRows(
       total_weight_kg=excluded.total_weight_kg,
       updated_at=CURRENT_TIMESTAMP
   `);
-  const deleteReserveLocations = db.prepare("DELETE FROM product_reserve_locations WHERE product_id = ?");
-  const insertReserveLocation = db.prepare(`
-    INSERT INTO product_reserve_locations (id, product_id, location, sort_order) VALUES (?, ?, ?, ?)
-  `);
   const deleteBomForParent = db.prepare("DELETE FROM product_bom WHERE parent_product_id = ?");
   const insertBom = db.prepare(`
     INSERT INTO product_bom (id, parent_product_id, component_product_id, quantity_per_unit, component_role)
@@ -638,10 +636,6 @@ export function importProductsFromCsvRows(
       }
       if (product.logistics.has_value) {
         upsertLogistics.run(product.id, product.logistics.box_count, product.logistics.units_per_box, product.logistics.box_weight_kg, product.logistics.total_weight_kg);
-      }
-      if (product.has_reserve_locations_value) {
-        deleteReserveLocations.run(product.id);
-        product.reserve_locations.forEach((location, index) => insertReserveLocation.run(crypto.randomUUID(), product.id, location, index));
       }
       if (product.receiving.lot_number && product.receiving.package_count && product.receiving.units_per_package && product.receiving.total_units && upsertLotLine) {
         if (existingLotLine?.get(product.receiving.lot_number, product.id)) {

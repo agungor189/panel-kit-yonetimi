@@ -395,7 +395,7 @@ export function createWarehouseRouter({
     res.json({ success: true, data: adminService.listReceivingSessions() });
   });
   router.post("/admin/receiving/sessions", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:manage_receiving_sessions"), (req, res) => {
-    try { res.status(201).json({ success: true, data: adminService.startReceivingSession(String(req.body?.lot_number || ""), actor(res), String(req.body?.device_id || "")) }); }
+    try { res.status(201).json({ success: true, data: adminService.startReceivingSession(String(req.body?.lot_number || ""), actor(res), String(req.body?.device_id || ""), String(req.body?.supplier_code || "")) }); }
     catch (error) { return handleServiceError(res, error); }
   });
   router.get("/admin/receiving/sessions/:id", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (req, res) => {
@@ -453,6 +453,17 @@ export function createWarehouseRouter({
   });
   router.get("/admin/warehouse-map", authenticate(["read:products", "read:warehouse_orders"]), requireWarehouseUser, requireWarehousePermission("warehouse:view_map"), (_req, res) => {
     res.json({ success: true, data: adminService.getWarehouseMap() });
+  });
+  router.get("/admin/layouts/placement", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:view_map"), (_req, res) => {
+    res.json({ success: true, data: adminService.getPlacementLayout() });
+  });
+  router.post("/admin/layouts/placement/preview", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:manage_locations"), (req, res) => {
+    try { res.json({ success: true, data: adminService.previewPlacementLayout(req.body || {}) }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/admin/layouts/placement/apply", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:manage_locations"), (req, res) => {
+    try { res.status(201).json({ success: true, data: adminService.applyPlacementLayout(req.body || {}, actor(res)) }); }
+    catch (error) { return handleServiceError(res, error); }
   });
   router.post("/admin/layouts/import-legacy", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:manage_locations"), (req, res) => {
     try { res.status(201).json({ success: true, data: adminService.importLegacyLayout(req.body, actor(res)) }); }

@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { createHash, randomUUID } from "node:crypto";
+import Papa from "papaparse";
 import { WarehouseServiceError, type WarehousePicker } from "./warehouseService.js";
 import { layoutLocationCodes, parseLegacyWarehouseLayout, type WarehouseLayout } from "./warehouseLayout.js";
 
@@ -51,6 +52,14 @@ const hasActorPermission = (actor: WarehouseActor, permission: string) => {
   return Boolean(warehouse && typeof warehouse === "object" && (warehouse as Record<string, unknown>)[permission.replace("warehouse:", "")] === true);
 };
 const keyOf = (value: unknown) => clean(value).toLocaleLowerCase("tr-TR").replace(/[^a-z0-9çğıöşü]+/gi, "_").replace(/^_+|_+$/g, "");
+const locationLevel = (code: string) => Number(code.match(/-K(\d+)-P\d+$/)?.[1] || 0);
+const defaultLocationMetadata = (code: string) => {
+  const level = locationLevel(code);
+  return {
+    purpose: level <= 2 ? "PICK" : "RESERVE",
+    reserve_weight_preference: level === 3 ? "HEAVY" : level === 4 ? "LIGHT" : "ANY",
+  };
+};
 
 const rowValue = (row: Record<string, unknown>, names: string[]) => {
   const normalized = new Map(Object.entries(row).map(([key, value]) => [keyOf(key), value]));
@@ -130,11 +139,31 @@ export class WarehouseAdminService {
       ORDER BY p.sku COLLATE NOCASE
     `).all(lotNumber) as any[];
     if (!sourceLines.length) throw new WarehouseServiceError(404, "LOT_NOT_FOUND", "Bu parti/lot Panel master verisinde bulunamadı.");
-    const reserveStatement = this.db.prepare("SELECT location FROM product_reserve_locations WHERE product_id = ? ORDER BY sort_order, created_at, id");
-    const lines = sourceLines.map((line) => ({
-      ...line,
-      reserve_locations: (reserveStatement.all(line.product_id) as Array<{ location: string }>).map((item) => item.location),
-    }));
+    const activeAssignmentCount = Number((this.db.prepare(`SELECT COUNT(*) AS count
+      FROM warehouse_layout_assignments assignment
+      JOIN warehouse_layouts layout ON layout.id = assignment.layout_id
+      WHERE layout.active = 1 AND layout.status = 'ACTIVE'`).get() as any)?.count || 0);
+    const placementStatement = this.db.prepare(`SELECT assignment.id, pick.code AS pick_face_location
+      FROM warehouse_layout_assignments assignment
+      JOIN warehouse_layouts layout ON layout.id = assignment.layout_id AND layout.active = 1 AND layout.status = 'ACTIVE'
+      JOIN warehouse_locations pick ON pick.id = assignment.pick_face_location_id
+      WHERE assignment.product_id = ?`);
+    const layoutReserveStatement = this.db.prepare(`SELECT location.code
+      FROM warehouse_layout_reserve_locations reserve
+      JOIN warehouse_locations location ON location.id = reserve.location_id
+      WHERE reserve.assignment_id = ? ORDER BY reserve.priority, reserve.created_at`);
+    const legacyReserveStatement = this.db.prepare("SELECT location FROM product_reserve_locations WHERE product_id = ? ORDER BY sort_order, created_at, id");
+    const lines = sourceLines.map((line) => {
+      const placement = placementStatement.get(line.product_id) as any;
+      return {
+        ...line,
+        warehouse_location: placement?.pick_face_location || (activeAssignmentCount ? null : line.warehouse_location),
+        reserve_locations: placement
+          ? (layoutReserveStatement.all(placement.id) as Array<{ code: string }>).map((item) => item.code)
+          : activeAssignmentCount ? [] : (legacyReserveStatement.all(line.product_id) as Array<{ location: string }>).map((item) => item.location),
+        placement_source: placement ? "ACTIVE_LAYOUT" : activeAssignmentCount ? "UNASSIGNED" : "LEGACY_MASTER",
+      };
+    });
     return {
       lot_number: lotNumber,
       lines,
@@ -147,8 +176,12 @@ export class WarehouseAdminService {
     };
   }
 
-  startReceivingSession(lotNumberValue: string, actor: WarehouseActor, deviceId?: string) {
+  startReceivingSession(lotNumberValue: string, actor: WarehouseActor, deviceId?: string, supplierCodeValue?: string) {
     const lot = this.getLot(lotNumberValue) as any;
+    const supplierCode = clean(supplierCodeValue, 100);
+    if (supplierCode && !lot.lines.some((line: any) => clean(line.supplier_code, 100).toLocaleUpperCase("tr-TR") === supplierCode.toLocaleUpperCase("tr-TR"))) {
+      throw new WarehouseServiceError(409, "LOT_SUPPLIER_MISMATCH", `${supplierCode} tedarikçisi bu lotun ürün satırlarıyla eşleşmiyor.`);
+    }
     return this.db.transaction(() => {
       const existing = this.db.prepare("SELECT id, receiving_state FROM inbound_batches WHERE lot_number = ? COLLATE NOCASE").get(lot.lot_number) as any;
       if (existing) {
@@ -166,8 +199,8 @@ export class WarehouseAdminService {
         INSERT INTO inbound_batches (
           id, batch_number, supplier_code, supplier_name, status, expected_package_count,
           expected_unit_count, created_by, lot_number, receiving_state, started_by, started_at
-        ) VALUES (?, ?, 'MULTI', 'Panel Lot Master', 'READY', ?, ?, ?, ?, 'active', ?, CURRENT_TIMESTAMP)
-      `).run(id, batchNumber, lot.totals.package_count, lot.totals.unit_count, actor.id, lot.lot_number, actor.id);
+        ) VALUES (?, ?, ?, 'Panel Lot Master', 'READY', ?, ?, ?, ?, 'active', ?, CURRENT_TIMESTAMP)
+      `).run(id, batchNumber, supplierCode || "MULTI", lot.totals.package_count, lot.totals.unit_count, actor.id, lot.lot_number, actor.id);
 
       const templateId = this.ensureDefaultTemplate(actor.id);
       const insertLine = this.db.prepare(`
@@ -187,6 +220,9 @@ export class WarehouseAdminService {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'EXPECTED', ?)
       `);
       lot.lines.forEach((source: any, index: number) => {
+        if (source.placement_source === "UNASSIGNED") {
+          throw new WarehouseServiceError(409, "LAYOUT_ASSIGNMENT_MISSING", `${source.sku} için aktif depo yerleşiminde pick-face tanımlı değil.`);
+        }
         const plannedLocation = this.syncReceivingLocation(source.warehouse_location, actor, true);
         const reserveLocations = [...new Set((source.reserve_locations || [])
           .map((value: unknown) => this.syncReceivingLocation(value, actor, false))
@@ -671,10 +707,14 @@ export class WarehouseAdminService {
     if (!code || capacity < 1) throw new WarehouseServiceError(400, "VALIDATION_ERROR", "Lokasyon kodu ve pozitif kapasite zorunludur.");
     if (this.findWarehouseLocation(code)) throw new WarehouseServiceError(409, "LOCATION_EXISTS", "Bu fiziksel lokasyon katalogda zaten bulunuyor.");
     const id = randomUUID();
+    const defaults = defaultLocationMetadata(code);
+    const purpose = ["PICK", "RESERVE"].includes(clean(input.purpose).toUpperCase()) ? clean(input.purpose).toUpperCase() : defaults.purpose;
+    const weightPreference = ["HEAVY", "LIGHT", "ANY"].includes(clean(input.reserve_weight_preference).toUpperCase())
+      ? clean(input.reserve_weight_preference).toUpperCase() : defaults.reserve_weight_preference;
     this.db.prepare(`
-      INSERT INTO warehouse_locations (id, code, zone, aisle, rack, shelf, bin, package_capacity, notes, created_by)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, code, clean(input.zone) || null, clean(input.aisle) || null, clean(input.rack) || null, clean(input.shelf) || null, clean(input.bin) || null, capacity, clean(input.notes, 1000) || null, actor.id);
+      INSERT INTO warehouse_locations (id, code, zone, aisle, rack, shelf, bin, package_capacity, purpose, reserve_weight_preference, notes, created_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, code, clean(input.zone) || null, clean(input.aisle) || null, clean(input.rack) || null, clean(input.shelf) || null, clean(input.bin) || null, capacity, purpose, weightPreference, clean(input.notes, 1000) || null, actor.id);
     this.audit("WAREHOUSE_LOCATION_CREATED", "warehouse_location", id, { code, package_capacity: capacity }, actor);
     return this.db.prepare("SELECT * FROM warehouse_locations WHERE id = ?").get(id);
   }
@@ -712,10 +752,10 @@ export class WarehouseAdminService {
       const current = this.db.prepare("SELECT layout_version FROM warehouse_layouts WHERE active = 1").get() as any;
       const id = randomUUID();
       const version = Number(current?.layout_version || 0) + 1;
-      this.db.prepare("UPDATE warehouse_layouts SET active = 0, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE active = 1").run(actor.id);
+      this.db.prepare("UPDATE warehouse_layouts SET active = 0, status = 'ARCHIVED', updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE active = 1").run(actor.id);
       this.db.prepare(`INSERT INTO warehouse_layouts
-        (id, name, layout_version, layout_json, active, created_by, updated_by)
-        VALUES (?, ?, ?, ?, 1, ?, ?)`)
+        (id, name, layout_version, layout_json, active, status, created_by, updated_by)
+        VALUES (?, ?, ?, ?, 1, 'ACTIVE', ?, ?)`)
         .run(id, layout.warehouse.name, version, JSON.stringify(layout), actor.id, actor.id);
       this.audit("WAREHOUSE_LAYOUT_IMPORTED", "warehouse_layout", id, {
         layout_version: version,
@@ -724,6 +764,172 @@ export class WarehouseAdminService {
       }, actor);
       return { id, name: layout.warehouse.name, layout_version: version, active: 1, layout };
     })();
+  }
+
+  previewPlacementLayout(input: Record<string, unknown>) {
+    const csvText = String(input.csv_text || "");
+    const sourceFilename = clean(input.source_filename, 255) || "warehouse-layout.csv";
+    if (!csvText.trim()) throw new WarehouseServiceError(400, "LAYOUT_CSV_REQUIRED", "Yerleşim CSV dosyası boş.");
+    if (Buffer.byteLength(csvText, "utf8") > 2 * 1024 * 1024) throw new WarehouseServiceError(413, "LAYOUT_CSV_TOO_LARGE", "Yerleşim CSV dosyası en fazla 2 MB olabilir.");
+    const parsed = Papa.parse<Record<string, unknown>>(csvText.replace(/^\uFEFF/, ""), { header: true, skipEmptyLines: "greedy" });
+    const issues: Array<{ severity: "error" | "warning"; code: string; message: string; source_row?: number }> = parsed.errors.map((error) => ({
+      severity: "error", code: "CSV_PARSE_ERROR", message: error.message, source_row: typeof error.row === "number" ? error.row + 2 : undefined,
+    }));
+    const products = this.db.prepare(`SELECT id, sku, COALESCE(name_tr, name, title, name_en, sku) AS product_name,
+      supplier_code, material, COALESCE(NULLIF(form_code,''), NULLIF(tube_type_code,''), NULLIF(model,''), 'Belirsiz') AS profile_type,
+      COALESCE(NULLIF(size,''), NULLIF(pipe_size,''), 'Belirsiz') AS size
+      FROM products WHERE COALESCE(status, 'Active') != 'deleted' AND sku IS NOT NULL`).all() as any[];
+    const productBySku = new Map(products.map((product) => [String(product.sku).toLocaleUpperCase("tr-TR"), product]));
+    const locations = this.db.prepare("SELECT * FROM warehouse_locations WHERE active = 1").all() as any[];
+    const locationByCode = new Map(locations.map((location) => [normalizeWarehouseLocationCode(location.code), location]));
+    const activeLayout = this.db.prepare("SELECT layout_json FROM warehouse_layouts WHERE active = 1").get() as any;
+    let physicalCodes = new Set<string>();
+    try { physicalCodes = new Set(layoutLocationCodes(JSON.parse(activeLayout?.layout_json || "null") as WarehouseLayout)); } catch { physicalCodes = new Set(); }
+    const rackMetadata = new Map((this.db.prepare("SELECT * FROM warehouse_rack_metadata").all() as any[]).map((rack) => [String(rack.rack_code).toUpperCase(), rack]));
+    const seenSku = new Map<string, number>();
+    const pickOwners = new Map<string, { sku: string; row: number }>();
+    const unknownSkus = new Set<string>();
+    const rows = parsed.data.map((raw, index) => {
+      const sourceRow = index + 2;
+      const sku = clean(rowValue(raw, ["sku"]), 120).toLocaleUpperCase("tr-TR");
+      const pickFace = normalizeWarehouseLocationCode(rowValue(raw, ["pick_face_location", "pick face location", "pick_face"]));
+      const reserveRaw = clean(rowValue(raw, ["reserve_locations", "reserve locations"]), 2000);
+      const reserveLocations = [...new Set(reserveRaw.split("|").map(normalizeWarehouseLocationCode).filter(Boolean))];
+      const product = productBySku.get(sku);
+      if (!sku) issues.push({ severity: "error", code: "SKU_REQUIRED", message: "SKU boş olamaz.", source_row: sourceRow });
+      if (sku && !product) {
+        unknownSkus.add(sku);
+        issues.push({ severity: "error", code: "UNKNOWN_SKU", message: `${sku} ürün masterında bulunamadı.`, source_row: sourceRow });
+      }
+      if (seenSku.has(sku)) issues.push({ severity: "error", code: "DUPLICATE_SKU_ASSIGNMENT", message: `${sku} birden fazla satırda yer alıyor.`, source_row: sourceRow });
+      else if (sku) seenSku.set(sku, sourceRow);
+      if (!pickFace) issues.push({ severity: "error", code: "PICK_FACE_REQUIRED", message: `${sku || "Bu satır"} için pick-face zorunludur.`, source_row: sourceRow });
+      const owner = pickOwners.get(pickFace);
+      if (pickFace && owner && owner.sku !== sku) {
+        issues.push({ severity: "error", code: "PICK_FACE_CONFLICT", message: `${pickFace}, ${owner.sku} ve ${sku} SKU'larına birlikte atanamaz.`, source_row: sourceRow });
+      } else if (pickFace) pickOwners.set(pickFace, { sku, row: sourceRow });
+      const inspectLocation = (code: string, role: "PICK" | "RESERVE") => {
+        if (!isValidWarehouseLocationCode(code)) {
+          issues.push({ severity: "error", code: "INVALID_LOCATION_FORMAT", message: `${code || "Boş lokasyon"} biçimi geçersiz.`, source_row: sourceRow }); return;
+        }
+        const location = locationByCode.get(code);
+        if (!location) {
+          issues.push({ severity: "error", code: "LOCATION_NOT_DEFINED", message: `${code} aktif lokasyon kataloğunda bulunamadı.`, source_row: sourceRow }); return;
+        }
+        if (physicalCodes.size && !physicalCodes.has(code)) issues.push({ severity: "error", code: "LOCATION_OUTSIDE_PHYSICAL_LAYOUT", message: `${code} aktif fiziksel depo planında bulunamadı.`, source_row: sourceRow });
+        if (String(location.purpose || "") !== role) issues.push({ severity: "warning", code: "LOCATION_PURPOSE_MISMATCH", message: `${code} metadata amacı ${location.purpose || "tanımsız"}; CSV rolü ${role}.`, source_row: sourceRow });
+        const rackCode = code.split("-K")[0];
+        const rack = rackMetadata.get(rackCode);
+        if (rack?.status === "DISABLED") issues.push({ severity: "error", code: "RACK_DISABLED", message: `${rackCode} rafı kullanım dışı.`, source_row: sourceRow });
+        else if (rack?.status === "RESTRICTED") issues.push({ severity: "warning", code: "RACK_RESTRICTED", message: `${rackCode}: Kısıtlı erişim / Son çare.`, source_row: sourceRow });
+      };
+      if (pickFace) inspectLocation(pickFace, "PICK");
+      reserveLocations.forEach((code) => inspectLocation(code, "RESERVE"));
+      if (pickFace && reserveLocations.includes(pickFace)) issues.push({ severity: "error", code: "PICK_FACE_IN_RESERVES", message: `${pickFace} aynı SKU için hem pick-face hem reserve olamaz.`, source_row: sourceRow });
+      return {
+        source_row: sourceRow, sku, product_id: product?.id || null, product_name: product?.product_name || null,
+        supplier_no: product?.supplier_code || null, material: product?.material || "Belirsiz",
+        profile_type: product?.profile_type || "Belirsiz", size: product?.size || "Belirsiz",
+        pick_group: product ? `${product.material || "Belirsiz"} / ${product.profile_type || "Belirsiz"} / ${product.size || "Belirsiz"}` : null,
+        pick_face_location: pickFace, pick_face_location_id: locationByCode.get(pickFace)?.id || null,
+        reserve_locations: reserveLocations.map((code, priority) => ({ code, priority, id: locationByCode.get(code)?.id || null })),
+      };
+    });
+    if (!parsed.meta.fields?.some((field) => keyOf(field) === "sku")) issues.push({ severity: "error", code: "MISSING_SKU_HEADER", message: "sku kolonu zorunludur." });
+    if (!parsed.meta.fields?.some((field) => keyOf(field) === "pick_face_location")) issues.push({ severity: "error", code: "MISSING_PICK_FACE_HEADER", message: "pick_face_location kolonu zorunludur." });
+    if (!rows.length) issues.push({ severity: "error", code: "NO_ROWS", message: "CSV içinde yerleşim satırı bulunamadı." });
+    const normalized = rows.map((row) => ({ sku: row.sku, pick_face_location: row.pick_face_location, reserve_locations: row.reserve_locations.map((item) => item.code) }));
+    const previewHash = createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+    return {
+      valid: !issues.some((issue) => issue.severity === "error"), preview_hash: previewHash, source_filename: sourceFilename,
+      summary: {
+        rows_read: rows.length, matched_skus: rows.filter((row) => row.product_id).length, unknown_skus: unknownSkus.size,
+        invalid_locations: issues.filter((issue) => ["INVALID_LOCATION_FORMAT", "LOCATION_NOT_DEFINED", "LOCATION_OUTSIDE_PHYSICAL_LAYOUT"].includes(issue.code)).length,
+        pick_face_conflicts: issues.filter((issue) => issue.code === "PICK_FACE_CONFLICT").length,
+        warnings: issues.filter((issue) => issue.severity === "warning").length,
+        errors: issues.filter((issue) => issue.severity === "error").length,
+      },
+      rows, issues,
+    };
+  }
+
+  applyPlacementLayout(input: Record<string, unknown>, actor: WarehouseActor) {
+    const preview = this.previewPlacementLayout(input);
+    if (preview.preview_hash !== clean(input.preview_hash, 128)) throw new WarehouseServiceError(409, "LAYOUT_PREVIEW_CHANGED", "CSV önizlemesi değişti; dosyayı yeniden doğrulayın.");
+    if (!preview.valid) throw new WarehouseServiceError(422, "LAYOUT_VALIDATION_FAILED", "Kritik doğrulama hataları düzeltilmeden yerleşim uygulanamaz.");
+    return this.db.transaction(() => {
+      const current = this.db.prepare("SELECT * FROM warehouse_layouts WHERE active = 1").get() as any;
+      if (!current) throw new WarehouseServiceError(409, "PHYSICAL_LAYOUT_MISSING", "Önce fiziksel depo planı tanımlanmalıdır.");
+      const version = Number((this.db.prepare("SELECT COALESCE(MAX(layout_version), 0) AS version FROM warehouse_layouts").get() as any).version) + 1;
+      const id = randomUUID();
+      this.db.prepare("UPDATE warehouse_layouts SET active = 0, status = 'ARCHIVED', updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE active = 1").run(actor.id);
+      this.db.prepare(`INSERT INTO warehouse_layouts
+        (id, name, layout_version, layout_json, active, source_filename, status, notes, created_by, updated_by)
+        VALUES (?, ?, ?, ?, 1, ?, 'ACTIVE', ?, ?, ?)`)
+        .run(id, current.name, version, current.layout_json, preview.source_filename, clean(input.notes, 1000) || null, actor.id, actor.id);
+      const insertAssignment = this.db.prepare(`INSERT INTO warehouse_layout_assignments
+        (id, layout_id, product_id, pick_face_location_id) VALUES (?, ?, ?, ?)`);
+      const insertReserve = this.db.prepare(`INSERT INTO warehouse_layout_reserve_locations
+        (id, assignment_id, location_id, priority) VALUES (?, ?, ?, ?)`);
+      for (const row of preview.rows) {
+        const assignmentId = randomUUID();
+        insertAssignment.run(assignmentId, id, row.product_id, row.pick_face_location_id);
+        for (const reserve of row.reserve_locations) insertReserve.run(randomUUID(), assignmentId, reserve.id, reserve.priority);
+      }
+      this.audit("WAREHOUSE_PLACEMENT_LAYOUT_APPLIED", "warehouse_layout", id, { layout_version: version, sku_count: preview.rows.length, source_filename: preview.source_filename }, actor);
+      return this.getPlacementLayout();
+    }).immediate();
+  }
+
+  getPlacementLayout() {
+    const active = this.db.prepare(`SELECT layout.*, user.username AS created_by_username,
+      (SELECT COUNT(*) FROM warehouse_layout_assignments assignment WHERE assignment.layout_id = layout.id) AS sku_count
+      FROM warehouse_layouts layout LEFT JOIN users user ON user.id = layout.created_by
+      WHERE layout.active = 1`).get() as any;
+    const history = this.db.prepare(`SELECT layout.id, layout.layout_version, layout.source_filename, layout.status,
+      layout.notes, layout.created_at, user.username AS created_by_username,
+      (SELECT COUNT(*) FROM warehouse_layout_assignments assignment WHERE assignment.layout_id = layout.id) AS sku_count
+      FROM warehouse_layouts layout LEFT JOIN users user ON user.id = layout.created_by
+      ORDER BY layout.layout_version DESC`).all();
+    const assignmentRows = active ? this.db.prepare(`SELECT assignment.id, product.id AS product_id, product.sku,
+      COALESCE(product.name_tr, product.name, product.title, product.name_en, product.sku) AS product_name,
+      product.supplier_code AS supplier_no, product.material,
+      COALESCE(NULLIF(product.form_code,''), NULLIF(product.tube_type_code,''), NULLIF(product.model,''), 'Belirsiz') AS profile_type,
+      COALESCE(NULLIF(product.size,''), NULLIF(product.pipe_size,''), 'Belirsiz') AS size,
+      pick.id AS pick_face_location_id, pick.code AS pick_face_location
+      FROM warehouse_layout_assignments assignment
+      JOIN products product ON product.id = assignment.product_id
+      JOIN warehouse_locations pick ON pick.id = assignment.pick_face_location_id
+      WHERE assignment.layout_id = ? ORDER BY product.sku COLLATE NOCASE`).all(active.id) as any[] : [];
+    const reserveStatement = this.db.prepare(`SELECT location.id, location.code, reserve.priority,
+      location.purpose, location.reserve_weight_preference
+      FROM warehouse_layout_reserve_locations reserve JOIN warehouse_locations location ON location.id = reserve.location_id
+      WHERE reserve.assignment_id = ? ORDER BY reserve.priority`);
+    const assignments = assignmentRows.map((row) => ({
+      ...row, pick_group: `${row.material || "Belirsiz"} / ${row.profile_type || "Belirsiz"} / ${row.size || "Belirsiz"}`,
+      reserve_locations: reserveStatement.all(row.id),
+    }));
+    let physicalLayout: WarehouseLayout | null = null;
+    try { physicalLayout = active ? JSON.parse(active.layout_json) : null; } catch { physicalLayout = null; }
+    const rackMetadata = this.db.prepare("SELECT * FROM warehouse_rack_metadata ORDER BY rack_code COLLATE NOCASE").all() as any[];
+    const rackByCode = new Map(rackMetadata.map((rack) => [String(rack.rack_code).toUpperCase(), rack]));
+    const racks = (physicalLayout?.objects.filter((object) => object.type === "rack") || []).map((rack) => ({
+      rack_code: rack.rackCode, name: rack.name, shelf_count: rack.shelfCount, positions_per_shelf: rack.positionsPerShelf,
+      status: rackByCode.get(rack.rackCode!)?.status || "ACTIVE", placement_priority: rackByCode.get(rack.rackCode!)?.placement_priority || "NORMAL",
+      notes: rackByCode.get(rack.rackCode!)?.notes || null,
+    }));
+    const placedSkuCount = active ? Number((this.db.prepare(`SELECT COUNT(DISTINCT assignment.product_id) AS count
+      FROM warehouse_layout_assignments assignment
+      WHERE assignment.layout_id = ? AND EXISTS (
+        SELECT 1 FROM warehouse_packages package WHERE package.product_id = assignment.product_id
+          AND package.status IN ('PLACED','OPEN') AND package.current_location_id IS NOT NULL
+      )`).get(active.id) as any)?.count || 0) : 0;
+    const activeLots = this.db.prepare("SELECT lot_number FROM inbound_batches WHERE receiving_state IN ('active','paused') ORDER BY datetime(started_at) DESC").all() as Array<{ lot_number: string }>;
+    return {
+      active: active ? { ...active, layout_json: undefined, layout: physicalLayout } : null,
+      history, assignments, locations: this.listLocations(), racks,
+      summary: { assigned_skus: assignments.length, placed_skus: placedSkuCount, active_receiving: activeLots.length, active_lots: activeLots.map((item) => item.lot_number) },
+    };
   }
 
   getWarehouseMap() {
@@ -1155,10 +1361,11 @@ export class WarehouseAdminService {
       return null;
     }
     const id = randomUUID();
+    const metadata = defaultLocationMetadata(code);
     this.db.prepare(`
-      INSERT INTO warehouse_locations (id, code, package_capacity, notes, created_by)
-      VALUES (?, ?, 4, 'Mal Kabul V2 master lokasyon senkronizasyonu', ?)
-    `).run(id, code, actor.id);
+      INSERT INTO warehouse_locations (id, code, package_capacity, purpose, reserve_weight_preference, notes, created_by)
+      VALUES (?, ?, 4, ?, ?, 'Mal Kabul V2 legacy lokasyon senkronizasyonu', ?)
+    `).run(id, code, metadata.purpose, metadata.reserve_weight_preference, actor.id);
     this.audit("WAREHOUSE_LOCATION_SYNCED_FROM_MASTER", "warehouse_location", id, { code, package_capacity: 4 }, actor);
     return code;
   }
