@@ -126,6 +126,8 @@ type ProductCsvImportReport = {
   bom_lines_created: number;
   bom_lines_updated: number;
   bom_lines_removed: number;
+  lot_lines_created: number;
+  lot_lines_updated: number;
   matched_columns: Array<{ csv_header: string; product_field: string; label: string }>;
   unknown_columns: string[];
   validation_errors: Array<{ row?: number; field?: string; code: string; message: string }>;
@@ -404,7 +406,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
     try {
       const report = await api.post('/products/import', { rows: csvData, headers: csvHeaders, dry_run: false, source_name: csvFileName });
       setImportReport(report);
-      toast.success(`${report.products_created} ürün oluşturuldu, ${report.products_updated} ürün güncellendi`);
+      toast.success(`${report.products_created} ürün oluşturuldu, ${report.products_updated} ürün güncellendi${report.lot_lines_created || report.lot_lines_updated ? ` · ${report.lot_lines_created + report.lot_lines_updated} lot satırı hazır` : ''}`);
       await loadProducts();
     } catch (error: any) {
       toast.error(error.message || 'İçe aktarma başarısız');
@@ -1008,6 +1010,8 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                     ['Güncellenecek', importReport.products_updated],
                     ['BOM üst ürünü', importReport.bom_parents],
                     ['Yeni BOM satırı', importReport.bom_lines_created],
+                    ['Yeni lot satırı', importReport.lot_lines_created],
+                    ['Güncel lot satırı', importReport.lot_lines_updated],
                   ].map(([label, value]) => (
                     <div key={String(label)} className="rounded-2xl border border-border-color bg-bg-main p-4">
                       <p className="text-[10px] font-black uppercase tracking-widest text-text-muted">{label}</p>

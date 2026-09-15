@@ -26,10 +26,12 @@ export const DEFAULT_PACKAGE_LABEL_TEMPLATE = {
     { id: "product-name", type: "text", x: 7, y: 20, width: 135, height: 15, value: "{Urun_adi}", fontSize: 6, fontWeight: "bold" },
     { id: "sku-label", type: "text", x: 7, y: 39, width: 55, height: 7, value: "SKU: {SKU}", fontSize: 4, fontWeight: "bold" },
     { id: "lot", type: "text", x: 66, y: 39, width: 76, height: 7, value: "LOT: {Parti_Lot}", fontSize: 4, textAlign: "right" },
-    { id: "count", type: "text", x: 7, y: 49, width: 60, height: 8, value: "ADET: {Paket_ici_adet}", fontSize: 5, fontWeight: "black" },
-    { id: "ordinal", type: "text", x: 76, y: 49, width: 66, height: 8, value: "PAKET {Paket_no}/{Toplam_paket}", fontSize: 5, fontWeight: "black", textAlign: "right" },
-    { id: "package-barcode", type: "barcode", x: 7, y: 61, width: 96, height: 29, value: "{Package_code}", showBarcodeText: true },
-    { id: "package-qr", type: "qr", x: 111, y: 61, width: 29, height: 29, value: "{Package_code}" },
+    { id: "supplier", type: "text", x: 7, y: 46, width: 70, height: 6, value: "TEDARIK: {Supplier_no}", fontSize: 3.5, fontWeight: "bold" },
+    { id: "size-weight", type: "text", x: 79, y: 46, width: 63, height: 6, value: "{Olcu} · {Kutu_agirligi} kg", fontSize: 3.5, textAlign: "right" },
+    { id: "count", type: "text", x: 7, y: 53, width: 60, height: 8, value: "ADET: {Paket_ici_adet}", fontSize: 5, fontWeight: "black" },
+    { id: "ordinal", type: "text", x: 76, y: 53, width: 66, height: 8, value: "PAKET {Paket_no}/{Toplam_paket}", fontSize: 5, fontWeight: "black", textAlign: "right" },
+    { id: "package-barcode", type: "barcode", x: 7, y: 64, width: 96, height: 27, value: "{Package_code}", showBarcodeText: true },
+    { id: "package-qr", type: "qr", x: 113, y: 64, width: 27, height: 27, value: "{Package_code}" },
   ],
 };
 
@@ -75,8 +77,14 @@ export class WarehouseAdminService {
   }
 
   ensureDefaultTemplate(actorId?: string) {
-    const existing = this.db.prepare("SELECT id FROM label_templates WHERE template_type = 'PACKAGE' AND is_default = 1 AND active = 1").get() as any;
-    if (existing) return existing.id as string;
+    const existing = this.db.prepare("SELECT id, version, template_json FROM label_templates WHERE template_type = 'PACKAGE' AND is_default = 1 AND active = 1").get() as any;
+    if (existing) {
+      if (existing.id === DEFAULT_PACKAGE_LABEL_TEMPLATE.id && Number(existing.version) === 1 && !String(existing.template_json || "").includes("{Supplier_no}")) {
+        this.db.prepare("UPDATE label_templates SET template_json = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+          .run(JSON.stringify(DEFAULT_PACKAGE_LABEL_TEMPLATE), existing.id);
+      }
+      return existing.id as string;
+    }
     const id = DEFAULT_PACKAGE_LABEL_TEMPLATE.id;
     this.db.prepare(`
       INSERT OR IGNORE INTO label_templates (id, name, template_type, version, template_json, active, is_default, created_by)
@@ -98,6 +106,175 @@ export class WarehouseAdminService {
       this.audit("WAREHOUSE_BATCH_CREATED", "inbound_batch", id, { batch_number: batchNumber, supplier_code: supplierCode }, actor);
       return this.getBatch(id);
     })();
+  }
+
+  getLot(lotNumberValue: string) {
+    const lotNumber = clean(lotNumberValue, 150);
+    if (!lotNumber) throw new WarehouseServiceError(400, "VALIDATION_ERROR", "Parti/Lot zorunludur.");
+    const lines = this.db.prepare(`
+      SELECT ll.*, p.sku, p.name_tr, p.name_en, p.title, p.material, p.product_series,
+             p.model, p.form_code, p.size, p.weight_grams, p.central_stock,
+             (SELECT pi.path FROM product_images pi WHERE pi.product_id = p.id ORDER BY pi.sort_order, pi.id LIMIT 1) AS image_path
+      FROM inbound_lot_lines ll
+      JOIN products p ON p.id = ll.product_id
+      WHERE ll.lot_number = ? COLLATE NOCASE AND COALESCE(p.status, 'Active') != 'deleted'
+      ORDER BY p.sku COLLATE NOCASE
+    `).all(lotNumber) as any[];
+    if (!lines.length) throw new WarehouseServiceError(404, "LOT_NOT_FOUND", "Bu parti/lot Panel master verisinde bulunamadı.");
+    return {
+      lot_number: lotNumber,
+      lines,
+      totals: lines.reduce((sum, line) => ({
+        sku_count: sum.sku_count + 1,
+        package_count: sum.package_count + Number(line.package_count),
+        unit_count: sum.unit_count + Number(line.total_units),
+        weight_kg: sum.weight_kg + Number(line.total_weight_kg || 0),
+      }), { sku_count: 0, package_count: 0, unit_count: 0, weight_kg: 0 }),
+    };
+  }
+
+  startReceivingSession(lotNumberValue: string, actor: WarehouseActor, deviceId?: string) {
+    const lot = this.getLot(lotNumberValue) as any;
+    return this.db.transaction(() => {
+      const existing = this.db.prepare("SELECT id, receiving_state FROM inbound_batches WHERE lot_number = ? COLLATE NOCASE").get(lot.lot_number) as any;
+      if (existing) {
+        if (existing.receiving_state === "completed" || existing.receiving_state === "cancelled") {
+          throw new WarehouseServiceError(409, "SESSION_CLOSED", "Bu parti için tamamlanmış veya iptal edilmiş bir mal kabul bulunuyor.");
+        }
+        this.sessionEvent(existing.id, null, "SESSION_JOINED", actor, deviceId);
+        this.audit("WAREHOUSE_RECEIVING_SESSION_JOINED", "inbound_batch", existing.id, { lot_number: lot.lot_number }, actor);
+        return { ...this.getReceivingSession(existing.id), resumed: true };
+      }
+
+      const id = randomUUID();
+      const batchNumber = this.nextBatchNumber();
+      this.db.prepare(`
+        INSERT INTO inbound_batches (
+          id, batch_number, supplier_code, supplier_name, status, expected_package_count,
+          expected_unit_count, created_by, lot_number, receiving_state, started_by, started_at
+        ) VALUES (?, ?, 'MULTI', 'Panel Lot Master', 'READY', ?, ?, ?, ?, 'active', ?, CURRENT_TIMESTAMP)
+      `).run(id, batchNumber, lot.totals.package_count, lot.totals.unit_count, actor.id, lot.lot_number, actor.id);
+
+      const templateId = this.ensureDefaultTemplate(actor.id);
+      const insertLine = this.db.prepare(`
+        INSERT INTO inbound_batch_lines (
+          id, batch_id, line_number, supplier_code, product_id, sku_snapshot, product_name_snapshot,
+          lot_number, expected_package_count, units_per_package, last_package_units, total_units,
+          supplier_no_snapshot, name_tr_snapshot, name_en_snapshot, material_snapshot, series_snapshot,
+          model_snapshot, form_snapshot, size_snapshot, unit_weight_g_snapshot,
+          package_weight_kg_snapshot, total_weight_kg_snapshot, image_path_snapshot
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const insertPackage = this.db.prepare(`
+        INSERT INTO warehouse_packages (
+          id, package_code, batch_id, batch_line_id, product_id, supplier_code,
+          package_number, total_packages, planned_quantity, remaining_quantity, status, label_template_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'EXPECTED', ?)
+      `);
+      lot.lines.forEach((source: any, index: number) => {
+        const lineId = randomUUID();
+        const lastPackageUnits = Number(source.total_units) - (Number(source.package_count) - 1) * Number(source.units_per_package);
+        insertLine.run(
+          lineId, id, index + 1, source.supplier_code, source.product_id, source.sku,
+          source.name_tr || source.title || source.name_en || source.sku, lot.lot_number,
+          source.package_count, source.units_per_package, lastPackageUnits, source.total_units,
+          source.supplier_code, source.name_tr, source.name_en, source.material, source.product_series,
+          source.model, source.form_code, source.size, source.weight_grams || 0,
+          source.package_weight_kg || 0, source.total_weight_kg || 0, source.image_path,
+        );
+        for (let packageNumber = 1; packageNumber <= Number(source.package_count); packageNumber += 1) {
+          const quantity = packageNumber === Number(source.package_count) ? lastPackageUnits : Number(source.units_per_package);
+          insertPackage.run(randomUUID(), this.nextPackageCode(), id, lineId, source.product_id, source.supplier_code,
+            packageNumber, source.package_count, quantity, quantity, templateId);
+        }
+      });
+      this.sessionEvent(id, null, "SESSION_STARTED", actor, deviceId, { lot_number: lot.lot_number });
+      this.audit("WAREHOUSE_RECEIVING_SESSION_STARTED", "inbound_batch", id, { lot_number: lot.lot_number }, actor);
+      return { ...this.getReceivingSession(id), resumed: false };
+    }).immediate();
+  }
+
+  listReceivingSessions() {
+    return this.db.prepare(`
+      SELECT b.id, b.batch_number, b.lot_number, b.receiving_state, b.status, b.started_at,
+             b.completed_at, b.expected_package_count, b.expected_unit_count,
+             (SELECT COUNT(*) FROM inbound_batch_lines line_count WHERE line_count.batch_id = b.id) AS sku_count,
+             (SELECT COUNT(*) FROM warehouse_packages package_count WHERE package_count.batch_id = b.id AND package_count.status IN ('PLACED','OPEN','EMPTY')) AS placed_count,
+             COALESCE((SELECT SUM(weight_line.total_weight_kg_snapshot) FROM inbound_batch_lines weight_line WHERE weight_line.batch_id = b.id), 0) AS total_weight_kg,
+             (SELECT GROUP_CONCAT(DISTINCT COALESCE(event_user.username, event.actor_username))
+                FROM inbound_session_events event LEFT JOIN users event_user ON event_user.id = event.actor_id
+               WHERE event.batch_id = b.id) AS actor_names
+      FROM inbound_batches b
+      WHERE b.lot_number IS NOT NULL
+      ORDER BY CASE b.receiving_state WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
+               datetime(COALESCE(b.started_at, b.created_at)) DESC
+    `).all();
+  }
+
+  getReceivingSession(id: string) {
+    const batch = this.db.prepare(`
+      SELECT b.*, u.username AS started_by_name
+      FROM inbound_batches b LEFT JOIN users u ON u.id = b.started_by
+      WHERE b.id = ? AND b.lot_number IS NOT NULL
+    `).get(id) as any;
+    if (!batch) throw new WarehouseServiceError(404, "SESSION_NOT_FOUND", "Mal kabul oturumu bulunamadı.");
+    const lines = this.db.prepare(`
+      SELECT l.*,
+        SUM(CASE WHEN p.status IN ('PLACED','OPEN','EMPTY') THEN 1 ELSE 0 END) AS completed_packages,
+        SUM(CASE WHEN p.status IN ('PLACED','OPEN','EMPTY') THEN p.planned_quantity ELSE 0 END) AS received_quantity
+      FROM inbound_batch_lines l LEFT JOIN warehouse_packages p ON p.batch_line_id = l.id
+      WHERE l.batch_id = ? GROUP BY l.id ORDER BY l.line_number
+    `).all(id) as any[];
+    const placed = lines.reduce((sum, line) => sum + Number(line.completed_packages || 0), 0);
+    const events = this.db.prepare(`
+      SELECT e.*, p.package_code FROM inbound_session_events e
+      LEFT JOIN warehouse_packages p ON p.id = e.package_id
+      WHERE e.batch_id = ? ORDER BY datetime(e.created_at) DESC, e.id DESC LIMIT 250
+    `).all(id);
+    return {
+      ...batch,
+      lines,
+      events,
+      progress: {
+        sku_count: lines.length,
+        total_packages: Number(batch.expected_package_count),
+        placed_packages: placed,
+        remaining_packages: Math.max(0, Number(batch.expected_package_count) - placed),
+        percent: Number(batch.expected_package_count) ? Math.round(placed / Number(batch.expected_package_count) * 100) : 0,
+      },
+    };
+  }
+
+  setReceivingState(id: string, state: "active" | "paused" | "cancelled", actor: WarehouseActor, deviceId?: string) {
+    const session = this.getReceivingSession(id) as any;
+    if (session.receiving_state === "completed" || session.receiving_state === "cancelled") {
+      throw new WarehouseServiceError(409, "SESSION_CLOSED", "Tamamlanmış veya iptal edilmiş mal kabul tekrar açılamaz.");
+    }
+    this.db.prepare(`UPDATE inbound_batches SET receiving_state = ?,
+      paused_at = CASE WHEN ? = 'paused' THEN CURRENT_TIMESTAMP ELSE paused_at END,
+      cancelled_at = CASE WHEN ? = 'cancelled' THEN CURRENT_TIMESTAMP ELSE cancelled_at END,
+      status = CASE WHEN ? = 'cancelled' THEN 'CANCELLED' ELSE status END,
+      updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(state, state, state, state, id);
+    this.sessionEvent(id, null, `SESSION_${state.toUpperCase()}`, actor, deviceId);
+    this.audit(`WAREHOUSE_RECEIVING_SESSION_${state.toUpperCase()}`, "inbound_batch", id, {}, actor);
+    return this.getReceivingSession(id);
+  }
+
+  completeReceivingSession(id: string, forceReasonValue: unknown, actor: WarehouseActor, deviceId?: string) {
+    const session = this.getReceivingSession(id) as any;
+    if (session.receiving_state === "completed") return { ...session, idempotent: true };
+    if (session.receiving_state === "cancelled") throw new WarehouseServiceError(409, "SESSION_CLOSED", "İptal edilmiş mal kabul tamamlanamaz.");
+    const remaining = Number(session.progress.remaining_packages);
+    const forceReason = clean(forceReasonValue, 1000);
+    if (remaining > 0 && !forceReason) {
+      throw new WarehouseServiceError(409, "PACKAGES_REMAINING", `${remaining} paket henüz yerleştirilmedi.`);
+    }
+    this.db.prepare(`UPDATE inbound_batches SET receiving_state='completed', status='COMPLETED', completed_at=CURRENT_TIMESTAMP,
+      force_completed_by=?, force_complete_reason=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+      .run(remaining > 0 ? actor.id : null, remaining > 0 ? forceReason : null, id);
+    this.sessionEvent(id, null, remaining > 0 ? "SESSION_FORCE_COMPLETED" : "SESSION_COMPLETED", actor, deviceId, { remaining_packages: remaining, reason: forceReason || null });
+    this.audit(remaining > 0 ? "WAREHOUSE_RECEIVING_FORCE_COMPLETED" : "WAREHOUSE_RECEIVING_COMPLETED", "inbound_batch", id, { remaining_packages: remaining, reason: forceReason || null }, actor);
+    return { ...this.getReceivingSession(id), idempotent: false };
   }
 
   listBatches() {
@@ -254,22 +431,32 @@ export class WarehouseAdminService {
     })();
   }
 
-  claimNextPackage(supplierCode: string, actor: WarehouseActor) {
+  claimNextPackage(supplierCode: string, actor: WarehouseActor, sessionIdValue?: string, deviceId?: string) {
     const code = clean(supplierCode, 100);
+    const sessionId = clean(sessionIdValue, 100) || null;
     if (!code) throw new WarehouseServiceError(400, "VALIDATION_ERROR", "Tedarikçi kodu zorunludur.");
+    if (sessionId) {
+      const session = this.getReceivingSession(sessionId) as any;
+      if (session.receiving_state !== "active") throw new WarehouseServiceError(409, "SESSION_NOT_ACTIVE", "Mal kabul oturumu aktif değil.");
+      const supplierInSession = Boolean(this.db.prepare("SELECT 1 FROM inbound_batch_lines WHERE batch_id = ? AND supplier_code = ? COLLATE NOCASE LIMIT 1").get(sessionId, code));
+      if (!supplierInSession) throw new WarehouseServiceError(404, "PRODUCT_NOT_IN_ACTIVE_LOT", "Bu ürün aktif partide bulunamadı.");
+    }
     return this.db.transaction(() => {
       const candidate = this.db.prepare(`
         SELECT p.id
         FROM warehouse_packages p
         JOIN inbound_batches b ON b.id = p.batch_id
         JOIN inbound_batch_lines l ON l.id = p.batch_line_id
-        WHERE p.supplier_code = ? COLLATE NOCASE
+        WHERE ((? IS NULL AND p.supplier_code = ? COLLATE NOCASE)
+            OR (? IS NOT NULL AND l.supplier_code = ? COLLATE NOCASE))
+          AND (? IS NULL OR p.batch_id = ?)
           AND b.status NOT IN ('COMPLETED','CANCELLED')
+          AND COALESCE(b.receiving_state, 'active') = 'active'
           AND (p.status = 'EXPECTED' OR (p.status = 'CLAIMED' AND datetime(p.claim_expires_at) <= datetime('now')))
         ORDER BY datetime(b.created_at), l.line_number, p.package_number
         LIMIT 1
-      `).get(code) as any;
-      if (!candidate) throw new WarehouseServiceError(404, "NO_PACKAGE_AVAILABLE", "Bu tedarikçi kodu için bekleyen paket yok.");
+      `).get(sessionId, code, sessionId, code, sessionId, sessionId) as any;
+      if (!candidate) throw new WarehouseServiceError(404, "NO_PACKAGE_AVAILABLE", sessionId ? "Bu ürün için aktif partide bekleyen paket yok." : "Bu tedarikçi kodu için bekleyen paket yok.");
       const claimToken = randomUUID();
       const result = this.db.prepare(`
         UPDATE warehouse_packages
@@ -279,8 +466,10 @@ export class WarehouseAdminService {
       `).run(claimToken, actor.id, `+${this.claimLeaseSeconds} seconds`, candidate.id);
       if (result.changes !== 1) throw new WarehouseServiceError(409, "PACKAGE_ALREADY_CLAIMED", "Paket başka bir kullanıcı tarafından alındı; yeniden okutun.");
       this.db.prepare("UPDATE inbound_batches SET status = 'RECEIVING', updated_at = CURRENT_TIMESTAMP WHERE id = (SELECT batch_id FROM warehouse_packages WHERE id = ?) AND status = 'READY'").run(candidate.id);
+      const claimed = this.getPackage(candidate.id) as any;
+      this.sessionEvent(claimed.batch_id, claimed.id, "PACKAGE_CLAIMED", actor, deviceId, { supplier_code: code });
       this.audit("WAREHOUSE_PACKAGE_CLAIMED", "warehouse_package", candidate.id, { claim_seconds: this.claimLeaseSeconds }, actor);
-      return this.getPackage(candidate.id);
+      return claimed;
     }).immediate();
   }
 
@@ -292,13 +481,17 @@ export class WarehouseAdminService {
 
   getPackage(id: string) {
     const pkg = this.db.prepare(`
-      SELECT p.*, b.batch_number, l.line_number, l.sku_snapshot, l.product_name_snapshot, l.lot_number,
-             l.units_per_package, loc.code AS location_code,
+      SELECT p.*, b.batch_number, b.lot_number AS session_lot_number, l.line_number, l.sku_snapshot, l.product_name_snapshot, l.lot_number,
+             l.units_per_package, l.supplier_no_snapshot, l.name_tr_snapshot, l.name_en_snapshot,
+             l.material_snapshot, l.series_snapshot, l.model_snapshot, l.form_snapshot, l.size_snapshot,
+             l.unit_weight_g_snapshot, l.package_weight_kg_snapshot, l.total_weight_kg_snapshot,
+             l.image_path_snapshot, loc.code AS location_code, recommended.code AS recommended_location_code,
              t.name AS template_name, t.template_json
       FROM warehouse_packages p
       JOIN inbound_batches b ON b.id = p.batch_id
       JOIN inbound_batch_lines l ON l.id = p.batch_line_id
       LEFT JOIN warehouse_locations loc ON loc.id = p.current_location_id
+      LEFT JOIN warehouse_locations recommended ON recommended.id = p.recommended_location_id
       LEFT JOIN label_templates t ON t.id = p.label_template_id
       WHERE p.id = ?
     `).get(id) as any;
@@ -336,6 +529,7 @@ export class WarehouseAdminService {
           label_template_id = ?, claim_token = NULL,
           claim_expires_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?
       `).run(templateId, packageId);
+      this.sessionEvent(pkg.batch_id, pkg.id, reprint ? "LABEL_REPRINT_QUEUED" : "LABEL_QUEUED", actor, clean(input.device_id, 150), { job_id: jobId });
       this.audit(reprint ? "WAREHOUSE_LABEL_REPRINT_QUEUED" : "WAREHOUSE_LABEL_QUEUED", "warehouse_package", packageId, { job_id: jobId }, actor);
       return { job: this.db.prepare("SELECT * FROM print_jobs WHERE id = ?").get(jobId), package: this.getPackage(packageId), idempotent: false };
     })();
@@ -373,17 +567,29 @@ export class WarehouseAdminService {
     `).all();
   }
 
-  suggestLocation() {
+  suggestLocation(packageIdValue?: string) {
+    const packageId = clean(packageIdValue, 100);
+    const pkg = packageId ? this.db.prepare("SELECT * FROM warehouse_packages WHERE id = ?").get(packageId) as any : null;
+    if (packageId && !pkg) throw new WarehouseServiceError(404, "PACKAGE_NOT_FOUND", "Paket bulunamadı.");
     const row = this.db.prepare(`
       SELECT l.*, COUNT(p.id) AS occupied_packages,
-             l.package_capacity - COUNT(p.id) AS available_capacity
+             l.package_capacity - COUNT(p.id) AS available_capacity,
+             SUM(CASE WHEN p.product_id = ? AND p.status IN ('PLACED','OPEN') THEN 1 ELSE 0 END) AS same_sku_packages
       FROM warehouse_locations l
       LEFT JOIN warehouse_packages p ON p.current_location_id = l.id AND p.status IN ('PLACED','OPEN')
       WHERE l.active = 1
       GROUP BY l.id HAVING COUNT(p.id) < l.package_capacity
-      ORDER BY COUNT(p.id), l.code COLLATE NOCASE LIMIT 1
-    `).get();
+      ORDER BY CASE WHEN SUM(CASE WHEN p.product_id = ? AND p.status IN ('PLACED','OPEN') THEN 1 ELSE 0 END) > 0 THEN 0 ELSE 1 END,
+               CASE WHEN EXISTS (SELECT 1 FROM products preferred WHERE preferred.id = ? AND preferred.warehouse_location = l.code COLLATE NOCASE)
+                          OR EXISTS (SELECT 1 FROM product_reserve_locations reserve WHERE reserve.product_id = ? AND reserve.location = l.code COLLATE NOCASE)
+                    THEN 0 ELSE 1 END,
+               same_sku_packages DESC, COUNT(p.id), l.code COLLATE NOCASE LIMIT 1
+    `).get(pkg?.product_id || "", pkg?.product_id || "", pkg?.product_id || "", pkg?.product_id || "") as any;
     if (!row) throw new WarehouseServiceError(409, "NO_LOCATION_CAPACITY", "Kullanılabilir lokasyon kapasitesi yok.");
+    if (pkg) {
+      this.db.prepare("UPDATE warehouse_packages SET recommended_location_id = ?, recommended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .run(row.id, pkg.id);
+    }
     return row;
   }
 
@@ -402,6 +608,11 @@ export class WarehouseAdminService {
       const location = this.db.prepare("SELECT * FROM warehouse_locations WHERE code = ? COLLATE NOCASE AND active = 1").get(clean(locationCode, 100)) as any;
       if (!location) throw new WarehouseServiceError(404, "LOCATION_NOT_FOUND", "Aktif lokasyon bulunamadı.");
       if (pkg.status !== "LABELED") throw new WarehouseServiceError(409, "PACKAGE_NOT_LABELED", "Yerleştirmeden önce paket etiketi başarıyla basılmalıdır.");
+      const overrideReason = clean(input.override_reason, 1000);
+      if (pkg.recommended_location_id && pkg.recommended_location_id !== location.id && !overrideReason) {
+        const recommended = this.db.prepare("SELECT code FROM warehouse_locations WHERE id = ?").get(pkg.recommended_location_id) as any;
+        throw new WarehouseServiceError(409, "WRONG_LOCATION", `Yanlış lokasyon. Paketi ${recommended?.code || "önerilen lokasyona"} yerleştirin.`);
+      }
       const occupied = this.db.prepare("SELECT COUNT(*) AS count FROM warehouse_packages WHERE current_location_id = ? AND status IN ('PLACED','OPEN')").get(location.id) as any;
       if (Number(occupied.count) >= Number(location.package_capacity)) throw new WarehouseServiceError(409, "LOCATION_FULL", "Lokasyon kapasitesi dolu.");
       const lowerPending = this.db.prepare(`
@@ -410,7 +621,6 @@ export class WarehouseAdminService {
           AND status NOT IN ('PLACED','OPEN','EMPTY','MISSING','DAMAGED','QUARANTINED','CANCELLED')
         ORDER BY package_number LIMIT 1
       `).get(pkg.batch_line_id, pkg.package_number) as any;
-      const overrideReason = clean(input.override_reason, 1000);
       if (lowerPending && !overrideReason) {
         throw new WarehouseServiceError(409, "PACKAGE_OUT_OF_ORDER", `Önce ${lowerPending.package_code} yerleştirilmelidir.`);
       }
@@ -427,7 +637,12 @@ export class WarehouseAdminService {
       this.db.prepare("UPDATE products SET central_stock = COALESCE(central_stock, 0) + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(pkg.planned_quantity, pkg.product_id);
       this.db.prepare("INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type) VALUES (?, ?, 'WAREHOUSE', ?, ?, 'IN')")
         .run(randomUUID(), pkg.product_id, pkg.planned_quantity, `Paket girişi: ${pkg.package_code}`);
-      this.refreshBatchStatus(pkg.batch_id);
+      const sessionCompleted = this.refreshBatchStatus(pkg.batch_id);
+      this.sessionEvent(pkg.batch_id, pkg.id, "PACKAGE_PLACED", actor, clean(input.device_id, 150), { location_code: location.code, quantity: pkg.planned_quantity, override_reason: overrideReason || null });
+      if (sessionCompleted) {
+        this.sessionEvent(pkg.batch_id, null, "SESSION_COMPLETED", actor, clean(input.device_id, 150));
+        this.audit("WAREHOUSE_RECEIVING_COMPLETED", "inbound_batch", pkg.batch_id, { automatic: true }, actor);
+      }
       this.audit("WAREHOUSE_PACKAGE_PLACED", "warehouse_package", pkg.id, { location_code: location.code, quantity: pkg.planned_quantity, override_reason: overrideReason || null }, actor);
       return { placement: this.db.prepare("SELECT * FROM package_placements WHERE id = ?").get(placementId), package: this.getPackage(pkg.id), idempotent: false };
     })();
@@ -567,9 +782,20 @@ export class WarehouseAdminService {
     `).get(batchId) as any;
     const complete = Number(counts.total) > 0 && Number(counts.accounted) === Number(counts.total);
     this.db.prepare(`
-      UPDATE inbound_batches SET status = ?, completed_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END,
+      UPDATE inbound_batches SET status = ?, receiving_state = CASE WHEN ? THEN 'completed' ELSE receiving_state END,
+        completed_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END,
         updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status != 'CANCELLED'
-    `).run(complete ? "COMPLETED" : Number(counts.placed) > 0 ? "PLACING" : "RECEIVING", complete ? 1 : 0, batchId);
+    `).run(complete ? "COMPLETED" : Number(counts.placed) > 0 ? "PLACING" : "RECEIVING", complete ? 1 : 0, complete ? 1 : 0, batchId);
+    return complete;
+  }
+
+  private sessionEvent(batchId: string, packageId: string | null, eventType: string, actor: WarehouseActor, deviceId?: string, details: unknown = {}) {
+    const session = this.db.prepare("SELECT lot_number FROM inbound_batches WHERE id = ?").get(batchId) as any;
+    if (!session?.lot_number) return;
+    this.db.prepare(`
+      INSERT INTO inbound_session_events (id, batch_id, package_id, event_type, actor_id, actor_username, device_id, details)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(randomUUID(), batchId, packageId, eventType, actor.id, actor.username, clean(deviceId, 150) || null, JSON.stringify(details || {}));
   }
 
   private audit(action: string, entityType: string, entityId: string, details: unknown, actor: WarehouseActor) {

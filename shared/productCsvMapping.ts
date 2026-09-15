@@ -26,7 +26,9 @@ export type ProductCsvField =
   | "reserve_locations"
   | "barcode"
   | "notes"
-  | "product_series";
+  | "product_series"
+  | "party_lot"
+  | "lot_quantity";
 
 export type ProductCsvColumnDefinition = {
   field: ProductCsvField;
@@ -65,6 +67,8 @@ export const PRODUCT_CSV_COLUMNS: readonly ProductCsvColumnDefinition[] = [
   { field: "barcode", label: "Barkod", aliases: ["Barkod", "Barcode", "EAN", "UPC"] },
   { field: "notes", label: "Notlar", aliases: ["Notlar", "Not", "Notes"] },
   { field: "product_series", label: "Ürün serisi", aliases: ["Seri", "Ürün Serisi", "Urun Serisi", "Product Series"] },
+  { field: "party_lot", label: "Parti / Lot", aliases: ["Parti/Lot", "Parti Lot", "party_lot", "Party Lot", "batch_lot", "Batch Lot", "Lot", "Lot Number"] },
+  { field: "lot_quantity", label: "Lot giriş adedi", aliases: ["lot_quantity", "receiving_quantity", "Lot Adedi", "Parti Adedi", "Mal Kabul Adedi", "Incoming Quantity", "Receiving Quantity"] },
 ] as const;
 
 export function normalizeCsvHeader(value: unknown): string {

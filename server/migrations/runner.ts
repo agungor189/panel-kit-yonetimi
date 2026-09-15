@@ -1975,6 +1975,100 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 53,
+    name: "add_lot_driven_receiving_sessions",
+    up(db) {
+      const batchColumns = new Set(
+        (db.prepare("PRAGMA table_info(inbound_batches)").all() as { name: string }[]).map((column) => column.name),
+      );
+      const addBatchColumn = (name: string, definition: string) => {
+        if (!batchColumns.has(name)) db.exec(`ALTER TABLE inbound_batches ADD COLUMN ${definition}`);
+      };
+      addBatchColumn("lot_number", "lot_number TEXT COLLATE NOCASE");
+      addBatchColumn("receiving_state", "receiving_state TEXT NOT NULL DEFAULT 'active'");
+      addBatchColumn("started_by", "started_by TEXT");
+      addBatchColumn("started_at", "started_at DATETIME");
+      addBatchColumn("paused_at", "paused_at DATETIME");
+      addBatchColumn("cancelled_at", "cancelled_at DATETIME");
+      addBatchColumn("force_completed_by", "force_completed_by TEXT");
+      addBatchColumn("force_complete_reason", "force_complete_reason TEXT");
+
+      const lineColumns = new Set(
+        (db.prepare("PRAGMA table_info(inbound_batch_lines)").all() as { name: string }[]).map((column) => column.name),
+      );
+      const addLineColumn = (name: string, definition: string) => {
+        if (!lineColumns.has(name)) db.exec(`ALTER TABLE inbound_batch_lines ADD COLUMN ${definition}`);
+      };
+      addLineColumn("supplier_no_snapshot", "supplier_no_snapshot TEXT");
+      addLineColumn("name_tr_snapshot", "name_tr_snapshot TEXT");
+      addLineColumn("name_en_snapshot", "name_en_snapshot TEXT");
+      addLineColumn("material_snapshot", "material_snapshot TEXT");
+      addLineColumn("series_snapshot", "series_snapshot TEXT");
+      addLineColumn("model_snapshot", "model_snapshot TEXT");
+      addLineColumn("form_snapshot", "form_snapshot TEXT");
+      addLineColumn("size_snapshot", "size_snapshot TEXT");
+      addLineColumn("unit_weight_g_snapshot", "unit_weight_g_snapshot REAL NOT NULL DEFAULT 0");
+      addLineColumn("package_weight_kg_snapshot", "package_weight_kg_snapshot REAL NOT NULL DEFAULT 0");
+      addLineColumn("total_weight_kg_snapshot", "total_weight_kg_snapshot REAL NOT NULL DEFAULT 0");
+      addLineColumn("image_path_snapshot", "image_path_snapshot TEXT");
+
+      const packageColumns = new Set(
+        (db.prepare("PRAGMA table_info(warehouse_packages)").all() as { name: string }[]).map((column) => column.name),
+      );
+      if (!packageColumns.has("recommended_location_id")) {
+        db.exec("ALTER TABLE warehouse_packages ADD COLUMN recommended_location_id TEXT REFERENCES warehouse_locations(id) ON DELETE SET NULL");
+      }
+      if (!packageColumns.has("recommended_at")) {
+        db.exec("ALTER TABLE warehouse_packages ADD COLUMN recommended_at DATETIME");
+      }
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS inbound_lot_lines (
+          id TEXT PRIMARY KEY,
+          lot_number TEXT NOT NULL COLLATE NOCASE,
+          product_id TEXT NOT NULL,
+          supplier_code TEXT NOT NULL COLLATE NOCASE,
+          package_count INTEGER NOT NULL CHECK(package_count > 0),
+          units_per_package REAL NOT NULL CHECK(units_per_package > 0),
+          total_units REAL NOT NULL CHECK(total_units > 0),
+          package_weight_kg REAL NOT NULL DEFAULT 0,
+          total_weight_kg REAL NOT NULL DEFAULT 0,
+          source_name TEXT,
+          source_hash TEXT,
+          created_by TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(lot_number, product_id),
+          FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS inbound_session_events (
+          id TEXT PRIMARY KEY,
+          batch_id TEXT NOT NULL,
+          package_id TEXT,
+          event_type TEXT NOT NULL,
+          actor_id TEXT,
+          actor_username TEXT,
+          device_id TEXT,
+          details TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(batch_id) REFERENCES inbound_batches(id) ON DELETE RESTRICT,
+          FOREIGN KEY(package_id) REFERENCES warehouse_packages(id) ON DELETE SET NULL,
+          FOREIGN KEY(actor_id) REFERENCES users(id) ON DELETE SET NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_batches_lot
+          ON inbound_batches(lot_number) WHERE lot_number IS NOT NULL AND TRIM(lot_number) <> '';
+        CREATE INDEX IF NOT EXISTS idx_inbound_lot_lines_lot
+          ON inbound_lot_lines(lot_number, supplier_code);
+        CREATE INDEX IF NOT EXISTS idx_inbound_session_events_batch
+          ON inbound_session_events(batch_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_warehouse_packages_recommended_location
+          ON warehouse_packages(recommended_location_id, status);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

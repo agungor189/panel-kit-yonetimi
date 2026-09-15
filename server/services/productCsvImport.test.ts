@@ -93,6 +93,36 @@ test("import persists localized names, grams, logistics, multiple reserve locati
   db.close();
 });
 
+test("lot içeren Panel master importu kabul beklentisini kaydeder ve mevcut stoğu overwrite etmez", () => {
+  const db = database();
+  runMigrations(db);
+  db.prepare("INSERT INTO products (id, sku, title, name, supplier_code, central_stock, product_type) VALUES ('existing', 'SKU-LOT', 'Ürün', 'Ürün', 'SUP-LOT', 100, 'simple')").run();
+  const headers = ["SKU", "Tedarik NO", "İsim - TR", "TÜR", "Toplam Adet", "Kutu sayısı", "Kutu içi adet", "Kutu Ağırlığı", "Toplam Ağırlık", "Parti/Lot"];
+  const rows = [{ SKU: "SKU-LOT", "Tedarik NO": "SUP-LOT", "İsim - TR": "Ürün", "TÜR": "simple", "Toplam Adet": "75", "Kutu sayısı": "3", "Kutu içi adet": "25", "Kutu Ağırlığı": "10", "Toplam Ağırlık": "30", "Parti/Lot": "LOT-002" }];
+  const report = importProductsFromCsvRows(db, rows, headers, { apply: true, actorUsername: "admin" });
+  assert.equal(report.applied, true);
+  assert.equal(report.lot_lines_created, 1);
+  assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'existing'").get() as any).central_stock, 100);
+  assert.deepEqual(db.prepare("SELECT lot_number, product_id, package_count, units_per_package, total_units FROM inbound_lot_lines").get(), {
+    lot_number: "LOT-002", product_id: "existing", package_count: 3, units_per_package: 25, total_units: 75,
+  });
+  db.close();
+});
+
+test("yeni SKU iki farklı lotta tek ürün ve iki kabul beklentisi olarak kalır", () => {
+  const db = database();
+  runMigrations(db);
+  const headers = ["SKU", "Tedarik NO", "İsim - TR", "TÜR", "Lot Adedi", "Kutu sayısı", "Kutu içi adet", "Parti/Lot"];
+  const base = { SKU: "NEW-SKU", "Tedarik NO": "NEW-SUP", "İsim - TR": "Yeni ürün", "TÜR": "simple", "Kutu sayısı": "2", "Kutu içi adet": "10" };
+  assert.equal(importProductsFromCsvRows(db, [{ ...base, "Lot Adedi": "20", "Parti/Lot": "LOT-N1" }], headers, { apply: true }).applied, true);
+  assert.equal(importProductsFromCsvRows(db, [{ ...base, "Lot Adedi": "15", "Parti/Lot": "LOT-N2" }], headers, { apply: true }).applied, true);
+  assert.equal((db.prepare("SELECT COUNT(*) count FROM products WHERE sku = 'NEW-SKU'").get() as any).count, 1);
+  assert.deepEqual((db.prepare("SELECT lot_number, total_units FROM inbound_lot_lines ORDER BY lot_number").all() as any[]), [
+    { lot_number: "LOT-N1", total_units: 20 }, { lot_number: "LOT-N2", total_units: 15 },
+  ]);
+  db.close();
+});
+
 test("duplicates, invalid types, invalid numbers and bad BOM block apply", () => {
   const db = database();
   const headers = ["SKU", "Tedarik NO", "İsim - TR", "TÜR", "Toplam Adet", "BOM"];

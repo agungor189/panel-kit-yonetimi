@@ -92,6 +92,14 @@ type PreparedProduct = {
   };
   reserve_locations: string[];
   has_reserve_locations_value: boolean;
+  receiving: {
+    lot_number: string | null;
+    package_count: number | null;
+    units_per_package: number | null;
+    total_units: number | null;
+    package_weight_kg: number;
+    total_weight_kg: number;
+  };
 };
 
 type PreparedBomLine = {
@@ -112,6 +120,8 @@ export type ProductCsvImportReport = {
   bom_lines_created: number;
   bom_lines_updated: number;
   bom_lines_removed: number;
+  lot_lines_created: number;
+  lot_lines_updated: number;
   matched_columns: Array<{ csv_header: string; product_field: ProductCsvField; label: string }>;
   unknown_columns: string[];
   validation_errors: ValidationError[];
@@ -318,7 +328,9 @@ export function importProductsFromCsvRows(
       });
     }
 
+    const lotNumber = clean(csvValue(row, resolution, "party_lot"));
     const stock = readNumber(row, sourceRow, "central_stock", resolution, errors, true);
+    const explicitLotQuantity = readNumber(row, sourceRow, "lot_quantity", resolution, errors, true);
     const weightGrams = readNumber(row, sourceRow, "weight_grams", resolution, errors);
     const purchasePriceUsd = readNumber(row, sourceRow, "purchase_price_usd", resolution, errors);
     const boxCount = readNumber(row, sourceRow, "box_count", resolution, errors, true);
@@ -347,9 +359,19 @@ export function importProductsFromCsvRows(
     const effectiveType = productType || legacyProductType(existing?.product_type, existing ? existingBomParents.has(existing.id) : false) || "simple";
     const effectiveWeightGrams = weightGrams ?? (Number(existing?.weight_grams ?? existing?.weight ?? 0) || 0);
     const effectivePurchasePrice = purchasePriceUsd ?? (Number(existing?.purchase_price_usd ?? 0) || 0);
-    const effectiveStock = effectiveType === "assembly"
+    const effectiveStock = effectiveType === "assembly" || lotNumber
       ? Number(existing?.central_stock || 0)
       : stock ?? Number(existing?.central_stock || 0);
+    const lotQuantity = explicitLotQuantity ?? (lotNumber ? stock : null) ?? (boxCount && unitsPerBox ? boxCount * unitsPerBox : null);
+    if (lotNumber && (!supplierCode || !boxCount || !unitsPerBox || !lotQuantity
+      || lotQuantity > boxCount * unitsPerBox || lotQuantity <= (boxCount - 1) * unitsPerBox)) {
+      errors.push({
+        row: sourceRow,
+        field: "party_lot",
+        code: "INVALID_LOT_LOGISTICS",
+        message: `${lotNumber} için tedarikçi no, pozitif kutu sayısı/kutu içi adet ve kutu kapasitesini aşmayan lot adedi zorunludur.`,
+      });
+    }
     const normalized = generateNormalizedFields({
       material,
       category: clean(existing?.category) || material,
@@ -385,7 +407,7 @@ export function importProductsFromCsvRows(
       form_code: clean(existing?.form_code) || clean(sku.split("-").at(-1)) || null,
       connection_type: clean(existing?.connection_type) || null,
       central_stock: effectiveStock,
-      has_stock_value: effectiveType !== "assembly" && stock !== null,
+      has_stock_value: effectiveType !== "assembly" && !lotNumber && stock !== null,
       product_type: effectiveType,
       is_sellable: effectiveType === "component" ? 0 : 1,
       visible_in_catalog: effectiveType === "component" ? 0 : 1,
@@ -409,6 +431,14 @@ export function importProductsFromCsvRows(
       },
       reserve_locations: parseReserveLocations(reserveRaw),
       has_reserve_locations_value: clean(reserveRaw) !== "",
+      receiving: {
+        lot_number: lotNumber || null,
+        package_count: boxCount,
+        units_per_package: unitsPerBox,
+        total_units: lotQuantity,
+        package_weight_kg: Number(boxWeightKg ?? previousLogistics?.box_weight_kg ?? 0),
+        total_weight_kg: Number(totalWeightKg ?? previousLogistics?.total_weight_kg ?? 0),
+      },
     });
   }
 
@@ -515,6 +545,8 @@ export function importProductsFromCsvRows(
     bom_lines_created: preparedBomLines.filter((line) => !existingBomPairs.has(`${line.parentId}\u0000${line.componentId}`)).length,
     bom_lines_updated: preparedBomLines.filter((line) => existingBomPairs.has(`${line.parentId}\u0000${line.componentId}`)).length,
     bom_lines_removed: bomLinesRemoved,
+    lot_lines_created: preparedProducts.filter((product) => product.receiving.lot_number).length,
+    lot_lines_updated: 0,
     matched_columns: resolution.matchedColumns,
     unknown_columns: resolution.unknownColumns,
     validation_errors: errors,
@@ -576,6 +608,23 @@ export function importProductsFromCsvRows(
     INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type)
     VALUES (?, ?, 'Merkez Depo', ?, 'Product CSV import', 'ADJUST')
   `);
+  const existingLotLine = tableExists(db, "inbound_lot_lines")
+    ? db.prepare("SELECT id FROM inbound_lot_lines WHERE lot_number = ? COLLATE NOCASE AND product_id = ?")
+    : null;
+  const upsertLotLine = tableExists(db, "inbound_lot_lines")
+    ? db.prepare(`
+      INSERT INTO inbound_lot_lines (
+        id, lot_number, product_id, supplier_code, package_count, units_per_package, total_units,
+        package_weight_kg, total_weight_kg, source_name, source_hash, created_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(lot_number, product_id) DO UPDATE SET
+        supplier_code=excluded.supplier_code, package_count=excluded.package_count,
+        units_per_package=excluded.units_per_package, total_units=excluded.total_units,
+        package_weight_kg=excluded.package_weight_kg, total_weight_kg=excluded.total_weight_kg,
+        source_name=excluded.source_name, source_hash=excluded.source_hash,
+        created_by=excluded.created_by, updated_at=CURRENT_TIMESTAMP
+    `)
+    : null;
 
   db.transaction(() => {
     for (const product of preparedProducts) {
@@ -593,6 +642,18 @@ export function importProductsFromCsvRows(
       if (product.has_reserve_locations_value) {
         deleteReserveLocations.run(product.id);
         product.reserve_locations.forEach((location, index) => insertReserveLocation.run(crypto.randomUUID(), product.id, location, index));
+      }
+      if (product.receiving.lot_number && product.receiving.package_count && product.receiving.units_per_package && product.receiving.total_units && upsertLotLine) {
+        if (existingLotLine?.get(product.receiving.lot_number, product.id)) {
+          report.lot_lines_created -= 1;
+          report.lot_lines_updated += 1;
+        }
+        upsertLotLine.run(
+          crypto.randomUUID(), product.receiving.lot_number, product.id, product.supplier_code,
+          product.receiving.package_count, product.receiving.units_per_package, product.receiving.total_units,
+          product.receiving.package_weight_kg, product.receiving.total_weight_kg,
+          options.sourceName || null, options.sourceHash || null, options.actorUsername || null,
+        );
       }
     }
 
@@ -613,6 +674,8 @@ export function importProductsFromCsvRows(
           bom_lines_created: report.bom_lines_created,
           bom_lines_updated: report.bom_lines_updated,
           bom_lines_removed: report.bom_lines_removed,
+          lot_lines_created: report.lot_lines_created,
+          lot_lines_updated: report.lot_lines_updated,
         }),
         options.actorUsername || "product-csv-import",
       );

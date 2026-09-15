@@ -43,6 +43,20 @@ export function startPrintQueueWorker(db: Database.Database, options: {
       logger.warn(`[warehouse-print-worker] audit failed: ${error instanceof Error ? error.message : "unknown"}`);
     }
   };
+  const sessionEvent = (eventType: string, currentJob: any, details: Record<string, unknown>) => {
+    try {
+      const context = db.prepare(`SELECT p.batch_id, b.lot_number, u.username
+        FROM warehouse_packages p JOIN inbound_batches b ON b.id = p.batch_id
+        LEFT JOIN users u ON u.id = ? WHERE p.id = ?`).get(currentJob.created_by, currentJob.package_id) as any;
+      if (!context?.lot_number) return;
+      db.prepare(`INSERT INTO inbound_session_events
+        (id, batch_id, package_id, event_type, actor_id, actor_username, details)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(randomUUID(), context.batch_id, currentJob.package_id, eventType, currentJob.created_by, context.username || null, JSON.stringify(details));
+    } catch (error) {
+      logger.warn(`[warehouse-print-worker] session event failed: ${error instanceof Error ? error.message : "unknown"}`);
+    }
+  };
   const runOnce = async () => {
     if (running) return false;
     running = true;
@@ -51,7 +65,9 @@ export function startPrintQueueWorker(db: Database.Database, options: {
       job = db.transaction(() => {
         const candidate = db.prepare(`
           SELECT j.*, p.package_code, p.package_number, p.total_packages, p.planned_quantity,
-                 l.sku_snapshot, l.product_name_snapshot, l.lot_number, t.template_json
+                 l.sku_snapshot, l.product_name_snapshot, l.lot_number, l.supplier_no_snapshot,
+                 l.material_snapshot, l.size_snapshot, l.unit_weight_g_snapshot,
+                 l.package_weight_kg_snapshot, t.template_json
           FROM print_jobs j
           JOIN warehouse_packages p ON p.id = j.package_id
           JOIN inbound_batch_lines l ON l.id = p.batch_line_id
@@ -83,10 +99,16 @@ export function startPrintQueueWorker(db: Database.Database, options: {
             packageCode: job.package_code,
             sku: job.sku_snapshot,
             urunAdi: job.product_name_snapshot,
+            urunKodu: job.supplier_no_snapshot || "",
+            supplierNo: job.supplier_no_snapshot || "",
+            malzeme: job.material_snapshot || "",
+            olcu: job.size_snapshot || "",
             partiLot: job.lot_number || "",
             paketIciAdet: String(job.planned_quantity),
             paketNo: String(job.package_number),
             toplamPaket: String(job.total_packages),
+            urunAgirligi: String(job.unit_weight_g_snapshot || ""),
+            kutuAgirligi: String(job.package_weight_kg_snapshot || ""),
           },
         }),
         signal: AbortSignal.timeout(30_000),
@@ -115,6 +137,7 @@ export function startPrintQueueWorker(db: Database.Database, options: {
         `).run(job.package_status_before, job.package_status_before, job.package_id);
       })();
       audit("WAREHOUSE_LABEL_PRINTED", job, { package_code: job.package_code, attempts: job.attempts, dry_run: dryRun });
+      sessionEvent("LABEL_PRINTED", job, { package_code: job.package_code, attempts: job.attempts, dry_run: dryRun });
       logger.info(`[warehouse-print-worker] printed ${job.package_code}`);
       return true;
     } catch (error) {
@@ -130,6 +153,7 @@ export function startPrintQueueWorker(db: Database.Database, options: {
           }
         })();
         audit("WAREHOUSE_LABEL_PRINT_FAILED", job, { package_code: job.package_code, attempts: job.attempts, error: message });
+        sessionEvent("LABEL_PRINT_FAILED", job, { package_code: job.package_code, attempts: job.attempts, error: message });
       }
       logger.error(`[warehouse-print-worker] ${message}`);
       return false;

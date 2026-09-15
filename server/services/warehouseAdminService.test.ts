@@ -28,6 +28,14 @@ const createImportedBatch = (rows = importRows()) => {
   return service.applyImport(batch.id, rows, preview.preview_hash, actor) as any;
 };
 
+const createLotSession = (lotNumber = "LOT-SESSION", packageCount = 4, unitsPerPackage = 5) => {
+  db.prepare(`INSERT INTO inbound_lot_lines (
+    id, lot_number, product_id, supplier_code, package_count, units_per_package, total_units, package_weight_kg, total_weight_kg
+  ) VALUES (?, ?, 'product-1', 'SUP-SKU-1', ?, ?, ?, 2.5, ?)`)
+    .run(`lot-${lotNumber}`, lotNumber, packageCount, unitsPerPackage, packageCount * unitsPerPackage, packageCount * 2.5);
+  return service.startReceivingSession(lotNumber, actor, "device-a") as any;
+};
+
 beforeEach(() => {
   db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
@@ -166,6 +174,72 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     service.createLocation({ code: "A1", package_capacity: 1 }, actor);
     service.createLocation({ code: "B1", package_capacity: 1 }, { ...actor, id: "warehouse-user-2", username: "Ayşe" });
     assert.deepEqual(activities.filter((entry) => entry.action === "WAREHOUSE_LOCATION_CREATED").map((entry) => entry.actorId), [actor.id, "warehouse-user-2"]);
+  });
+
+  test("lot masterından tek ortak session ve mevcut 1/N paketleri oluşturur", () => {
+    const session = createLotSession("LOT-4", 4, 5);
+    const packages = db.prepare("SELECT package_number, total_packages FROM warehouse_packages WHERE batch_id = ? ORDER BY package_number").all(session.id) as any[];
+    assert.deepEqual(packages.map((pkg) => `${pkg.package_number}/${pkg.total_packages}`), ["1/4", "2/4", "3/4", "4/4"]);
+    const resumed = service.startReceivingSession("lot-4", { ...actor, id: "warehouse-user-2", username: "Ayşe" }, "device-b") as any;
+    assert.equal(resumed.id, session.id);
+    assert.equal(resumed.resumed, true);
+    const freshService = new WarehouseAdminService(db, () => {});
+    assert.equal((freshService.listReceivingSessions() as any[])[0].id, session.id);
+  });
+
+  test("lot-scope claim farklı kullanıcıları farklı paketlere ayırır ve aynı paketi iki kez vermez", () => {
+    const session = createLotSession("LOT-CLAIM", 2, 5);
+    assert.throws(() => service.claimNextPackage("WRONG-SUP", actor, session.id),
+      (error: unknown) => error instanceof WarehouseServiceError && error.code === "PRODUCT_NOT_IN_ACTIVE_LOT" && error.message === "Bu ürün aktif partide bulunamadı.");
+    const first = service.claimNextPackage("SUP-SKU-1", actor, session.id, "device-a") as any;
+    const secondActor = { ...actor, id: "warehouse-user-2", username: "Ayşe" };
+    const second = service.claimNextPackage("SUP-SKU-1", secondActor, session.id, "device-b") as any;
+    assert.notEqual(first.id, second.id);
+    assert.deepEqual([first.package_number, second.package_number], [1, 2]);
+    assert.throws(() => service.claimNextPackage("SUP-SKU-1", secondActor, session.id),
+      (error: unknown) => error instanceof WarehouseServiceError && error.code === "NO_PACKAGE_AVAILABLE");
+  });
+
+  test("aynı SKU farklı lotlarda karışmaz", () => {
+    const first = createLotSession("LOT-A", 1, 5);
+    db.prepare(`INSERT INTO inbound_lot_lines (id, lot_number, product_id, supplier_code, package_count, units_per_package, total_units)
+      VALUES ('lot-b', 'LOT-B', 'product-1', 'SUP-SKU-1', 1, 7, 7)`).run();
+    const second = service.startReceivingSession("LOT-B", actor) as any;
+    const firstPackage = service.claimNextPackage("SUP-SKU-1", actor, first.id) as any;
+    const secondPackage = service.claimNextPackage("SUP-SKU-1", actor, second.id) as any;
+    assert.equal(firstPackage.lot_number, "LOT-A");
+    assert.equal(secondPackage.lot_number, "LOT-B");
+    assert.equal(secondPackage.planned_quantity, 7);
+  });
+
+  test("önerilmeyen rafı reddeder, tekrar yerleştirmede stoğu bir kez artırır ve sessionı tamamlar", () => {
+    const session = createLotSession("LOT-PLACE", 1, 5);
+    const pkg = service.claimNextPackage("SUP-SKU-1", actor, session.id) as any;
+    service.queuePrint(pkg.id, { claim_token: pkg.claim_token, idempotency_key: "lot-print" }, actor);
+    db.prepare("UPDATE warehouse_packages SET status = 'LABELED' WHERE id = ?").run(pkg.id);
+    service.createLocation({ code: "A1", package_capacity: 2 }, actor);
+    service.createLocation({ code: "B1", package_capacity: 2 }, actor);
+    const suggestion = service.suggestLocation(pkg.id) as any;
+    assert.equal(suggestion.code, "A1");
+    assert.throws(() => service.placePackage(pkg.package_code, "B1", { idempotency_key: "wrong" }, actor),
+      (error: unknown) => error instanceof WarehouseServiceError && error.code === "WRONG_LOCATION");
+    const placed = service.placePackage(pkg.package_code, "A1", { idempotency_key: "place-once", device_id: "device-a" }, actor) as any;
+    const replay = service.placePackage(pkg.package_code, "A1", { idempotency_key: "place-once", device_id: "device-a" }, actor) as any;
+    assert.equal(placed.placement.id, replay.placement.id);
+    assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'product-1'").get() as any).central_stock, 5);
+    assert.equal((db.prepare("SELECT COUNT(*) count FROM warehouse_package_movements WHERE idempotency_key = ?").get(`place:${pkg.id}`) as any).count, 1);
+    assert.equal((service.getReceivingSession(session.id) as any).receiving_state, "completed");
+  });
+
+  test("eksik session normal tamamlanmaz; yetkili sebebiyle force-complete edilir", () => {
+    const session = createLotSession("LOT-FORCE", 2, 5);
+    assert.throws(() => service.completeReceivingSession(session.id, "", actor),
+      (error: unknown) => error instanceof WarehouseServiceError && error.code === "PACKAGES_REMAINING");
+    const completed = service.completeReceivingSession(session.id, "Bir koli gümrükte kaldı", actor, "device-a") as any;
+    assert.equal(completed.receiving_state, "completed");
+    assert.equal(completed.force_complete_reason, "Bir koli gümrükte kaldı");
+    assert.throws(() => service.setReceivingState(session.id, "active", actor),
+      (error: unknown) => error instanceof WarehouseServiceError && error.code === "SESSION_CLOSED");
   });
 
   test("75'lik paketlerde 40 sonra 50 toplama 35+15 bölünür ve ikinci pakette 60 bırakır", () => {
