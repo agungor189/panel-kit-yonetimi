@@ -47,6 +47,8 @@ const WAREHOUSE_PERMISSIONS = [
   ['warehouse:manage_locations', 'Lokasyon yönetimi'],
   ['warehouse:count_stock', 'Stok sayımı'],
   ['warehouse:edit_label_templates', 'Etiket şablonu düzenleme'],
+  ['warehouse:view_map', 'Depo haritası ve dashboard görüntüleme'],
+  ['warehouse:view_analytics', 'Paket, hareket ve kapasite analizi'],
 ] as const;
 
 export default function SettingsView({ onUpdate }: SettingsViewProps) {

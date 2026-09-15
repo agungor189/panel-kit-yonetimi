@@ -2206,6 +2206,31 @@ const migrations: Migration[] = [
       `).run();
     },
   },
+  {
+    version: 57,
+    name: "add_versioned_warehouse_layouts",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS warehouse_layouts (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          layout_version INTEGER NOT NULL DEFAULT 1 CHECK(layout_version > 0),
+          layout_json TEXT NOT NULL,
+          active INTEGER NOT NULL DEFAULT 0 CHECK(active IN (0, 1)),
+          created_by TEXT,
+          updated_by TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE SET NULL,
+          FOREIGN KEY(updated_by) REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_warehouse_layouts_one_active
+          ON warehouse_layouts(active) WHERE active = 1;
+        CREATE INDEX IF NOT EXISTS idx_warehouse_layouts_updated
+          ON warehouse_layouts(updated_at DESC);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

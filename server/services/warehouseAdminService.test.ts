@@ -57,6 +57,21 @@ beforeEach(() => {
 });
 
 describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
+  test("legacy plan yalnız geometri olarak sürümlenir ve map snapshot kapasiteyi DB'den alır", () => {
+    service.createLocation({ code: "G1-K1-P1", package_capacity: 3 }, actor);
+    const imported = service.importLegacyLayout({
+      warehouseConfig: { name: "DSDST Depo", width: 10, length: 5, height: 4 },
+      objects: [{ id: "rack-1", type: "rack", name: "A1 Rafı", rackCode: "G1", x: 1, z: 1, width: 1.8, depth: .6, height: 1.8, shelfCount: 1, binsPerShelf: 1, defaultLocationCapacity: 99 }],
+      products: [{ sku: "IMPORT-ETME" }], packages: [{ package_code: "IMPORT-ETME" }], locationStocks: [{ quantity: 999 }],
+    }, actor) as any;
+    assert.equal(imported.layout_version, 1);
+    const snapshot = service.getWarehouseMap() as any;
+    assert.equal(snapshot.warehouse.layout.objects[0].rackCode, "G1");
+    assert.equal(snapshot.locations[0].capacity, 3);
+    assert.equal(snapshot.data_quality.layout_only_locations.length, 0);
+    assert.equal(JSON.stringify(snapshot.warehouse.layout).includes("IMPORT-ETME"), false);
+  });
+
   test("admin session yönetebilir, yalnız receive yetkili normal kullanıcı yeni session yönetemez", () => {
     assert.equal(userHasWarehousePermission(actor, "warehouse:manage_receiving_sessions"), true);
     const operator = { role: "user", permissions: { "warehouse:receive": true } } as any;

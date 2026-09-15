@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { createHash, randomUUID } from "node:crypto";
 import { WarehouseServiceError, type WarehousePicker } from "./warehouseService.js";
+import { layoutLocationCodes, parseLegacyWarehouseLayout, type WarehouseLayout } from "./warehouseLayout.js";
 
 export type WarehouseActor = WarehousePicker & { role: string; permissions: Record<string, unknown> };
 
@@ -692,6 +693,145 @@ export class WarehouseAdminService {
         AND reservation.status IN ('CLAIMED','LABEL_QUEUED','LABELED','PRINT_FAILED')
       GROUP BY l.id ORDER BY l.code COLLATE NOCASE
     `).all();
+  }
+
+  importLegacyLayout(input: unknown, actor: WarehouseActor) {
+    let layout: WarehouseLayout;
+    try { layout = parseLegacyWarehouseLayout(input); }
+    catch (error) {
+      throw new WarehouseServiceError(400, "INVALID_LAYOUT", error instanceof Error ? error.message : "Geçersiz depo planı.");
+    }
+    const duplicateRackCodes = layout.objects
+      .filter((object) => object.type === "rack")
+      .map((object) => object.rackCode!)
+      .filter((code, index, codes) => codes.indexOf(code) !== index);
+    if (duplicateRackCodes.length) {
+      throw new WarehouseServiceError(400, "DUPLICATE_RACK_CODE", `Tekrarlanan rackCode: ${[...new Set(duplicateRackCodes)].join(", ")}`);
+    }
+    return this.db.transaction(() => {
+      const current = this.db.prepare("SELECT layout_version FROM warehouse_layouts WHERE active = 1").get() as any;
+      const id = randomUUID();
+      const version = Number(current?.layout_version || 0) + 1;
+      this.db.prepare("UPDATE warehouse_layouts SET active = 0, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE active = 1").run(actor.id);
+      this.db.prepare(`INSERT INTO warehouse_layouts
+        (id, name, layout_version, layout_json, active, created_by, updated_by)
+        VALUES (?, ?, ?, ?, 1, ?, ?)`)
+        .run(id, layout.warehouse.name, version, JSON.stringify(layout), actor.id, actor.id);
+      this.audit("WAREHOUSE_LAYOUT_IMPORTED", "warehouse_layout", id, {
+        layout_version: version,
+        object_count: layout.objects.length,
+        rack_count: layout.objects.filter((object) => object.type === "rack").length,
+      }, actor);
+      return { id, name: layout.warehouse.name, layout_version: version, active: 1, layout };
+    })();
+  }
+
+  getWarehouseMap() {
+    const layoutRow = this.db.prepare("SELECT id, name, layout_version, layout_json, updated_at FROM warehouse_layouts WHERE active = 1").get() as any;
+    const layout = layoutRow ? JSON.parse(layoutRow.layout_json) as WarehouseLayout : null;
+    const locations = this.listLocations() as any[];
+    const packages = this.db.prepare(`
+      SELECT p.id, p.package_code, p.status, p.package_number, p.total_packages,
+             p.remaining_quantity AS quantity, p.placed_at, p.placed_by_username AS placed_by,
+             l.code AS location_code, line.sku_snapshot AS sku,
+             line.product_name_snapshot AS product_name,
+             line.supplier_no_snapshot AS supplier_no, line.lot_number,
+             line.package_weight_kg_snapshot AS weight,
+             product.width_mm, product.length_mm AS depth_mm, product.height_mm,
+             CASE WHEN line.image_path_snapshot IS NOT NULL THEN '/api/products/' || p.product_id || '/image' ELSE NULL END AS image_url
+      FROM warehouse_packages p
+      JOIN inbound_batch_lines line ON line.id = p.batch_line_id
+      JOIN products product ON product.id = p.product_id
+      LEFT JOIN warehouse_locations l ON l.id = p.current_location_id
+      WHERE p.status IN ('PLACED','OPEN') AND p.current_location_id IS NOT NULL
+      ORDER BY l.code COLLATE NOCASE, p.package_code COLLATE NOCASE
+    `).all();
+    const totalPackages = packages.length;
+    const totalCapacity = locations.reduce((sum, location) => sum + Number(location.package_capacity || 0), 0);
+    const occupiedCapacity = locations.reduce((sum, location) => sum + Number(location.occupied_packages || 0) + Number(location.reserved_packages || 0), 0);
+    const layoutCodes = layout ? layoutLocationCodes(layout) : [];
+    const layoutCodeSet = new Set(layoutCodes);
+    const dbCodeSet = new Set(locations.map((location) => String(location.code)));
+    const rackCodes = layout?.objects.filter((object) => object.type === "rack").map((object) => object.rackCode!) || [];
+    return {
+      warehouse: layoutRow ? {
+        id: layoutRow.id,
+        name: layoutRow.name,
+        layout_version: layoutRow.layout_version,
+        updated_at: layoutRow.updated_at,
+        layout,
+      } : null,
+      stats: {
+        total_packages: totalPackages,
+        total_products: this.db.prepare("SELECT COALESCE(SUM(remaining_quantity), 0) AS count FROM warehouse_packages WHERE status IN ('PLACED','OPEN')").get()?.count || 0,
+        total_locations: locations.length,
+        occupied_locations: locations.filter((location) => Number(location.occupied_packages) > 0).length,
+        empty_locations: locations.filter((location) => Number(location.occupied_packages) === 0 && Number(location.reserved_packages) === 0).length,
+        reserved_packages: locations.reduce((sum, location) => sum + Number(location.reserved_packages || 0), 0),
+        capacity_percent: totalCapacity ? Math.round((occupiedCapacity / totalCapacity) * 1000) / 10 : 0,
+        active_receiving: Number((this.db.prepare("SELECT COUNT(*) AS count FROM inbound_batches WHERE receiving_state IN ('active','paused')").get() as any)?.count || 0),
+        pending_picking: Number((this.db.prepare("SELECT COUNT(*) AS count FROM sales WHERE status IN ('Hazırlanıyor','Toplanıyor')").get() as any)?.count || 0),
+        picked_today: Number((this.db.prepare("SELECT COUNT(*) AS count FROM pick_sessions WHERE date(completed_at, 'localtime') = date('now', 'localtime')").get() as any)?.count || 0),
+        placed_today: Number((this.db.prepare("SELECT COUNT(*) AS count FROM warehouse_packages WHERE date(placed_at, 'localtime') = date('now', 'localtime')").get() as any)?.count || 0),
+      },
+      locations: locations.map((location) => ({
+        id: location.id, code: location.code,
+        rack_code: String(location.code).split("-K")[0],
+        capacity: Number(location.package_capacity), occupied: Number(location.occupied_packages),
+        reserved: Number(location.reserved_packages), available: Number(location.available_capacity),
+      })),
+      packages,
+      data_quality: {
+        layout_only_locations: layoutCodes.filter((code) => !dbCodeSet.has(code)),
+        map_missing_locations: locations.map((location) => String(location.code)).filter((code) => !layoutCodeSet.has(code)),
+        duplicate_rack_codes: rackCodes.filter((code, index) => rackCodes.indexOf(code) !== index),
+        invalid_location_codes: locations.map((location) => String(location.code)).filter((code) => !isValidWarehouseLocationCode(code)),
+      },
+    };
+  }
+
+  listPackages(filters: { page: number; limit: number; query?: string; status?: string; location?: string; lot?: string }) {
+    const where = ["1 = 1"];
+    const params: unknown[] = [];
+    if (filters.query) {
+      where.push("(p.package_code LIKE ? OR line.sku_snapshot LIKE ? OR line.product_name_snapshot LIKE ? OR line.supplier_no_snapshot LIKE ?)");
+      params.push(...Array(4).fill(`%${filters.query}%`));
+    }
+    if (filters.status) { where.push("p.status = ?"); params.push(filters.status); }
+    if (filters.location) { where.push("location.code LIKE ?"); params.push(`%${filters.location}%`); }
+    if (filters.lot) { where.push("line.lot_number LIKE ?"); params.push(`%${filters.lot}%`); }
+    const sqlWhere = where.join(" AND ");
+    const total = Number((this.db.prepare(`SELECT COUNT(*) AS count FROM warehouse_packages p JOIN inbound_batch_lines line ON line.id=p.batch_line_id LEFT JOIN warehouse_locations location ON location.id=p.current_location_id WHERE ${sqlWhere}`).get(...params) as any).count);
+    const data = this.db.prepare(`SELECT p.id, p.package_code, p.status, p.package_number, p.total_packages,
+      p.remaining_quantity AS quantity, p.placed_at, line.sku_snapshot AS sku, line.product_name_snapshot AS product_name,
+      line.lot_number, line.package_weight_kg_snapshot AS weight, location.code AS location_code
+      FROM warehouse_packages p JOIN inbound_batch_lines line ON line.id=p.batch_line_id
+      LEFT JOIN warehouse_locations location ON location.id=p.current_location_id
+      WHERE ${sqlWhere} ORDER BY datetime(p.created_at) DESC LIMIT ? OFFSET ?`)
+      .all(...params, filters.limit, (filters.page - 1) * filters.limit);
+    return { data, pagination: { page: filters.page, limit: filters.limit, total, total_pages: Math.max(1, Math.ceil(total / filters.limit)) } };
+  }
+
+  listMovements(limit = 200) {
+    return this.db.prepare(`SELECT placement.id, placement.action AS event_type, placement.created_at,
+      package.package_code, line.sku_snapshot AS sku, line.product_name_snapshot AS product_name,
+      from_location.code AS from_location, to_location.code AS to_location, user.username AS actor_username
+      FROM package_placements placement
+      JOIN warehouse_packages package ON package.id=placement.package_id
+      JOIN inbound_batch_lines line ON line.id=package.batch_line_id
+      LEFT JOIN warehouse_locations from_location ON from_location.id=placement.from_location_id
+      LEFT JOIN warehouse_locations to_location ON to_location.id=placement.to_location_id
+      LEFT JOIN users user ON user.id=placement.actor_id
+      ORDER BY datetime(placement.created_at) DESC LIMIT ?`).all(Math.max(1, Math.min(500, Math.trunc(limit))));
+  }
+
+  listUserActivity(limit = 200) {
+    return this.db.prepare(`SELECT id, action AS event_type, entity_type, entity_id, details,
+      actor_username, user_id, created_at
+      FROM activity_logs
+      WHERE action LIKE 'WAREHOUSE_%'
+        AND action NOT IN ('WAREHOUSE_API_USED','WAREHOUSE_API_AUTH_FAILED','WAREHOUSE_PERMISSION_DENIED')
+      ORDER BY datetime(created_at) DESC LIMIT ?`).all(Math.max(1, Math.min(500, Math.trunc(limit))));
   }
 
   suggestLocation(packageIdValue?: string) {

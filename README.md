@@ -8,6 +8,24 @@ Toplama tamamlandığında `pick_sessions`, `pick_session_items` ve `pick_sessio
 
 Paketleme için ürünlerde ölçü kolonları, boş `packaging_types` kataloğu ve taşıyıcı bazlı `shipping_volume_rules.divisor_cm3` yapılandırması hazırdır. Bu aşamada koli seed'i, desi hesabı veya paket öneri motoru çalıştırılmaz.
 
+## Warehouse WMS veri sözleşmesi
+
+Panel SQLite DB; ürün, paket, lokasyon, kapasite, rezervasyon ve hareketler için tek gerçek veri kaynağıdır. `warehouse_layouts` yalnız nadiren değişen fiziksel depo geometrisini sürümlü JSON olarak tutar. Eski depo-planner dosyasını import etmek için:
+
+```bash
+npm run warehouse-layout:import -- /tam/yol/depo-plani.json
+```
+
+Importer yalnız `warehouseConfig`, `rack`, `column` ve `door` geometrisini alır; eski products, packages, locationStocks, placement ve stok alanlarını hiçbir zaman taşımaz. Raf/lokasyon eşleşmesi display name yerine `rackCode` ve `RACK-Kn-Pn` canonical kodlarıyla yapılır.
+
+WMS endpointleri:
+
+- `GET /api/warehouse/v1/admin/warehouse-map`
+- `GET /api/warehouse/v1/admin/packages` (server-side sayfalama/filtre)
+- `GET /api/warehouse/v1/admin/movements`
+- `GET /api/warehouse/v1/admin/user-activity`
+- `POST /api/warehouse/v1/admin/layouts/import-legacy`
+
 ---
 
 ## Hızlı Başlangıç

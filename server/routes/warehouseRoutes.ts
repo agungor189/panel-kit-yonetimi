@@ -451,6 +451,25 @@ export function createWarehouseRouter({
   router.get("/admin/locations", authenticate("read:products"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:manage_locations", "warehouse:place_packages", "warehouse:move_stock"]), (_req, res) => {
     res.json({ success: true, data: adminService.listLocations() });
   });
+  router.get("/admin/warehouse-map", authenticate(["read:products", "read:warehouse_orders"]), requireWarehouseUser, requireWarehousePermission("warehouse:view_map"), (_req, res) => {
+    res.json({ success: true, data: adminService.getWarehouseMap() });
+  });
+  router.post("/admin/layouts/import-legacy", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:manage_locations"), (req, res) => {
+    try { res.status(201).json({ success: true, data: adminService.importLegacyLayout(req.body, actor(res)) }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
+  router.get("/admin/packages", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:view_analytics"), (req, res) => {
+    const page = Math.max(1, Math.trunc(Number(req.query.page)) || 1);
+    const limit = Math.min(100, Math.max(1, Math.trunc(Number(req.query.limit)) || 25));
+    const result = adminService.listPackages({ page, limit, query: queryText(req.query.query), status: queryText(req.query.status), location: queryText(req.query.location), lot: queryText(req.query.lot) });
+    res.json({ success: true, data: result.data, pagination: result.pagination });
+  });
+  router.get("/admin/movements", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:view_analytics"), (req, res) => {
+    res.json({ success: true, data: adminService.listMovements(Number(req.query.limit) || 200) });
+  });
+  router.get("/admin/user-activity", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:view_analytics"), (req, res) => {
+    res.json({ success: true, data: adminService.listUserActivity(Number(req.query.limit) || 200) });
+  });
   router.get("/admin/locations/suggestion", authenticate("read:products"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:place_packages", "warehouse:receive"]), (req, res) => {
     try { res.json({ success: true, data: adminService.suggestLocation(queryText(req.query.package_id, 100)) }); }
     catch (error) { return handleServiceError(res, error); }
