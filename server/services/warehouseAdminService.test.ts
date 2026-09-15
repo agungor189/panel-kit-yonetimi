@@ -72,6 +72,24 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     assert.equal(JSON.stringify(snapshot.warehouse.layout).includes("IMPORT-ETME"), false);
   });
 
+  test("hareket ve kullanıcı akışları tüm anlamlı depo olaylarını güvenle listeler", () => {
+    db.prepare(`INSERT INTO activity_logs (id, action, entity_type, entity_id, details, user_id, actor_username)
+      VALUES ('activity-1', 'WAREHOUSE_RECEIVING_SESSION_STARTED', 'inbound_batch', 'batch-1', 'geçersiz-json', ?, ?),
+             ('activity-2', 'WAREHOUSE_PICKING_COMPLETED', 'sale', 'sale-1', '{}', ?, ?),
+             ('activity-3', 'WAREHOUSE_PACKAGE_COUNTED', 'warehouse_package', 'package-1', '{"counted_quantity":4}', ?, ?)`)
+      .run(actor.id, actor.username, actor.id, actor.username, actor.id, actor.username);
+    let movements: any[];
+    try {
+      movements = service.listMovements() as any[];
+    } catch (error) {
+      throw new Error(`Hareket sorgusu çalışmadı: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    assert.deepEqual(movements.map((item) => item.event_type).sort(), [
+      "WAREHOUSE_RECEIVING_SESSION_STARTED", "WAREHOUSE_PICKING_COMPLETED", "WAREHOUSE_PACKAGE_COUNTED",
+    ].sort());
+    assert.equal((service.listUserActivity() as any[]).length, 3);
+  });
+
   test("admin session yönetebilir, yalnız receive yetkili normal kullanıcı yeni session yönetemez", () => {
     assert.equal(userHasWarehousePermission(actor, "warehouse:manage_receiving_sessions"), true);
     const operator = { role: "user", permissions: { "warehouse:receive": true } } as any;

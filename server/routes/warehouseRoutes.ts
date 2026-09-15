@@ -461,7 +461,7 @@ export function createWarehouseRouter({
   router.get("/admin/packages", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:view_analytics"), (req, res) => {
     const page = Math.max(1, Math.trunc(Number(req.query.page)) || 1);
     const limit = Math.min(100, Math.max(1, Math.trunc(Number(req.query.limit)) || 25));
-    const result = adminService.listPackages({ page, limit, query: queryText(req.query.query), status: queryText(req.query.status), location: queryText(req.query.location), lot: queryText(req.query.lot) });
+    const result = adminService.listPackages({ page, limit, query: queryText(req.query.query), status: queryText(req.query.status), location: queryText(req.query.location), lot: queryText(req.query.lot), dateFrom: queryDate(req.query.date_from), dateTo: queryDate(req.query.date_to) });
     res.json({ success: true, data: result.data, pagination: result.pagination });
   });
   router.get("/admin/movements", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:view_analytics"), (req, res) => {

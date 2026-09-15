@@ -790,7 +790,7 @@ export class WarehouseAdminService {
     };
   }
 
-  listPackages(filters: { page: number; limit: number; query?: string; status?: string; location?: string; lot?: string }) {
+  listPackages(filters: { page: number; limit: number; query?: string; status?: string; location?: string; lot?: string; dateFrom?: string; dateTo?: string }) {
     const where = ["1 = 1"];
     const params: unknown[] = [];
     if (filters.query) {
@@ -800,6 +800,8 @@ export class WarehouseAdminService {
     if (filters.status) { where.push("p.status = ?"); params.push(filters.status); }
     if (filters.location) { where.push("location.code LIKE ?"); params.push(`%${filters.location}%`); }
     if (filters.lot) { where.push("line.lot_number LIKE ?"); params.push(`%${filters.lot}%`); }
+    if (filters.dateFrom) { where.push("date(p.placed_at, 'localtime') >= date(?)"); params.push(filters.dateFrom); }
+    if (filters.dateTo) { where.push("date(p.placed_at, 'localtime') <= date(?)"); params.push(filters.dateTo); }
     const sqlWhere = where.join(" AND ");
     const total = Number((this.db.prepare(`SELECT COUNT(*) AS count FROM warehouse_packages p JOIN inbound_batch_lines line ON line.id=p.batch_line_id LEFT JOIN warehouse_locations location ON location.id=p.current_location_id WHERE ${sqlWhere}`).get(...params) as any).count);
     const data = this.db.prepare(`SELECT p.id, p.package_code, p.status, p.package_number, p.total_packages,
@@ -813,25 +815,46 @@ export class WarehouseAdminService {
   }
 
   listMovements(limit = 200) {
-    return this.db.prepare(`SELECT placement.id, placement.action AS event_type, placement.created_at,
+    return this.db.prepare(`SELECT activity.id, activity.action AS event_type, activity.entity_type,
+      activity.entity_id, activity.details, activity.created_at, activity.actor_username,
       package.package_code, line.sku_snapshot AS sku, line.product_name_snapshot AS product_name,
-      from_location.code AS from_location, to_location.code AS to_location, user.username AS actor_username
-      FROM package_placements placement
-      JOIN warehouse_packages package ON package.id=placement.package_id
-      JOIN inbound_batch_lines line ON line.id=package.batch_line_id
-      LEFT JOIN warehouse_locations from_location ON from_location.id=placement.from_location_id
-      LEFT JOIN warehouse_locations to_location ON to_location.id=placement.to_location_id
-      LEFT JOIN users user ON user.id=placement.actor_id
-      ORDER BY datetime(placement.created_at) DESC LIMIT ?`).all(Math.max(1, Math.min(500, Math.trunc(limit))));
+      sale.order_code,
+      from_location.code AS from_location,
+      CASE WHEN json_valid(activity.details) THEN COALESCE(
+        json_extract(activity.details, '$.to_location_code'),
+        json_extract(activity.details, '$.location_code')
+      ) END AS to_location
+      FROM activity_logs activity
+      LEFT JOIN warehouse_packages package
+        ON activity.entity_type = 'warehouse_package' AND package.id = activity.entity_id
+      LEFT JOIN inbound_batch_lines line ON line.id = package.batch_line_id
+      LEFT JOIN sales sale ON activity.entity_type = 'sale' AND sale.id = activity.entity_id
+      LEFT JOIN warehouse_locations from_location
+        ON from_location.id = CASE WHEN json_valid(activity.details)
+          THEN json_extract(activity.details, '$.from_location_id') END
+      WHERE activity.action IN (
+        'WAREHOUSE_RECEIVING_SESSION_STARTED', 'WAREHOUSE_RECEIVING_SESSION_JOINED',
+        'WAREHOUSE_RECEIVING_SESSION_PAUSED', 'WAREHOUSE_RECEIVING_COMPLETED',
+        'WAREHOUSE_RECEIVING_FORCE_COMPLETED', 'WAREHOUSE_PACKAGE_PLACED',
+        'WAREHOUSE_PACKAGE_MOVED', 'WAREHOUSE_PACKAGE_COUNTED',
+        'WAREHOUSE_PACKAGE_CLAIM_RELEASED', 'WAREHOUSE_PICKING_STARTED',
+        'WAREHOUSE_ITEM_PICKED', 'WAREHOUSE_PICKING_COMPLETED'
+      )
+      ORDER BY datetime(activity.created_at) DESC LIMIT ?`).all(Math.max(1, Math.min(500, Math.trunc(limit))));
   }
 
   listUserActivity(limit = 200) {
-    return this.db.prepare(`SELECT id, action AS event_type, entity_type, entity_id, details,
-      actor_username, user_id, created_at
-      FROM activity_logs
-      WHERE action LIKE 'WAREHOUSE_%'
-        AND action NOT IN ('WAREHOUSE_API_USED','WAREHOUSE_API_AUTH_FAILED','WAREHOUSE_PERMISSION_DENIED')
-      ORDER BY datetime(created_at) DESC LIMIT ?`).all(Math.max(1, Math.min(500, Math.trunc(limit))));
+    return this.db.prepare(`SELECT activity.id, activity.action AS event_type, activity.entity_type,
+      activity.entity_id, activity.details, activity.actor_username, activity.user_id,
+      activity.created_at, package.package_code, line.sku_snapshot AS sku, sale.order_code
+      FROM activity_logs activity
+      LEFT JOIN warehouse_packages package
+        ON activity.entity_type = 'warehouse_package' AND package.id = activity.entity_id
+      LEFT JOIN inbound_batch_lines line ON line.id = package.batch_line_id
+      LEFT JOIN sales sale ON activity.entity_type = 'sale' AND sale.id = activity.entity_id
+      WHERE activity.action LIKE 'WAREHOUSE_%'
+        AND activity.action NOT IN ('WAREHOUSE_API_USED','WAREHOUSE_API_AUTH_FAILED','WAREHOUSE_PERMISSION_DENIED')
+      ORDER BY datetime(activity.created_at) DESC LIMIT ?`).all(Math.max(1, Math.min(500, Math.trunc(limit))));
   }
 
   suggestLocation(packageIdValue?: string) {
