@@ -237,6 +237,15 @@ Varsayılan kullanıcı: `admin` / `admin` — **ilk girişte şifreyi değişti
 - Dışarıya direkt port açılıyorsa `ALLOWED_ORIGINS=https://panel.yourdomain.com` şeklinde kısıtla.
 - Docker volume'larını düzenli olarak dışa yedekle.
 
+### Kit Studio katalog API'si
+
+Kit Studio, Panel veritabanına doğrudan bağlanmaz. Bağlantı elemanı master verisi aşağıdaki additive, salt-okunur uçlardan alınır:
+
+- `GET /api/kit-catalog/connectors`
+- `GET /api/kit-catalog/connectors/:id`
+
+İsteklerde `x-api-key` başlığı ve yalnız `kit-catalog:read` izni verilmiş aktif bir Panel API key gerekir. Yanıtlar ürün UUID/SKU, çok dilli ad, tedarikçi kodu, malzeme/form/ölçü, ana görsel, alış maliyeti, satış fiyatı ve merkez stoğunu içerir. Kit Studio bu fiyatları Panel'e geri yazamaz.
+
 ---
 
 ## Modüller

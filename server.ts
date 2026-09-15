@@ -25,6 +25,8 @@ import { createRecurringPaymentsRouter } from "./server/routes/recurringPayments
 import { createDashboardDataRouter } from "./server/routes/dashboardDataRoutes.js";
 import { createKitRouter } from "./server/routes/kitRoutes.js";
 import { createWarehouseRouter } from "./server/routes/warehouseRoutes.js";
+import { createKitCatalogRouter } from "./server/routes/kitCatalogRoutes.js";
+import { createPanelApiAuth } from "./server/middleware/panelApiAuth.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
 import { restoreUploadEntry } from "./server/utils/restoreUploads.js";
 import { initializeDatabase, openDatabase } from "./server/db/initialize.js";
@@ -1752,7 +1754,7 @@ async function startServer() {
   // API Authentication Middleware
   app.use("/api", (req, res, next) => {
     // Auth, public API, and warehouse API routes apply their own authentication/limits.
-    if (req.path.startsWith('/auth/') || req.path.startsWith('/public/') || req.path.startsWith('/warehouse/')) return next();
+    if (req.path.startsWith('/auth/') || req.path.startsWith('/public/') || req.path.startsWith('/warehouse/') || req.path.startsWith('/kit-catalog/')) return next();
 
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -1801,7 +1803,7 @@ async function startServer() {
   // remain available through /api/auth; every other JWT-backed route is blocked
   // until the user's password is changed.
   app.use("/api", (req, res, next) => {
-    if (req.path.startsWith('/auth/') || req.path.startsWith('/public/') || req.path.startsWith('/warehouse/')) return next();
+    if (req.path.startsWith('/auth/') || req.path.startsWith('/public/') || req.path.startsWith('/warehouse/') || req.path.startsWith('/kit-catalog/')) return next();
 
     const user = req.user;
     if (!user || user.role === 'api_key') return next();
@@ -1822,7 +1824,7 @@ async function startServer() {
   // Server-side write protection: readonly users and the legacy static API key cannot call mutating methods.
   // This enforces access control on the server, not just the client.
   app.use("/api", (req, res, next) => {
-    if (req.path.startsWith('/auth/') || req.path.startsWith('/public/') || req.path.startsWith('/warehouse/')) return next();
+    if (req.path.startsWith('/auth/') || req.path.startsWith('/public/') || req.path.startsWith('/warehouse/') || req.path.startsWith('/kit-catalog/')) return next();
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
 
     const user = req.user;
@@ -5718,49 +5720,7 @@ async function startServer() {
   });
 
   // --- PUBLIC API AUTHENTICATION MIDDLEWARE ---
-  const publicApiAuth = (requiredPermission?: string) => (req: any, res: any, next: any) => {
-      const apiKeyHeader = req.headers['x-api-key']?.toString();
-      if (!apiKeyHeader) {
-          return res.status(401).json({ success: false, error: { code: "UNAUTHORIZED", message: "x-api-key header is required" } });
-      }
-
-      const hashedKey = hashApiKey(apiKeyHeader);
-      const keyData = db.prepare("SELECT * FROM panel_api_keys WHERE key_hash = ? AND deleted_at IS NULL").get(hashedKey) as any;
-
-      if (!keyData) {
-          logActivity("PANEL_API_AUTH_FAILED", "system", "auth", { reason: "Invalid key", userIp: req.ip, userAgent: req.headers['user-agent'] });
-          return res.status(401).json({ success: false, error: { code: "UNAUTHORIZED", message: "Invalid API key" } });
-      }
-
-      if (keyData.status !== 'active') {
-          logActivity("PANEL_API_AUTH_FAILED", "system", keyData.id, { reason: `Key status is ${keyData.status}`, userIp: req.ip, userAgent: req.headers['user-agent'] });
-          return res.status(403).json({ success: false, error: { code: "FORBIDDEN", message: `API key is ${keyData.status}` } });
-      }
-
-      if (keyData.expires_at && new Date(keyData.expires_at).getTime() < Date.now()) {
-          logActivity("PANEL_API_AUTH_FAILED", "system", keyData.id, { reason: "Key expired", userIp: req.ip, userAgent: req.headers['user-agent'] });
-          return res.status(403).json({ success: false, error: { code: "FORBIDDEN", message: "API key has expired" } });
-      }
-
-      if (keyData.allowed_ips) {
-          const allowedIps = keyData.allowed_ips.split(',').map((ip: string) => ip.trim());
-          if (!allowedIps.includes(req.ip)) {
-              logActivity("PANEL_API_AUTH_FAILED", "system", keyData.id, { reason: "IP not allowed", userIp: req.ip, userAgent: req.headers['user-agent'] });
-              return res.status(403).json({ success: false, error: { code: "FORBIDDEN", message: "IP not allowed" } });
-          }
-      }
-
-      const permissions = JSON.parse(keyData.permissions || '[]');
-      if (requiredPermission && !permissions.includes(requiredPermission)) {
-          logActivity("PANEL_API_AUTH_FAILED", "system", keyData.id, { reason: "Missing permission", requiredPermission, userIp: req.ip, userAgent: req.headers['user-agent'] });
-          return res.status(403).json({ success: false, error: { code: "FORBIDDEN", message: "Insufficient permissions" } });
-      }
-
-      db.prepare("UPDATE panel_api_keys SET last_used_at = CURRENT_TIMESTAMP, last_used_ip = ? WHERE id = ?").run(req.ip, keyData.id);
-
-      req.panelApiKey = { id: keyData.id, name: keyData.name, permissions };
-      next();
-  };
+  const publicApiAuth = createPanelApiAuth({ db, hashApiKey, logActivity });
 
   const publicApiLimiter = rateLimit({
     windowMs: 1 * 60 * 1000,
@@ -5820,6 +5780,16 @@ async function startServer() {
 
   // --- PUBLIC API ROUTES ---
   app.use("/api/public", publicAuthFailedLimiter, publicApiLimiter);
+  app.use(
+    "/api/kit-catalog",
+    publicAuthFailedLimiter,
+    publicApiLimiter,
+    createKitCatalogRouter({
+      db,
+      authenticate: publicApiAuth("kit-catalog:read"),
+      logActivity,
+    }),
+  );
   app.use(
     "/api/warehouse/v1",
     publicAuthFailedLimiter,

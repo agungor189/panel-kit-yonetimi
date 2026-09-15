@@ -11,7 +11,7 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test server/services/*.test.ts",
+    "test": "node --import tsx --test server/services/*.test.ts server/routes/*.test.ts",
     "warehouse-import:dry-run": "tsx scripts/importWarehouseProducts.ts",
     "warehouse-layout:import": "tsx scripts/importWarehouseLayout.ts",
     "rebuild-db:local": "ALLOW_LOCAL_DB_REBUILD=true tsx scripts/rebuildDatabase.ts"
