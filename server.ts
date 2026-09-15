@@ -29,6 +29,13 @@ import { generateNormalizedFields } from "./server/utils/normalizeProductFields.
 import { restoreUploadEntry } from "./server/utils/restoreUploads.js";
 import { initializeDatabase, openDatabase } from "./server/db/initialize.js";
 import { importProductsFromCsvRows } from "./server/services/productCsvImport.js";
+import {
+  PRODUCT_IMAGE_MAX_FILES,
+  PRODUCT_IMAGE_MAX_FILE_SIZE,
+  cleanupStagedProductImages,
+  importProductImages,
+  inspectProductImageFile,
+} from "./server/services/productImageImport.js";
 import { PRODUCT_TYPES, canonicalProductType, parseReserveLocations } from "./shared/productCsvMapping.js";
 
 declare global {
@@ -168,6 +175,28 @@ const upload = multer({
       cb(new Error('Sadece JPEG, PNG ve WEBP görselleri yüklenebilir.'));
     }
   }
+});
+
+const productUploadsDir = path.join(uploadsDir, "products");
+fs.mkdirSync(productUploadsDir, { recursive: true });
+const bulkProductImageUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, productUploadsDir),
+    filename: (_req, file, cb) => {
+      const inspection = inspectProductImageFile(file.originalname, file.mimetype);
+      const extension = inspection.valid ? inspection.extension : ".invalid";
+      cb(null, `.staged-${uuidv4()}${extension}`);
+    },
+  }),
+  limits: {
+    fileSize: PRODUCT_IMAGE_MAX_FILE_SIZE,
+    files: PRODUCT_IMAGE_MAX_FILES,
+  },
+  fileFilter: (_req, file, cb) => {
+    const inspection = inspectProductImageFile(file.originalname, file.mimetype);
+    if (inspection.valid) cb(null, true);
+    else cb(new Error("message" in inspection ? inspection.message : "Geçersiz ürün görseli."));
+  },
 });
 const expenseUpload = multer({
   storage: expenseStorage,
@@ -3139,6 +3168,39 @@ async function startServer() {
   });
 
   // Images Upload
+  app.post("/api/products/images/bulk", (req: any, res) => {
+    bulkProductImageUpload.array("images", PRODUCT_IMAGE_MAX_FILES)(req, res, (uploadError: any) => {
+      const files = Array.isArray(req.files) ? req.files as Express.Multer.File[] : [];
+      if (uploadError) {
+        cleanupStagedProductImages(files);
+        const message = uploadError instanceof multer.MulterError && uploadError.code === "LIMIT_FILE_SIZE"
+          ? `Her görsel en fazla ${PRODUCT_IMAGE_MAX_FILE_SIZE / 1024 / 1024} MB olabilir.`
+          : uploadError instanceof multer.MulterError && uploadError.code === "LIMIT_FILE_COUNT"
+            ? `Tek seferde en fazla ${PRODUCT_IMAGE_MAX_FILES} görsel yüklenebilir.`
+            : uploadError.message || "Görseller yüklenemedi.";
+        return res.status(400).json({ success: false, error: { code: "INVALID_PRODUCT_IMAGE", message } });
+      }
+      if (files.length === 0) {
+        return res.status(400).json({ success: false, error: { code: "IMAGES_REQUIRED", message: "En az bir görsel seçilmelidir." } });
+      }
+
+      try {
+        const report = importProductImages(db, uploadsDir, files);
+        logActivity("BULK_PRODUCT_IMAGES_UPLOADED", "product_image", "bulk", {
+          total: report.total,
+          uploaded: report.uploaded,
+          skipped: report.skipped,
+          results: report.results.map(({ original_filename, matched_sku, status, code }) => ({ original_filename, matched_sku, status, code })),
+        }, req.user?.id);
+        return res.json({ success: true, ...report });
+      } catch (error: any) {
+        cleanupStagedProductImages(files);
+        AppLogger.error("BULK_PRODUCT_IMAGE_UPLOAD_ERROR", "Bulk product image upload failed", error);
+        return res.status(500).json({ success: false, error: { code: "UPLOAD_FAILED", message: error.message || "Görseller yüklenemedi." } });
+      }
+    });
+  });
+
   app.post("/api/products/:id/images", upload.array("images"), (req: any, res) => {
     const files = req.files as any[];
     const productId = req.params.id;

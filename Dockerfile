@@ -34,6 +34,7 @@ COPY --from=builder /app/dist          ./dist
 COPY package*.json ./
 COPY server.ts ./
 COPY server/ ./server/
+COPY shared/ ./shared/
 COPY tsconfig.json ./
 
 # Trim devDeps (keeps tsx since it's now in dependencies).
@@ -41,7 +42,7 @@ COPY tsconfig.json ./
 RUN npm prune --omit=dev --ignore-scripts
 
 # Data directories — mount as Docker volumes in production.
-RUN mkdir -p /data /app/uploads /backups
+RUN mkdir -p /data /app/uploads/products /backups
 
 ENV NODE_ENV=production
 ENV PORT=3000

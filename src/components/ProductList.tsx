@@ -10,6 +10,7 @@ import {
   ChevronDown,
   Download,
   Upload,
+  Images,
   Trash2,
   FileText,
   ScanLine,
@@ -131,6 +132,29 @@ type ProductCsvImportReport = {
   warnings: string[];
 };
 
+type BulkImagePreviewItem = {
+  file: File;
+  sku: string;
+  matchedSku?: string;
+  status: 'matched' | 'missing' | 'duplicate' | 'invalid';
+  message: string;
+};
+
+type BulkImageUploadReport = {
+  total: number;
+  uploaded: number;
+  skipped: number;
+  results: Array<{
+    original_filename: string;
+    sku: string;
+    matched_sku?: string;
+    status: 'uploaded' | 'skipped';
+    code: string;
+    message: string;
+    image_path?: string;
+  }>;
+};
+
 export default function ProductList({ onAddProduct, onProductClick }: ProductListProps) {
   const { isReadOnly } = useAuth();
   const { FormatAmount, activeRate, viewCurrency } = useCurrency();
@@ -228,6 +252,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
     setSortKey('name_asc');
   };
   const csvInputRef = useRef<HTMLInputElement>(null);
+  const bulkImageInputRef = useRef<HTMLInputElement>(null);
 
   // CSV import preview/report state. Mapping itself lives in shared/productCsvMapping.ts.
   const [showMappingModal, setShowMappingModal] = useState(false);
@@ -236,6 +261,77 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
   const [csvFileName, setCsvFileName] = useState('products.csv');
   const [importReport, setImportReport] = useState<ProductCsvImportReport | null>(null);
   const [importProgress, setImportProgress] = useState<{current: number, total: number} | null>(null);
+  const [showBulkImageModal, setShowBulkImageModal] = useState(false);
+  const [bulkImagePreview, setBulkImagePreview] = useState<BulkImagePreviewItem[]>([]);
+  const [bulkImageReport, setBulkImageReport] = useState<BulkImageUploadReport | null>(null);
+  const [bulkImageUploading, setBulkImageUploading] = useState(false);
+
+  const closeBulkImageModal = () => {
+    if (bulkImageUploading) return;
+    setShowBulkImageModal(false);
+    setBulkImagePreview([]);
+    setBulkImageReport(null);
+    if (bulkImageInputRef.current) bulkImageInputRef.current.value = '';
+  };
+
+  const handleBulkImageSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (isReadOnly) return;
+    const files = Array.from(event.target.files || []);
+    if (files.length === 0) return;
+
+    const mimeByExtension: Record<string, string> = {
+      png: 'image/png',
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      webp: 'image/webp',
+    };
+    const productBySku = new Map(products.map((product) => [String(product.sku || '').toLocaleUpperCase('en-US'), product]));
+    const seenSkus = new Set<string>();
+    const preview = files.slice(0, 100).map((file): BulkImagePreviewItem => {
+      const extension = file.name.includes('.') ? file.name.split('.').pop()!.toLowerCase() : '';
+      const sku = extension ? file.name.slice(0, -(extension.length + 1)).trim() : file.name.trim();
+      const expectedMime = mimeByExtension[extension];
+      if (!expectedMime || file.type !== expectedMime || file.size > 8 * 1024 * 1024 || !sku) {
+        return { file, sku, status: 'invalid', message: 'Geçersiz dosya tipi, MIME veya 8 MB dosya sınırı.' };
+      }
+
+      const product = productBySku.get(sku.toLocaleUpperCase('en-US'));
+      if (!product) return { file, sku, status: 'missing', message: 'Ürün bulunamadı.' };
+      const productKey = String(product.id);
+      if (seenSkus.has(productKey)) {
+        return { file, sku, matchedSku: product.sku, status: 'duplicate', message: 'Bu SKU için bir dosya zaten seçildi.' };
+      }
+      seenSkus.add(productKey);
+      return { file, sku, matchedSku: product.sku, status: 'matched', message: 'Ürün eşleşti.' };
+    });
+
+    setBulkImagePreview(preview);
+    setBulkImageReport(null);
+    setShowBulkImageModal(true);
+    if (files.length > 100) toast.error('Tek seferde en fazla 100 görsel seçilebilir.');
+  };
+
+  const uploadBulkImages = async () => {
+    if (isReadOnly || bulkImageUploading || bulkImagePreview.length === 0) return;
+    if (bulkImagePreview.some((item) => item.status === 'invalid')) {
+      toast.error('Geçersiz dosyaları seçimden çıkarın.');
+      return;
+    }
+
+    const formData = new FormData();
+    bulkImagePreview.forEach((item) => formData.append('images', item.file));
+    try {
+      setBulkImageUploading(true);
+      const report = await api.upload('/products/images/bulk', formData) as BulkImageUploadReport;
+      setBulkImageReport(report);
+      toast.success(`${report.uploaded} görsel yüklendi${report.skipped ? `, ${report.skipped} dosya atlandı` : ''}.`);
+      await loadProducts();
+    } catch (error: any) {
+      toast.error(error.message || 'Toplu görsel yükleme başarısız');
+    } finally {
+      setBulkImageUploading(false);
+    }
+  };
 
   const exportToCsv = () => {
     const data = filteredProducts.map((p, index) => ({
@@ -387,6 +483,14 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
             accept=".csv"
             className="hidden"
           />
+          <input
+            type="file"
+            ref={bulkImageInputRef}
+            onChange={handleBulkImageSelect}
+            accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
+            multiple
+            className="hidden"
+          />
           {!isReadOnly && (
             <>
               <button
@@ -402,6 +506,13 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
               >
                 <Upload className="w-4 h-4 mr-2" />
                 Gelişmiş İçe Aktar
+              </button>
+              <button
+                onClick={() => bulkImageInputRef.current?.click()}
+                className="px-4 h-11 border border-border-color bg-white rounded-xl text-xs font-bold text-text-muted hover:text-primary hover:border-primary transition-all flex items-center shadow-sm"
+              >
+                <Images className="w-4 h-4 mr-2" />
+                Toplu Görsel Yükle
               </button>
             </>
           )}
@@ -965,6 +1076,83 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                   </button>
                 )}
              </div>
+          </div>
+        </div>
+      )}
+
+      {showBulkImageModal && (
+        <div className="fixed inset-0 z-[180] flex items-center justify-center bg-[#0F172A]/40 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-3xl overflow-hidden rounded-3xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-border-color bg-gray-50 p-7">
+              <div>
+                <h3 className="text-xl font-black text-[#0F172A]">Toplu Ürün Görseli Yükle</h3>
+                <p className="mt-1 text-sm text-text-muted">Dosya adı, uzantı çıkarıldıktan sonra SKU ile eşleştirilir.</p>
+              </div>
+              <Images className="h-7 w-7 text-primary" />
+            </div>
+
+            <div className="max-h-[60vh] space-y-4 overflow-y-auto p-7">
+              {bulkImageReport && (
+                <div className="grid grid-cols-3 gap-3">
+                  {[
+                    ['Toplam', bulkImageReport.total],
+                    ['Yüklendi', bulkImageReport.uploaded],
+                    ['Atlandı', bulkImageReport.skipped],
+                  ].map(([label, value]) => (
+                    <div key={String(label)} className="rounded-2xl border border-border-color bg-bg-main p-4 text-center">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-text-muted">{label}</p>
+                      <p className="mt-1 text-2xl font-black text-text-main">{value}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="divide-y divide-border-color overflow-hidden rounded-2xl border border-border-color">
+                {(bulkImageReport ? bulkImageReport.results : bulkImagePreview).map((item: any, index) => {
+                  const uploaded = item.status === 'uploaded' || item.status === 'matched';
+                  const filename = item.original_filename || item.file?.name;
+                  const matchedSku = item.matched_sku || item.matchedSku;
+                  return (
+                    <div key={`${filename}-${index}`} className="flex items-center justify-between gap-4 px-4 py-3 text-sm">
+                      <div className="min-w-0">
+                        <p className="truncate font-bold text-text-main">{filename}</p>
+                        <p className="mt-0.5 text-xs text-text-muted">
+                          {item.sku || '—'}{matchedSku ? ` → ${matchedSku}` : ''} · {item.message}
+                        </p>
+                      </div>
+                      <span className={cn(
+                        "shrink-0 rounded-full px-3 py-1 text-xs font-black",
+                        uploaded ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"
+                      )}>
+                        {uploaded ? '✓' : '⚠'}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {!bulkImageReport && bulkImagePreview.some((item) => item.status === 'invalid') && (
+                <p className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm font-bold text-rose-700">
+                  Geçersiz dosya bulundu. Yüklemeye devam etmek için dosya seçimini düzeltin.
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-border-color bg-gray-50 p-7">
+              <button onClick={closeBulkImageModal} disabled={bulkImageUploading} className="px-5 py-3 text-sm font-bold text-text-muted disabled:opacity-50">
+                {bulkImageReport ? 'Kapat' : 'Vazgeç'}
+              </button>
+              {!bulkImageReport && (
+                <button
+                  onClick={uploadBulkImages}
+                  disabled={bulkImageUploading || !bulkImagePreview.some((item) => item.status === 'matched') || bulkImagePreview.some((item) => item.status === 'invalid')}
+                  className="flex h-12 items-center rounded-xl bg-[#0F172A] px-7 text-sm font-bold text-white shadow-lg disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {bulkImageUploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
+                  {bulkImageUploading ? 'Yükleniyor...' : 'Görselleri Yükle'}
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
