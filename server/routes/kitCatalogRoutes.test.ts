@@ -16,13 +16,13 @@ before(async () => {
   db = new Database(":memory:");
   db.exec(`
     CREATE TABLE panel_api_keys (id TEXT PRIMARY KEY, name TEXT, key_hash TEXT, status TEXT, permissions TEXT, allowed_ips TEXT, expires_at TEXT, deleted_at TEXT, last_used_at TEXT, last_used_ip TEXT);
-    CREATE TABLE products (id TEXT PRIMARY KEY, sku TEXT, name TEXT, name_tr TEXT, name_en TEXT, title TEXT, supplier_code TEXT, material TEXT, form_code TEXT, size TEXT, purchase_cost REAL, sale_price REAL, central_stock INTEGER, visible_in_catalog INTEGER, status TEXT, product_type TEXT, updated_at TEXT);
+    CREATE TABLE products (id TEXT PRIMARY KEY, sku TEXT, name TEXT, name_tr TEXT, name_en TEXT, title TEXT, supplier_code TEXT, material TEXT, form_code TEXT, tube_type_code TEXT, size_code TEXT, size TEXT, pipe_size TEXT, normalized_material TEXT, normalized_size TEXT, normalized_tube_type TEXT, normalized_pipe_size TEXT, purchase_cost REAL, sale_price REAL, central_stock INTEGER, visible_in_catalog INTEGER, status TEXT, product_type TEXT, updated_at TEXT);
     CREATE TABLE product_images (id TEXT PRIMARY KEY, product_id TEXT, path TEXT, sort_order INTEGER);
   `);
   db.prepare("INSERT INTO panel_api_keys (id,name,key_hash,status,permissions) VALUES (?,?,?,?,?)")
     .run("key-1", "Kit Studio", hashApiKey(apiKey), "active", JSON.stringify(["kit-catalog:read"]));
-  db.prepare("INSERT INTO products VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-    .run("p-1", "AL-S20-ELB", "Dirsek", "Dirsek", "Elbow", "Dirsek", "SUP-1", "Aluminum", "SQUARE", "20x20", 70, 120, 42, 1, "Active", "simple", "2026-01-01");
+  db.prepare("INSERT INTO products VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    .run("p-1", "AL-S20-ELB", "Dirsek", "Dirsek", "Elbow", "Dirsek", "SUP-1", "Aluminum", "ELB", "SQ", "20X20", "20x20", "20x20 mm", "Alüminyum", "20x20", "Kare", "20x20 mm", 70, 120, 42, 1, "Active", "simple", "2026-01-01");
   db.prepare("INSERT INTO product_images VALUES (?,?,?,?)").run("img-1", "p-1", "/uploads/elbow.webp", 0);
 
   const app = express();
@@ -52,6 +52,9 @@ test("kit catalog returns read-only connector fields", async () => {
   assert.equal(body.data[0].sku, "AL-S20-ELB");
   assert.equal(body.data[0].sale_price, 120);
   assert.equal(body.data[0].image, "/uploads/elbow.webp");
+  assert.equal(body.data[0].form_code, "ELB");
+  assert.equal(body.data[0].tube_type_code, "SQ");
+  assert.equal(body.data[0].normalized_pipe_size, "20x20 mm");
 });
 
 test("kit catalog connector detail returns 404 for an unknown product", async () => {
