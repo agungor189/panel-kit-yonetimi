@@ -33,6 +33,14 @@ test("header aliases tolerate spaces, case, Turkish characters and Ǒlçü", () 
   assert.deepEqual(resolution.missingRequiredFields, []);
 });
 
+test("central stock machine and legacy headers map to central_stock", () => {
+  for (const header of ["central_stock", "total_stock", "Merkez Stok", "Stok sayisi"]) {
+    const resolution = resolveProductCsvHeaders(["SKU", "TÜR", header]);
+    assert.equal(resolution.byField.central_stock, header);
+    assert.ok(!resolution.unknownColumns.includes(header));
+  }
+});
+
 test("safe numeric parser accepts currency and both decimal conventions", () => {
   assert.equal(parseCsvNumber("$1,234.50"), 1234.5);
   assert.equal(parseCsvNumber("1.234,50 €"), 1234.5);
@@ -58,7 +66,7 @@ test("import persists product master data but ignores warehouse placement column
     },
     {
       SKU: "ASM-01", "Tedarik NO": "", " Olcu ": "25 mm", Malzeme: "Çelik", "Profil Tipi": "Yuvarlak",
-      "İsim - TR": "Montaj", "Isim - EN": "Assembly", "Toplam Adet": "", "Parça Ağırlığı": "250",
+      "İsim - TR": "Montaj", "Isim - EN": "Assembly", "Toplam Adet": "4", "Parça Ağırlığı": "250",
       "Alış Fiyatı": "2.50", "TÜR": "assembly", BOM: '{"SUP-01":2}', Açıklama: "Montaj açıklaması",
       "Toplama Lokasyonu": "", "Rezerv Lokasyon": "", "Kutu sayısı": "", "Kutu içi adet": "",
       "Kutu Ağırlığı": "", "Toplam Ağırlık": "",
@@ -80,6 +88,10 @@ test("import persists product master data but ignores warehouse placement column
   assert.equal(component.weight, 0);
   assert.equal(component.weight_grams, 125);
   assert.equal(component.product_type, "component");
+  assert.equal(component.central_stock, 10);
+
+  const assembly = db.prepare("SELECT central_stock FROM products WHERE sku = 'ASM-01'").get() as any;
+  assert.equal(assembly.central_stock, 4);
 
   assert.equal(component.warehouse_location, null);
   assert.equal((db.prepare("SELECT COUNT(*) AS count FROM product_reserve_locations WHERE product_id = ?").get(component.id) as any).count, 0);

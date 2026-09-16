@@ -52,7 +52,15 @@ export const PRODUCT_CSV_COLUMNS: readonly ProductCsvColumnDefinition[] = [
   { field: "name_tr", label: "Türkçe isim", aliases: ["Isim - TR", "İsim - TR", "İsim TR", "Isim TR", "Ürün Adı", "Urun Adi", "Name TR"] },
   { field: "name_en", label: "İngilizce isim", aliases: ["İsim - EN", "Isim - EN", "İsim EN", "Isim EN", "Name EN"] },
   { field: "title", label: "Başlık", aliases: ["Başlık", "Baslik", "Title"] },
-  { field: "central_stock", label: "Merkez stok", aliases: ["Toplam Adet", "Merkez Depo Stoğu", "Merkez Depo Stogu", "Toplam Stok", "Stok", "Stock"] },
+  {
+    field: "central_stock",
+    label: "Merkez stok",
+    aliases: [
+      "central_stock", "Central Stock", "total_stock", "Total Stock",
+      "Toplam Adet", "Merkez Stok", "Merkez Depo Stoğu", "Merkez Depo Stogu",
+      "Toplam Stok", "Stok", "Stok Sayısı", "Stok Sayisi", "Stock",
+    ],
+  },
   { field: "box_count", label: "Kutu sayısı", aliases: ["Kutu sayısı", "Kutu Sayisi", "Box Count"] },
   { field: "units_per_box", label: "Kutu içi adet", aliases: ["Kutu içi adet", "Kutu Ici Adet", "Units Per Box"] },
   { field: "box_weight_kg", label: "Kutu ağırlığı (kg)", aliases: ["Kutu Ağırlığı", "Kutu Agirligi", "Box Weight", "Box Weight Kg"] },
