@@ -4,7 +4,7 @@ import path from "node:path";
 import type Database from "better-sqlite3";
 
 export const PRODUCT_IMAGE_MAX_FILE_SIZE = 8 * 1024 * 1024;
-export const PRODUCT_IMAGE_MAX_FILES = 100;
+export { PRODUCT_IMAGE_SERVER_BATCH_LIMIT as PRODUCT_IMAGE_MAX_FILES } from "../../shared/productImageBatch";
 
 const MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
   ".jpg": "image/jpeg",

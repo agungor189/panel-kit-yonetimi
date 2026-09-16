@@ -16,14 +16,22 @@ before(async () => {
   db = new Database(":memory:");
   db.exec(`
     CREATE TABLE panel_api_keys (id TEXT PRIMARY KEY, name TEXT, key_hash TEXT, status TEXT, permissions TEXT, allowed_ips TEXT, expires_at TEXT, deleted_at TEXT, last_used_at TEXT, last_used_ip TEXT);
-    CREATE TABLE products (id TEXT PRIMARY KEY, sku TEXT, name TEXT, name_tr TEXT, name_en TEXT, title TEXT, supplier_code TEXT, material TEXT, form_code TEXT, tube_type_code TEXT, size_code TEXT, size TEXT, pipe_size TEXT, normalized_material TEXT, normalized_size TEXT, normalized_tube_type TEXT, normalized_pipe_size TEXT, purchase_cost REAL, sale_price REAL, central_stock INTEGER, visible_in_catalog INTEGER, status TEXT, product_type TEXT, updated_at TEXT);
+    CREATE TABLE products (id TEXT PRIMARY KEY, sku TEXT, name TEXT, name_tr TEXT, name_en TEXT, title TEXT, supplier_code TEXT, material TEXT, form_code TEXT, tube_type_code TEXT, size_code TEXT, size TEXT, pipe_size TEXT, normalized_material TEXT, normalized_size TEXT, normalized_tube_type TEXT, normalized_pipe_size TEXT, normalized_model TEXT, purchase_cost REAL, sale_price REAL, central_stock INTEGER, visible_in_catalog INTEGER, status TEXT, product_type TEXT, updated_at TEXT);
     CREATE TABLE product_images (id TEXT PRIMARY KEY, product_id TEXT, path TEXT, sort_order INTEGER);
+    CREATE TABLE kit_profiles (id TEXT PRIMARY KEY, name TEXT, shape TEXT, dimension TEXT, material TEXT, thickness TEXT, supplier TEXT, price_per_meter REAL, weight_per_meter REAL, stock_length_mm REAL, is_active INTEGER, updated_at TEXT);
+    CREATE TABLE kit_profile_offers (id TEXT PRIMARY KEY, profile_id TEXT, supplier TEXT, price_per_meter REAL, is_preferred INTEGER);
+    CREATE TABLE complementary_products (id TEXT PRIMARY KEY, name TEXT, category TEXT, description TEXT, supplier_reference TEXT, cover_image TEXT, unit TEXT, purchase_price REAL, is_active INTEGER, updated_at TEXT);
+    CREATE TABLE complementary_product_images (id TEXT PRIMARY KEY, complementary_product_id TEXT, path TEXT, sort_order INTEGER, created_at TEXT);
   `);
   db.prepare("INSERT INTO panel_api_keys (id,name,key_hash,status,permissions) VALUES (?,?,?,?,?)")
     .run("key-1", "Kit Studio", hashApiKey(apiKey), "active", JSON.stringify(["kit-catalog:read"]));
-  db.prepare("INSERT INTO products VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-    .run("p-1", "AL-S20-ELB", "Dirsek", "Dirsek", "Elbow", "Dirsek", "SUP-1", "Aluminum", "ELB", "SQ", "20X20", "20x20", "20x20 mm", "Alüminyum", "20x20", "Kare", "20x20 mm", 70, 120, 42, 1, "Active", "simple", "2026-01-01");
+  db.prepare("INSERT INTO products VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    .run("p-1", "AL-S20-ELB", "Dirsek", "Dirsek", "Elbow", "Dirsek", "SUP-1", "Aluminum", "ELB", "SQ", "20X20", "20x20", "20x20 mm", "Alüminyum", "20x20", "Kare", "20x20 mm", "S20", 70, 120, 42, 1, "Active", "simple", "2026-01-01");
   db.prepare("INSERT INTO product_images VALUES (?,?,?,?)").run("img-1", "p-1", "/uploads/elbow.webp", 0);
+  db.prepare("INSERT INTO kit_profiles VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").run("profile-1", "30x30 Profil", "Kare", "30x30", "Alüminyum", "2", "Metal AŞ", 80, 0.4, 6000, 1, "2026-01-01");
+  db.prepare("INSERT INTO kit_profile_offers VALUES (?,?,?,?,?)").run("offer-1", "profile-1", "Teklif AŞ", 75, 1);
+  db.prepare("INSERT INTO complementary_products VALUES (?,?,?,?,?,?,?,?,?,?)").run("comp-1", "Kapak", "Kapak", "Plastik kapak", "KPK-1", null, "adet", 12, 1, "2026-01-01");
+  db.prepare("INSERT INTO complementary_product_images VALUES (?,?,?,?,?)").run("comp-img-1", "comp-1", "/uploads/cap.webp", 0, "2026-01-01");
 
   const app = express();
   const auth = createPanelApiAuth({ db, hashApiKey, logActivity: () => undefined });
@@ -60,4 +68,15 @@ test("kit catalog returns read-only connector fields", async () => {
 test("kit catalog connector detail returns 404 for an unknown product", async () => {
   const response = await fetch(`${baseUrl}/api/kit-catalog/connectors/missing`, { headers: { "x-api-key": apiKey } });
   assert.equal(response.status, 404);
+});
+
+test("kit catalog exposes active central profiles and complementary products", async () => {
+  const headers = { "x-api-key": apiKey };
+  const profiles = await (await fetch(`${baseUrl}/api/kit-catalog/profiles`, { headers })).json() as any;
+  assert.equal(profiles.data[0].id, "profile-1");
+  assert.equal(profiles.data[0].effective_price_per_meter, 75);
+  assert.equal(profiles.data[0].effective_supplier, "Teklif AŞ");
+  const complements = await (await fetch(`${baseUrl}/api/kit-catalog/complementary-products`, { headers })).json() as any;
+  assert.equal(complements.data[0].id, "comp-1");
+  assert.equal(complements.data[0].image, "/uploads/cap.webp");
 });

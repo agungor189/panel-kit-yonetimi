@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import Database from "better-sqlite3";
 import { importProductImages, inspectProductImageFile, type StagedProductImage } from "./productImageImport.js";
+import { chunkItems } from "../../shared/productImageBatch.js";
 
 function setup() {
   const db = new Database(":memory:");
@@ -81,4 +82,24 @@ test("invalid extensions, MIME mismatches and unsafe names are rejected", () => 
     sku: "AL-R100-ELB",
     extension: ".webp",
   });
+});
+
+test("300 SKU-named images survive client-sized batches without loss", () => {
+  const { db, uploadsDir } = setup();
+  try {
+    const insert = db.prepare("INSERT INTO products (id,sku) VALUES (?,?)");
+    const files: StagedProductImage[] = [];
+    for (let index = 1; index <= 300; index++) {
+      const sku = `BULK-${String(index).padStart(3, "0")}`;
+      insert.run(`bulk-${index}`, sku);
+      files.push(stage(uploadsDir, `${sku}.png`, `image-${index}`));
+    }
+    const reports = chunkItems(files).map((batch) => importProductImages(db, uploadsDir, batch));
+    assert.equal(reports.reduce((sum, report) => sum + report.uploaded, 0), 300);
+    assert.equal(reports.reduce((sum, report) => sum + report.skipped, 0), 0);
+    assert.equal((db.prepare("SELECT COUNT(*) count FROM product_images WHERE product_id LIKE 'bulk-%'").get() as any).count, 300);
+  } finally {
+    db.close();
+    fs.rmSync(uploadsDir, { recursive: true, force: true });
+  }
 });
