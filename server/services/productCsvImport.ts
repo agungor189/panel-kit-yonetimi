@@ -361,9 +361,7 @@ export function importProductsFromCsvRows(
     const effectiveType = productType || legacyProductType(existing?.product_type, existing ? existingBomParents.has(existing.id) : false) || "simple";
     const effectiveWeightGrams = weightGrams ?? (Number(existing?.weight_grams ?? existing?.weight ?? 0) || 0);
     const effectivePurchasePrice = purchasePriceUsd ?? (Number(existing?.purchase_price_usd ?? 0) || 0);
-    const effectiveStock = lotNumber
-      ? Number(existing?.central_stock || 0)
-      : stock ?? Number(existing?.central_stock || 0);
+    const effectiveStock = stock ?? Number(existing?.central_stock || 0);
     const lotQuantity = explicitLotQuantity ?? (lotNumber ? stock : null) ?? (boxCount && unitsPerBox ? boxCount * unitsPerBox : null);
     if (lotNumber && (!supplierCode || !boxCount || !unitsPerBox || !lotQuantity
       || lotQuantity > boxCount * unitsPerBox || lotQuantity <= (boxCount - 1) * unitsPerBox)) {
@@ -409,7 +407,7 @@ export function importProductsFromCsvRows(
       form_code: clean(existing?.form_code) || clean(sku.split("-").at(-1)) || null,
       connection_type: clean(existing?.connection_type) || null,
       central_stock: effectiveStock,
-      has_stock_value: !lotNumber && stock !== null,
+      has_stock_value: stock !== null,
       product_type: effectiveType,
       is_sellable: effectiveType === "component" ? 0 : 1,
       visible_in_catalog: effectiveType === "component" ? 0 : 1,

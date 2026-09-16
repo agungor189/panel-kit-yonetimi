@@ -104,19 +104,39 @@ test("import persists product master data but ignores warehouse placement column
   db.close();
 });
 
-test("lot içeren Panel master importu kabul beklentisini kaydeder ve mevcut stoğu overwrite etmez", () => {
+test("lotlu ürün importu merkez stoğu ve yalnız gerçek fark kadar stok hareketini günceller", () => {
   const db = database();
   runMigrations(db);
-  db.prepare("INSERT INTO products (id, sku, title, name, supplier_code, central_stock, product_type) VALUES ('existing', 'SKU-LOT', 'Ürün', 'Ürün', 'SUP-LOT', 100, 'simple')").run();
+  db.prepare("INSERT INTO products (id, sku, title, name, supplier_code, central_stock, product_type) VALUES ('existing', 'SKU-LOT', 'Ürün', 'Ürün', 'SUP-LOT', 0, 'simple')").run();
   const headers = ["SKU", "Tedarik NO", "İsim - TR", "TÜR", "Toplam Adet", "Kutu sayısı", "Kutu içi adet", "Kutu Ağırlığı", "Toplam Ağırlık", "Parti/Lot"];
-  const rows = [{ SKU: "SKU-LOT", "Tedarik NO": "SUP-LOT", "İsim - TR": "Ürün", "TÜR": "simple", "Toplam Adet": "75", "Kutu sayısı": "3", "Kutu içi adet": "25", "Kutu Ağırlığı": "10", "Toplam Ağırlık": "30", "Parti/Lot": "LOT-002" }];
-  const report = importProductsFromCsvRows(db, rows, headers, { apply: true, actorUsername: "admin" });
-  assert.equal(report.applied, true);
-  assert.equal(report.lot_lines_created, 1);
-  assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'existing'").get() as any).central_stock, 100);
+  const row = { SKU: "SKU-LOT", "Tedarik NO": "SUP-LOT", "İsim - TR": "Ürün", "TÜR": "simple", "Toplam Adet": "300", "Kutu sayısı": "3", "Kutu içi adet": "100", "Kutu Ağırlığı": "10", "Toplam Ağırlık": "30", "Parti/Lot": "LOT-001" };
+
+  const created = importProductsFromCsvRows(db, [row], headers, { apply: true, actorUsername: "admin" });
+  assert.equal(created.applied, true);
+  assert.equal(created.lot_lines_created, 1);
+  assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'existing'").get() as any).central_stock, 300);
+  assert.deepEqual(
+    (db.prepare("SELECT change_amount FROM stock_movements WHERE product_id = 'existing' ORDER BY created_at, rowid").all() as any[]).map((movement) => movement.change_amount),
+    [300],
+  );
   assert.deepEqual(db.prepare("SELECT lot_number, product_id, package_count, units_per_package, total_units FROM inbound_lot_lines").get(), {
-    lot_number: "LOT-002", product_id: "existing", package_count: 3, units_per_package: 25, total_units: 75,
+    lot_number: "LOT-001", product_id: "existing", package_count: 3, units_per_package: 100, total_units: 300,
   });
+
+  const unchanged = importProductsFromCsvRows(db, [row], headers, { apply: true, actorUsername: "admin" });
+  assert.equal(unchanged.applied, true);
+  assert.equal(unchanged.lot_lines_updated, 1);
+  assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'existing'").get() as any).central_stock, 300);
+  assert.equal((db.prepare("SELECT COUNT(*) AS count FROM stock_movements WHERE product_id = 'existing'").get() as any).count, 1);
+
+  const reduced = importProductsFromCsvRows(db, [{ ...row, "Toplam Adet": "280" }], headers, { apply: true, actorUsername: "admin" });
+  assert.equal(reduced.applied, true);
+  assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'existing'").get() as any).central_stock, 280);
+  assert.deepEqual(
+    (db.prepare("SELECT change_amount FROM stock_movements WHERE product_id = 'existing' ORDER BY created_at, rowid").all() as any[]).map((movement) => movement.change_amount),
+    [300, -20],
+  );
+  assert.equal((db.prepare("SELECT total_units FROM inbound_lot_lines WHERE lot_number = 'LOT-001' AND product_id = 'existing'").get() as any).total_units, 280);
   db.close();
 });
 
