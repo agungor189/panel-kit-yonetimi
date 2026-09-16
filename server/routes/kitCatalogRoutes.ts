@@ -30,6 +30,7 @@ const CONNECTOR_COLUMNS = `
   COALESCE(p.purchase_cost, 0) AS purchase_cost,
   COALESCE(p.sale_price, 0) AS sale_price,
   COALESCE(p.central_stock, 0) AS central_stock,
+  COALESCE(NULLIF(p.weight_grams, 0), NULLIF(p.weight, 0), 0) AS weight_grams,
   p.updated_at
 `;
 
