@@ -5,6 +5,9 @@ The Panel remains one Express process and one SQLite database. Modules are extra
 - Phase 1 — `auth`: login/change-password/current-user routes, JWT/static-key middleware, write protection, admin guard, and permission normalization.
 - Phase 2 — `warehouse`: Warehouse API composition and print-worker lifecycle around the existing Warehouse services/routes.
 - Phase 3 — `products`: central/BOM stock calculations and compatibility hydration.
+- Phase 4 — `integrations`: Panel API key HMAC ownership.
+- Phase 5 — `backup`: backup policy defaults and safe configuration bounds.
+- Phase 6 — `finance`: active exchange-rate access behind a database-bound reader.
+- Phase 7 — `marketplaces`: Trendyol environment/configuration routing.
 
-The remaining large finance, marketplace, backup, and integration route groups deliberately stay in `server.ts` for the next phases. They share transaction and upload state with several legacy routes, so moving them independently is safer than an all-at-once rewrite. The next extraction order is `integrations`, `backup`, `marketplaces`, then `finance`; each phase must run test, typecheck, and build before continuing.
-
+The route registrations that still coordinate multiple domains deliberately stay in `server.ts`; their domain policy and stateful services now have explicit module seams. Future route moves can use these seams without changing URLs, transaction ownership, or the single-process architecture.
