@@ -31,6 +31,36 @@ export function startPrintQueueWorker(db: Database.Database, options: {
     return { stop() {}, runOnce: async () => false };
   }
 
+  const renderPdf = async (purpose: string, data: Record<string, unknown>) => {
+    const response = await fetch(`${rendererUrl.replace(/\/$/, "")}/api/v1/render`, {
+      method: "POST",
+      headers: {
+        Accept: "application/pdf",
+        "Content-Type": "application/json",
+        ...(rendererApiKey ? { "x-api-key": rendererApiKey } : {}),
+      },
+      body: JSON.stringify({ purpose, data }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new Error(`Label renderer HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
+    const pdf = Buffer.from(await response.arrayBuffer());
+    if (pdf.subarray(0, 4).toString() !== "%PDF") throw new Error("Label renderer geçersiz PDF döndürdü.");
+    return pdf;
+  };
+
+  const submitPdf = async (pdf: Buffer, labelCode: string, printerName?: string | null) => {
+    if (dryRun) return;
+    const directory = await mkdtemp(path.join(tmpdir(), "dsdst-label-"));
+    const safeCode = labelCode.replace(/[^a-z0-9._-]+/gi, "-").slice(0, 100) || "label";
+    const filePath = path.join(directory, `${safeCode}.pdf`);
+    try {
+      await writeFile(filePath, pdf);
+      await runLp(printerName || defaultPrinter, filePath);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  };
+
   let running = false;
   const audit = (action: string, currentJob: any, details: Record<string, unknown>) => {
     try {
@@ -61,17 +91,17 @@ export function startPrintQueueWorker(db: Database.Database, options: {
     if (running) return false;
     running = true;
     let job: any;
+    let purposeJob: any;
     try {
       job = db.transaction(() => {
         const candidate = db.prepare(`
           SELECT j.*, p.package_code, p.package_number, p.total_packages, p.planned_quantity,
                  l.sku_snapshot, l.product_name_snapshot, l.lot_number, l.supplier_no_snapshot,
-                 l.material_snapshot, l.size_snapshot, l.unit_weight_g_snapshot,
-                 l.package_weight_kg_snapshot, t.template_json
+                 l.material_snapshot, l.form_snapshot, l.series_snapshot, l.size_snapshot, l.unit_weight_g_snapshot,
+                 l.package_weight_kg_snapshot
           FROM print_jobs j
           JOIN warehouse_packages p ON p.id = j.package_id
           JOIN inbound_batch_lines l ON l.id = p.batch_line_id
-          JOIN label_templates t ON t.id = j.template_id
           WHERE (j.status IN ('QUEUED','FAILED') OR (j.status = 'PROCESSING' AND datetime(j.claimed_at) <= datetime('now', '-5 minutes')))
             AND j.attempts < j.max_attempts
           ORDER BY datetime(j.created_at), j.id LIMIT 1
@@ -84,48 +114,49 @@ export function startPrintQueueWorker(db: Database.Database, options: {
         `).run(candidate.id);
         return changed.changes === 1 ? { ...candidate, attempts: Number(candidate.attempts) + 1 } : null;
       }).immediate();
-      if (!job) return false;
-
-      const response = await fetch(`${rendererUrl.replace(/\/$/, "")}/api/v1/package-label/render`, {
-        method: "POST",
-        headers: {
-          Accept: "application/pdf",
-          "Content-Type": "application/json",
-          ...(rendererApiKey ? { "x-api-key": rendererApiKey } : {}),
-        },
-        body: JSON.stringify({
-          template: JSON.parse(job.template_json),
-          product: {
-            packageCode: job.package_code,
-            sku: job.sku_snapshot,
-            urunAdi: job.product_name_snapshot,
-            urunKodu: job.supplier_no_snapshot || "",
-            supplierNo: job.supplier_no_snapshot || "",
-            malzeme: job.material_snapshot || "",
-            olcu: job.size_snapshot || "",
-            partiLot: job.lot_number || "",
-            paketIciAdet: String(job.planned_quantity),
-            paketNo: String(job.package_number),
-            toplamPaket: String(job.total_packages),
-            urunAgirligi: String(job.unit_weight_g_snapshot || ""),
-            kutuAgirligi: String(job.package_weight_kg_snapshot || ""),
-          },
-        }),
-        signal: AbortSignal.timeout(30_000),
-      });
-      if (!response.ok) throw new Error(`Label renderer HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
-      const pdf = Buffer.from(await response.arrayBuffer());
-      if (pdf.subarray(0, 4).toString() !== "%PDF") throw new Error("Label renderer geçersiz PDF döndürdü.");
-      if (!dryRun) {
-        const directory = await mkdtemp(path.join(tmpdir(), "dsdst-label-"));
-        const filePath = path.join(directory, `${job.package_code}.pdf`);
-        try {
-          await writeFile(filePath, pdf);
-          await runLp(job.printer_name || defaultPrinter, filePath);
-        } finally {
-          await rm(directory, { recursive: true, force: true });
-        }
+      if (!job) {
+        purposeJob = db.transaction(() => {
+          const candidate = db.prepare(`
+            SELECT * FROM label_print_jobs
+            WHERE (status IN ('QUEUED','FAILED') OR (status = 'PROCESSING' AND datetime(claimed_at) <= datetime('now', '-5 minutes')))
+              AND attempts < max_attempts
+            ORDER BY datetime(created_at), id LIMIT 1
+          `).get() as any;
+          if (!candidate) return null;
+          const changed = db.prepare(`
+            UPDATE label_print_jobs SET status = 'PROCESSING', attempts = attempts + 1,
+              claimed_at = CURRENT_TIMESTAMP, error_message = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND (status IN ('QUEUED','FAILED') OR (status = 'PROCESSING' AND datetime(claimed_at) <= datetime('now', '-5 minutes')))
+          `).run(candidate.id);
+          return changed.changes === 1 ? { ...candidate, attempts: Number(candidate.attempts) + 1 } : null;
+        }).immediate();
+        if (!purposeJob) return false;
+        const payload = JSON.parse(purposeJob.payload_json) as Record<string, unknown>;
+        const pdf = await renderPdf(purposeJob.purpose, payload);
+        await submitPdf(pdf, purposeJob.label_code, purposeJob.printer_name);
+        db.prepare("UPDATE label_print_jobs SET status = 'PRINTED', printed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(purposeJob.id);
+        logger.info(`[warehouse-print-worker] printed ${purposeJob.purpose}:${purposeJob.label_code}`);
+        return true;
       }
+
+      const pdf = await renderPdf("goods_receipt", {
+        Package_code: job.package_code,
+        SKU: job.sku_snapshot,
+        Urun_adi: job.product_name_snapshot,
+        Urun_kodu: job.supplier_no_snapshot || "",
+        Supplier_no: job.supplier_no_snapshot || "",
+        Malzeme: job.material_snapshot || "",
+        Tip: job.form_snapshot || job.series_snapshot || "",
+        Olcu: job.size_snapshot || "",
+        Parti_Lot: job.lot_number || "",
+        Paket_ici_adet: String(job.planned_quantity),
+        Paket_no: `${job.package_number} / ${job.total_packages}`,
+        Toplam_paket: String(job.total_packages),
+        Stok_sayisi: String(Number(job.planned_quantity || 0) * Number(job.total_packages || 0)),
+        Urun_agirligi: job.unit_weight_g_snapshot ? `${job.unit_weight_g_snapshot} g` : "",
+        Kutu_agirligi: job.package_weight_kg_snapshot ? `${job.package_weight_kg_snapshot} kg` : "",
+      });
+      await submitPdf(pdf, job.package_code, job.printer_name);
       db.transaction(() => {
         db.prepare("UPDATE print_jobs SET status = 'PRINTED', printed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(job.id);
         db.prepare(`
@@ -142,7 +173,10 @@ export function startPrintQueueWorker(db: Database.Database, options: {
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message.slice(0, 1000) : "Print failed";
-      if (job?.id) {
+      if (purposeJob?.id) {
+        db.prepare("UPDATE label_print_jobs SET status = 'FAILED', error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(message, purposeJob.id);
+        logger.error(`[warehouse-print-worker] ${purposeJob.purpose}:${purposeJob.label_code} ${message}`);
+      } else if (job?.id) {
         db.transaction(() => {
           db.prepare("UPDATE print_jobs SET status = 'FAILED', error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(message, job.id);
           const current = db.prepare("SELECT attempts, max_attempts FROM print_jobs WHERE id = ?").get(job.id) as any;

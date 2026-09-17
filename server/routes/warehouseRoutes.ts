@@ -451,6 +451,12 @@ export function createWarehouseRouter({
   router.get("/admin/locations", authenticate("read:products"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:manage_locations", "warehouse:place_packages", "warehouse:move_stock"]), (_req, res) => {
     res.json({ success: true, data: adminService.listLocations() });
   });
+  router.post("/admin/locations/:id/print", authenticate("write:warehouse_status"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:manage_locations", "warehouse:print_labels"]), (req, res) => {
+    try {
+      const result = adminService.queueLocationPrint(req.params.id, req.body || {}, actor(res));
+      res.json({ success: true, data: result, idempotent: result.idempotent });
+    } catch (error) { return handleServiceError(res, error); }
+  });
   router.get("/admin/warehouse-map", authenticate(["read:products", "read:warehouse_orders"]), requireWarehouseUser, requireWarehousePermission("warehouse:view_map"), (_req, res) => {
     res.json({ success: true, data: adminService.getWarehouseMap() });
   });

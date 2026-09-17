@@ -112,6 +112,8 @@ npm run dev        # Vite + Express birlikte localhost:3000
 | `WAREHOUSE_PRINT_DRY_RUN` | — | `true` iken PDF'i doğrular ama `lp` çalıştırmaz; yalnız test için |
 | `CUPS_SERVER` | Docker baskısında | Panel container'ının ulaşacağı CUPS sunucusu (örn. `host.docker.internal:631`) |
 
+Warehouse baskı worker'ı paketler için `goods_receipt`, raflar için `location` purpose değerini Label Printer `POST /api/v1/render` endpoint'ine gönderir. Şablon JSON'u Panel/Warehouse koduna gömülmez; her job işlendiğinde Label Printer'daki son kaydedilmiş varsayılan tasarım kullanılır. Paket işleri mevcut `print_jobs`, diğer purpose işleri veri silmeyen v59 migration'ıyla eklenen `label_print_jobs` kuyruğunda tutulur ve ikisi de aynı CUPS worker'ından geçer.
+
 ---
 
 ## Cloudflare R2 Backup

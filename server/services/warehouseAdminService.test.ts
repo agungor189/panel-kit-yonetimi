@@ -264,6 +264,34 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     await new Promise<void>((resolve, reject) => renderer.close((error) => error ? reject(error) : resolve()));
   });
 
+  test("lokasyon etiketini aynı renderer ve CUPS worker kuyruğunda purpose ile işler", async () => {
+    const location = service.createLocation({ code: "A1-K1-P1", package_capacity: 2 }, actor) as any;
+    const queued = service.queueLocationPrint(location.id, { idempotency_key: "location-print-1" }, actor) as any;
+    const replay = service.queueLocationPrint(location.id, { idempotency_key: "location-print-1" }, actor) as any;
+    assert.equal(queued.job.id, replay.job.id);
+    let requestPath = "";
+    let requestBody = "";
+    const renderer = createServer((req, res) => {
+      requestPath = req.url || "";
+      req.on("data", (chunk) => { requestBody += chunk; });
+      req.on("end", () => { res.setHeader("Content-Type", "application/pdf"); res.end(Buffer.from("%PDF-location")); });
+    });
+    await new Promise<void>((resolve) => renderer.listen(0, "127.0.0.1", resolve));
+    const address = renderer.address();
+    assert.ok(address && typeof address !== "string");
+    const worker = startPrintQueueWorker(db, {
+      rendererUrl: `http://127.0.0.1:${address.port}`,
+      dryRun: true,
+      autoStart: false,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+    assert.equal(await worker.runOnce(), true);
+    assert.equal(requestPath, "/api/v1/render");
+    assert.deepEqual(JSON.parse(requestBody), { purpose: "location", data: { Lokasyon: "A1-K1-P1" } });
+    assert.equal((db.prepare("SELECT status FROM label_print_jobs WHERE id = ?").get(queued.job.id) as any).status, "PRINTED");
+    await new Promise<void>((resolve, reject) => renderer.close((error) => error ? reject(error) : resolve()));
+  });
+
   test("yerleştirme sıra, kapasite, stok senkronu ve idempotency kurallarını uygular", () => {
     const batch = createImportedBatch();
     const packages = db.prepare("SELECT * FROM warehouse_packages WHERE batch_id = ? ORDER BY package_number").all(batch.id) as any[];

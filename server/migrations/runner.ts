@@ -2301,6 +2301,37 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 59,
+    name: "add_purpose_label_print_jobs",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS label_print_jobs (
+          id TEXT PRIMARY KEY,
+          purpose TEXT NOT NULL CHECK(purpose IN ('goods_receipt','location','product_package','kit','shipping','custom')),
+          subject_type TEXT NOT NULL,
+          subject_id TEXT,
+          label_code TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL UNIQUE,
+          status TEXT NOT NULL DEFAULT 'QUEUED'
+            CHECK(status IN ('QUEUED','PROCESSING','PRINTED','FAILED','CANCELLED')),
+          printer_name TEXT,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL DEFAULT 3,
+          error_message TEXT,
+          claimed_at DATETIME,
+          printed_at DATETIME,
+          created_by TEXT NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS idx_label_print_jobs_worker
+          ON label_print_jobs(status, attempts, created_at);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

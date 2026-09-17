@@ -16,25 +16,11 @@ type ActivityWriter = (
 
 export const DEFAULT_CLAIM_LEASE_SECONDS = 90;
 
-export const DEFAULT_PACKAGE_LABEL_TEMPLATE = {
-  id: "warehouse-package-150x100-v1",
-  name: "DSDST Depo Paket Etiketi",
-  width: 150,
-  height: 100,
-  elements: [
-    { id: "border", type: "box", x: 2, y: 2, width: 146, height: 96, borderWidth: 0.6 },
-    { id: "brand", type: "text", x: 7, y: 6, width: 48, height: 8, value: "DSDST WAREHOUSE", fontSize: 5, fontWeight: "black" },
-    { id: "package-code", type: "text", x: 58, y: 5, width: 84, height: 11, value: "{Package_code}", fontSize: 7, fontWeight: "black", textAlign: "right" },
-    { id: "product-name", type: "text", x: 7, y: 20, width: 135, height: 15, value: "{Urun_adi}", fontSize: 6, fontWeight: "bold" },
-    { id: "sku-label", type: "text", x: 7, y: 39, width: 55, height: 7, value: "SKU: {SKU}", fontSize: 4, fontWeight: "bold" },
-    { id: "lot", type: "text", x: 66, y: 39, width: 76, height: 7, value: "LOT: {Parti_Lot}", fontSize: 4, textAlign: "right" },
-    { id: "supplier", type: "text", x: 7, y: 46, width: 70, height: 6, value: "TEDARIK: {Supplier_no}", fontSize: 3.5, fontWeight: "bold" },
-    { id: "size-weight", type: "text", x: 79, y: 46, width: 63, height: 6, value: "{Olcu} · {Kutu_agirligi} kg", fontSize: 3.5, textAlign: "right" },
-    { id: "count", type: "text", x: 7, y: 53, width: 60, height: 8, value: "ADET: {Paket_ici_adet}", fontSize: 5, fontWeight: "black" },
-    { id: "ordinal", type: "text", x: 76, y: 53, width: 66, height: 8, value: "PAKET {Paket_no}/{Toplam_paket}", fontSize: 5, fontWeight: "black", textAlign: "right" },
-    { id: "package-barcode", type: "barcode", x: 7, y: 64, width: 96, height: 27, value: "{Package_code}", showBarcodeText: true },
-    { id: "package-qr", type: "qr", x: 113, y: 64, width: 27, height: 27, value: "{Package_code}" },
-  ],
+const LABEL_PRINTER_TEMPLATE_REFERENCE = {
+  id: "label-printer-goods-receipt",
+  name: "Label Printer · Mal Kabul",
+  purpose: "goods_receipt",
+  source: "label-printer-api",
 };
 
 const asNumber = (value: unknown) => {
@@ -95,19 +81,13 @@ export class WarehouseAdminService {
   }
 
   ensureDefaultTemplate(actorId?: string) {
-    const existing = this.db.prepare("SELECT id, version, template_json FROM label_templates WHERE template_type = 'PACKAGE' AND is_default = 1 AND active = 1").get() as any;
-    if (existing) {
-      if (existing.id === DEFAULT_PACKAGE_LABEL_TEMPLATE.id && Number(existing.version) === 1 && !String(existing.template_json || "").includes("{Supplier_no}")) {
-        this.db.prepare("UPDATE label_templates SET template_json = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-          .run(JSON.stringify(DEFAULT_PACKAGE_LABEL_TEMPLATE), existing.id);
-      }
-      return existing.id as string;
-    }
-    const id = DEFAULT_PACKAGE_LABEL_TEMPLATE.id;
+    const existing = this.db.prepare("SELECT id FROM label_templates WHERE template_type = 'PACKAGE' AND is_default = 1 AND active = 1").get() as any;
+    if (existing) return existing.id as string;
+    const id = LABEL_PRINTER_TEMPLATE_REFERENCE.id;
     this.db.prepare(`
       INSERT OR IGNORE INTO label_templates (id, name, template_type, version, template_json, active, is_default, created_by)
       VALUES (?, ?, 'PACKAGE', 1, ?, 1, 1, ?)
-    `).run(id, DEFAULT_PACKAGE_LABEL_TEMPLATE.name, JSON.stringify(DEFAULT_PACKAGE_LABEL_TEMPLATE), actorId || null);
+    `).run(id, LABEL_PRINTER_TEMPLATE_REFERENCE.name, JSON.stringify(LABEL_PRINTER_TEMPLATE_REFERENCE), actorId || null);
     return id;
   }
 
@@ -693,12 +673,44 @@ export class WarehouseAdminService {
   }
 
   listPrintJobs(limit = 100) {
-    return this.db.prepare(`
+    const safeLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
+    const packageJobs = this.db.prepare(`
       SELECT j.*, p.package_code, p.status AS package_status, l.sku_snapshot, l.product_name_snapshot
       FROM print_jobs j JOIN warehouse_packages p ON p.id = j.package_id
       JOIN inbound_batch_lines l ON l.id = p.batch_line_id
       ORDER BY datetime(j.created_at) DESC LIMIT ?
-    `).all(Math.max(1, Math.min(500, Math.trunc(limit))));
+    `).all(safeLimit) as any[];
+    const purposeJobs = this.db.prepare(`
+      SELECT j.*, NULL AS package_id, j.label_code AS package_code, NULL AS package_status,
+             j.label_code AS sku_snapshot, j.purpose AS product_name_snapshot
+      FROM label_print_jobs j
+      ORDER BY datetime(j.created_at) DESC LIMIT ?
+    `).all(safeLimit) as any[];
+    return [...packageJobs, ...purposeJobs]
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+      .slice(0, safeLimit);
+  }
+
+  queueLocationPrint(locationId: string, input: Record<string, unknown>, actor: WarehouseActor) {
+    const idempotencyKey = clean(input.idempotency_key, 200);
+    if (!idempotencyKey) throw new WarehouseServiceError(400, "IDEMPOTENCY_KEY_REQUIRED", "idempotency_key zorunludur.");
+    return this.db.transaction(() => {
+      const existing = this.db.prepare("SELECT * FROM label_print_jobs WHERE idempotency_key = ?").get(idempotencyKey) as any;
+      if (existing) {
+        if (existing.subject_id !== locationId) throw new WarehouseServiceError(409, "IDEMPOTENCY_KEY_CONFLICT", "Bu işlem anahtarı başka bir lokasyon için kullanılmış.");
+        return { job: existing, idempotent: true };
+      }
+      const location = this.db.prepare("SELECT * FROM warehouse_locations WHERE id = ? AND active = 1").get(locationId) as any;
+      if (!location) throw new WarehouseServiceError(404, "LOCATION_NOT_FOUND", "Lokasyon bulunamadı.");
+      const jobId = randomUUID();
+      this.db.prepare(`
+        INSERT INTO label_print_jobs
+          (id, purpose, subject_type, subject_id, label_code, payload_json, idempotency_key, printer_name, created_by)
+        VALUES (?, 'location', 'warehouse_location', ?, ?, ?, ?, ?, ?)
+      `).run(jobId, location.id, location.code, JSON.stringify({ Lokasyon: location.code }), idempotencyKey, clean(input.printer_name, 160) || null, actor.id);
+      this.audit("WAREHOUSE_LOCATION_LABEL_QUEUED", "warehouse_location", location.id, { job_id: jobId, code: location.code }, actor);
+      return { job: this.db.prepare("SELECT * FROM label_print_jobs WHERE id = ?").get(jobId), location, idempotent: false };
+    })();
   }
 
   createLocation(input: Record<string, unknown>, actor: WarehouseActor) {
