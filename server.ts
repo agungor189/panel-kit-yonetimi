@@ -46,6 +46,11 @@ import {
 } from "./server/modules/products/stock.js";
 import { createApiKeyHasher } from "./server/modules/integrations/apiKeys.js";
 import {
+  DEFAULT_BACKUP_CONFIG,
+  normalizeBackupConfig,
+  type BackupConfig,
+} from "./server/modules/backup/config.js";
+import {
   PRODUCT_IMAGE_MAX_FILES,
   PRODUCT_IMAGE_MAX_FILE_SIZE,
   cleanupStagedProductImages,
@@ -213,24 +218,6 @@ const backupUpload = multer({ dest: os.tmpdir(), limits: { fileSize: 500 * 1024 
 const BACKUP_DIR = process.env.BACKUP_DIR || path.join(process.cwd(), "backups");
 const BACKUP_DB_DIR = path.join(BACKUP_DIR, "db");
 const BACKUP_UPLOADS_DIR = path.join(BACKUP_DIR, "uploads");
-
-type BackupConfig = {
-  enabled: boolean;
-  run_at: string;
-  retention_days: number;
-  include_uploads: boolean;
-  uploads_strategy: "smart" | "full" | "incremental" | "none";
-  weekly_full_day: number;
-};
-
-const DEFAULT_BACKUP_CONFIG: BackupConfig = {
-  enabled: true,
-  run_at: "03:00",
-  retention_days: 7,
-  include_uploads: true,
-  uploads_strategy: "smart",
-  weekly_full_day: 0,
-};
 
 type CloudBackupConfig = {
   enabled: boolean;
@@ -480,24 +467,6 @@ function ensureBackupDirectories(): void {
 
 function safeBackupTimestamp(date = new Date()): string {
   return date.toISOString().replace(/[:.]/g, "-");
-}
-
-function normalizeBackupConfig(input: any): BackupConfig {
-  const merged = { ...DEFAULT_BACKUP_CONFIG, ...(input && typeof input === "object" ? input : {}) };
-  const runAt = String(merged.run_at || DEFAULT_BACKUP_CONFIG.run_at);
-  const isValidRunAt = /^([01]\d|2[0-3]):[0-5]\d$/.test(runAt);
-  const strategy = ["smart", "full", "incremental", "none"].includes(merged.uploads_strategy)
-    ? merged.uploads_strategy
-    : DEFAULT_BACKUP_CONFIG.uploads_strategy;
-
-  return {
-    enabled: Boolean(merged.enabled),
-    run_at: isValidRunAt ? runAt : DEFAULT_BACKUP_CONFIG.run_at,
-    retention_days: Math.min(30, Math.max(1, Math.trunc(Number(merged.retention_days) || DEFAULT_BACKUP_CONFIG.retention_days))),
-    include_uploads: Boolean(merged.include_uploads),
-    uploads_strategy: strategy as BackupConfig["uploads_strategy"],
-    weekly_full_day: Math.min(6, Math.max(0, Math.trunc(Number(merged.weekly_full_day) || 0))),
-  };
 }
 
 function getBackupConfig(): BackupConfig {
