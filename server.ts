@@ -50,6 +50,7 @@ import {
   normalizeBackupConfig,
   type BackupConfig,
 } from "./server/modules/backup/config.js";
+import { createActiveExchangeRateReader } from "./server/modules/finance/exchangeRates.js";
 import {
   PRODUCT_IMAGE_MAX_FILES,
   PRODUCT_IMAGE_MAX_FILE_SIZE,
@@ -140,6 +141,7 @@ const {
   getProductBomUsage,
   hydrateProductStock,
 } = createProductStockModule(db);
+export const getActiveExchangeRate = createActiveExchangeRateReader(db);
 
 // Multer setup for image uploads
 const storage = multer.diskStorage({
@@ -1250,11 +1252,6 @@ async function fetchExchangeRate() {
 setTimeout(fetchExchangeRate, 2000);
 // Fetch daily (86400000 ms)
 setInterval(fetchExchangeRate, 86400000);
-
-export function getActiveExchangeRate() {
-   const row = db.prepare("SELECT * FROM exchange_rates WHERE is_active = 1 ORDER BY fetched_at DESC LIMIT 1").get() as any;
-   return row?.rate || 0;
-}
 
 // -- END EXCHANGE RATES LOGIC --
 
