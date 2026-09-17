@@ -44,6 +44,7 @@ import {
   resolveCentralStock,
   stockQuantity,
 } from "./server/modules/products/stock.js";
+import { createApiKeyHasher } from "./server/modules/integrations/apiKeys.js";
 import {
   PRODUCT_IMAGE_MAX_FILES,
   PRODUCT_IMAGE_MAX_FILE_SIZE,
@@ -115,11 +116,7 @@ function decryptText(cipherText: string): string {
   }
 }
 
-function hashApiKey(clearKey: string): string {
-  return crypto.createHmac('sha256', process.env.PANEL_API_HASH_SECRET!)
-    .update(clearKey)
-    .digest('hex');
-}
+const hashApiKey = createApiKeyHasher(process.env.PANEL_API_HASH_SECRET!);
 
 // Ensure uploads directory exists
 const uploadsDir = path.join(process.cwd(), "uploads");
