@@ -23,7 +23,7 @@ WORKDIR /app
 
 # Cloud backup uploads use rclone. Secrets/config come from environment
 # variables, not from the image.
-RUN apk add --no-cache rclone cups-client
+RUN apk upgrade --no-cache && apk add --no-cache rclone cups-client
 
 # Copy compiled native modules and runtime deps from builder.
 # This avoids needing python3/make/g++ in the final image.
@@ -40,7 +40,8 @@ COPY --chown=node:node tsconfig.json ./
 
 # Trim devDeps (keeps tsx since it's now in dependencies).
 # --ignore-scripts is safe here because native modules are already built in builder.
-RUN npm prune --omit=dev --ignore-scripts
+RUN npm prune --omit=dev --ignore-scripts \
+  && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 # Data directories — mount as Docker volumes in production.
 RUN mkdir -p /data /app/uploads/products /backups && chown -R node:node /data /app/uploads /backups
