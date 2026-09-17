@@ -33,8 +33,8 @@ services:
       APP_URL: ${APP_URL:-http://localhost:3000}
       # Comma-separated allowed origins. Leave empty to allow all (tunnel / dev).
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
-      LABEL_RENDERER_URL: ${LABEL_RENDERER_URL:-}
-      LABEL_RENDERER_API_KEY: ${LABEL_RENDERER_API_KEY:-}
+      LABEL_RENDERER_URL: ${LABEL_RENDERER_URL:-http://warehouse-label-renderer:3010}
+      LABEL_RENDERER_API_KEY: ${LABEL_RENDERER_API_KEY:?LABEL_RENDERER_API_KEY is required}
       WAREHOUSE_PRINTER_NAME: ${WAREHOUSE_PRINTER_NAME:-}
       WAREHOUSE_CLAIM_LEASE_SECONDS: ${WAREHOUSE_CLAIM_LEASE_SECONDS:-90}
       WAREHOUSE_PRINT_WORKER_INTERVAL_MS: ${WAREHOUSE_PRINT_WORKER_INTERVAL_MS:-2000}
@@ -47,8 +47,17 @@ services:
       - ${PANEL_UPLOADS_DIR:-panel_uploads}:/app/uploads
       # Automatic backup archives. Defaults to a visible ./backups folder.
       - ${PANEL_BACKUP_DIR:-./backups}:/backups
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - dsdst-internal
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/public/health"]
       interval: 30s
@@ -59,3 +68,8 @@ services:
 volumes:
   panel_data:
   panel_uploads:
+
+networks:
+  dsdst-internal:
+    name: dsdst-internal
+    external: true

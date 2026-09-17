@@ -1544,15 +1544,16 @@ async function startServer() {
   };
 
   const validUserRoles = new Set(['admin', 'user', 'readonly']);
-  const warehousePermissionKeys = new Set([
+  const appPermissionKeys = new Set([
     'warehouse:receive', 'warehouse:print_labels', 'warehouse:place_packages', 'warehouse:move_stock',
     'warehouse:manage_locations', 'warehouse:count_stock', 'warehouse:edit_label_templates',
     'warehouse:view_map', 'warehouse:view_analytics',
+    'labels:view', 'labels:edit', 'labels:admin',
   ]);
   const sanitizePermissions = (value: unknown, fallback: Record<string, unknown> = {}) => {
     const source = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
     const result = { ...fallback };
-    for (const key of warehousePermissionKeys) {
+    for (const key of appPermissionKeys) {
       if (Object.prototype.hasOwnProperty.call(source, key)) result[key] = source[key] === true;
     }
     return result;

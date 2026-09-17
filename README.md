@@ -52,6 +52,7 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 ### 2. Docker ile çalıştır (önerilen)
 
 ```bash
+docker network create dsdst-internal # sunucuda yalnız ilk kurulumda
 docker compose up -d
 ```
 
@@ -104,8 +105,8 @@ npm run dev        # Vite + Express birlikte localhost:3000
 | `APP_URL` | — | Uygulamanın dışarıdan erişilen URL'i |
 | `ALLOWED_ORIGINS` | — | İzin verilen CORS origin'leri (virgülle ayrılmış). Boş bırakılırsa hepsi izinli |
 | `GEMINI_API_KEY` | — | Google Gemini AI entegrasyonu için |
-| `LABEL_RENDERER_URL` | Etiket baskısında ✅ | Label Printer headless renderer adresi (örn. `http://label-printer:3010`) |
-| `LABEL_RENDERER_API_KEY` | Önerilir | Panel ve Label Printer arasında paylaşılan renderer anahtarı |
+| `LABEL_RENDERER_URL` | Etiket baskısında ✅ | Internal Label Printer renderer adresi (`http://warehouse-label-renderer:3010`) |
+| `LABEL_RENDERER_API_KEY` | Etiket baskısında ✅ | Panel ve Label Printer arasında paylaşılan zorunlu renderer anahtarı |
 | `WAREHOUSE_PRINTER_NAME` | Etiket baskısında ✅ | `lpstat -p` çıktısındaki CUPS yazıcı adı |
 | `WAREHOUSE_CLAIM_LEASE_SECONDS` | — | Sıradaki paketi ayırma süresi; varsayılan `90`, güvenli aralık 15–600 |
 | `WAREHOUSE_PRINT_WORKER_INTERVAL_MS` | — | Kuyruk worker kontrol aralığı; varsayılan `2000` |
@@ -197,7 +198,7 @@ Yerleşim CSV'si yalnız `sku,pick_face_location,reserve_locations` taşır; ür
 
 Ürün master CSV'sindeki eski depo lokasyonu kolonları artık uygulanmaz ve import raporunda yönlendirici uyarı döner. Mevcut legacy kolonlar veri kaybı yaratmamak için şemada tutulur.
 
-Kullanıcı izinleri Panel'de **Ayarlar → Kullanıcı Yönetimi → Warehouse Admin yetkileri** bölümünden verilir. `admin` tüm izinlere sahiptir; diğer roller için `warehouse:receive`, `warehouse:print_labels`, `warehouse:place_packages`, `warehouse:move_stock`, `warehouse:manage_locations`, `warehouse:count_stock` ve `warehouse:edit_label_templates` ayrı ayrı denetlenir.
+Kullanıcı izinleri Panel'de **Ayarlar → Kullanıcı Yönetimi → Uygulama yetkileri** bölümünden verilir. `admin` tüm izinlere sahiptir; Warehouse izinlerine ek olarak Label Printer için `labels:view`, `labels:edit` ve `labels:admin` ayrı ayrı denetlenir. Label Printer Panel login'ini server-side proxy eder ve JWT'yi yalnız `HttpOnly` cookie'de tutar.
 
 Worker, Label Printer renderer'dan PDF'i HTTP ile alır ve shell oluşturmadan `lp -d <printer> <file>` çağırır. Başarısız işler en fazla üç kez denenir; son hata paketi `PRINT_FAILED` durumuna taşır. Yeniden baskı yeni bir iş açar ama aynı global paket kodunu kullanır.
 
@@ -238,6 +239,8 @@ Varsayılan kullanıcı: `admin` / `admin` — **ilk girişte şifreyi değişti
 - Cloudflare Tunnel / Zero Trust arkasında çalıştırıyorsan `ALLOWED_ORIGINS` ayarlamak şart değil; Tunnel zaten dışarıya kapalı.
 - Dışarıya direkt port açılıyorsa `ALLOWED_ORIGINS=https://panel.yourdomain.com` şeklinde kısıtla.
 - Docker volume'larını düzenli olarak dışa yedekle.
+- İlk kurulumda `docker network create dsdst-internal` ile ortak internal ağı oluştur. Panel renderer'a yalnız `http://warehouse-label-renderer:3010` üzerinden ulaşır; renderer host portu yayınlanmaz.
+- Panel container'ı non-root, salt-okunur root filesystem, `no-new-privileges` ve düşürülmüş Linux capability'leriyle çalışır. `/data`, `/app/uploads`, `/backups` mount'ları node kullanıcısı (UID 1000) tarafından yazılabilir olmalıdır.
 
 ### Kit Studio katalog API'si
 

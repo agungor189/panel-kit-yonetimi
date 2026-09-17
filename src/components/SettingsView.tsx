@@ -38,7 +38,7 @@ interface SettingsViewProps {
   onUpdate: () => void;
 }
 
-const WAREHOUSE_PERMISSIONS = [
+const APP_PERMISSIONS = [
   ['warehouse:receive', 'Mal kabul'],
   ['warehouse:manage_receiving_sessions', 'Mal kabul oturumu yönetimi'],
   ['warehouse:print_labels', 'Etiket basma'],
@@ -49,6 +49,9 @@ const WAREHOUSE_PERMISSIONS = [
   ['warehouse:edit_label_templates', 'Etiket şablonu düzenleme'],
   ['warehouse:view_map', 'Depo haritası ve dashboard görüntüleme'],
   ['warehouse:view_analytics', 'Paket, hareket ve kapasite analizi'],
+  ['labels:view', 'Label Printer görüntüleme'],
+  ['labels:edit', 'Label Printer şablon/veri düzenleme'],
+  ['labels:admin', 'Label Printer yönetimi'],
 ] as const;
 
 export default function SettingsView({ onUpdate }: SettingsViewProps) {
@@ -841,12 +844,12 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
             </table>
           </div>
           <div className="border-t border-border-color bg-bg-main/40 p-6 lg:p-8">
-            <h4 className="text-xs font-black uppercase tracking-widest text-text-muted">Warehouse Admin yetkileri</h4>
-            <p className="mt-2 text-xs text-text-muted">Admin rolü tüm yetkilere sahiptir. Diğer kullanıcılarda erişim bu anahtarlarla hem menüde hem API'de denetlenir.</p>
+            <h4 className="text-xs font-black uppercase tracking-widest text-text-muted">Uygulama yetkileri</h4>
+            <p className="mt-2 text-xs text-text-muted">Admin rolü tüm yetkilere sahiptir. Diğer kullanıcılarda Warehouse ve Label Printer erişimi bu anahtarlarla hem arayüzde hem API'de denetlenir.</p>
             <div className="mt-4 space-y-3">
               {users.map((user) => <div key={`warehouse-${user.id}`} className="rounded-xl border border-border-color bg-white p-4">
                 <div className="mb-3 flex items-center justify-between"><b className="text-sm">{user.username}</b>{user.role === 'admin' && <span className="rounded-full bg-green-50 px-2 py-1 text-[10px] font-black text-green-700">TÜM YETKİLER</span>}</div>
-                <div className="flex flex-wrap gap-2">{WAREHOUSE_PERMISSIONS.map(([permission, label]) => {
+                <div className="flex flex-wrap gap-2">{APP_PERMISSIONS.map(([permission, label]) => {
                   const active = user.role === 'admin' || user.permissions?.[permission] === true;
                   return <button key={permission} disabled={user.role === 'admin'} onClick={() => void toggleWarehousePermission(user, permission)} className={cn('rounded-lg border px-3 py-2 text-[10px] font-black uppercase tracking-wide disabled:cursor-default', active ? 'border-green-200 bg-green-50 text-green-700' : 'border-border-color bg-white text-text-muted')}>{label}</button>;
                 })}</div>
