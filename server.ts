@@ -52,6 +52,12 @@ import {
 } from "./server/modules/backup/config.js";
 import { createActiveExchangeRateReader } from "./server/modules/finance/exchangeRates.js";
 import {
+  defaultTrendyolConfig,
+  normalizeTrendyolEnvironment,
+  trendyolBaseUrl,
+  type TrendyolEnvironment,
+} from "./server/modules/marketplaces/trendyol.js";
+import {
   PRODUCT_IMAGE_MAX_FILES,
   PRODUCT_IMAGE_MAX_FILE_SIZE,
   cleanupStagedProductImages,
@@ -4144,16 +4150,6 @@ async function startServer() {
     message: { error: "Çok fazla istek gönderildi, lütfen biraz bekleyin." }
   });
 
-  type TrendyolEnvironment = 'stage' | 'prod';
-
-  const defaultTrendyolConfig = {
-    enabled: false,
-    environment: 'stage' as TrendyolEnvironment,
-    api_key_id: '',
-    sync_window_days: 14,
-    store_front_code: '',
-  };
-
   const parseJsonSetting = <T,>(key: string, fallback: T): T => {
     const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as any;
     if (!row?.value) return fallback;
@@ -4181,16 +4177,6 @@ async function startServer() {
   };
 
   const getTrendyolConfig = () => parseJsonSetting("trendyol_config", defaultTrendyolConfig);
-
-  const normalizeTrendyolEnvironment = (value: unknown): TrendyolEnvironment => (
-    value === 'prod' || value === 'production' || value === 'live' ? 'prod' : 'stage'
-  );
-
-  const trendyolBaseUrl = (environment: TrendyolEnvironment) => (
-    environment === 'prod'
-      ? 'https://apigw.trendyol.com'
-      : 'https://stageapigw.trendyol.com'
-  );
 
   const parseTrendyolDate = (value: unknown): string | null => {
     if (value === null || value === undefined || value === '') return null;
