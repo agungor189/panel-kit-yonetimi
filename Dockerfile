@@ -35,6 +35,7 @@ COPY --chown=node:node package*.json ./
 COPY --chown=node:node server.ts ./
 COPY --chown=node:node server/ ./server/
 COPY --chown=node:node shared/ ./shared/
+COPY --chown=node:node scripts/ ./scripts/
 COPY --chown=node:node tsconfig.json ./
 
 # Trim devDeps (keeps tsx since it's now in dependencies).

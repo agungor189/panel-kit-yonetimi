@@ -24,14 +24,26 @@ import { createInsightsRouter } from "./server/routes/insightsRoutes.js";
 import { createRecurringPaymentsRouter } from "./server/routes/recurringPaymentsRoutes.js";
 import { createDashboardDataRouter } from "./server/routes/dashboardDataRoutes.js";
 import { createKitRouter } from "./server/routes/kitRoutes.js";
-import { createWarehouseRouter } from "./server/routes/warehouseRoutes.js";
 import { createKitCatalogRouter } from "./server/routes/kitCatalogRoutes.js";
 import { createPanelApiAuth } from "./server/middleware/panelApiAuth.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
 import { restoreUploadEntry } from "./server/utils/restoreUploads.js";
 import { initializeDatabase, openDatabase } from "./server/db/initialize.js";
 import { importProductsFromCsvRows } from "./server/services/productCsvImport.js";
-import { startPrintQueueWorker } from "./server/services/printQueueWorker.js";
+import {
+  createAuthModule,
+  parseUserPermissions,
+  sanitizePermissions,
+  validUserRoles,
+} from "./server/modules/auth/index.js";
+import { mountWarehouseModule } from "./server/modules/warehouse/index.js";
+import {
+  centralStockChannel,
+  createProductStockModule,
+  hasCentralStockPayload,
+  resolveCentralStock,
+  stockQuantity,
+} from "./server/modules/products/stock.js";
 import {
   PRODUCT_IMAGE_MAX_FILES,
   PRODUCT_IMAGE_MAX_FILE_SIZE,
@@ -40,27 +52,6 @@ import {
   inspectProductImageFile,
 } from "./server/services/productImageImport.js";
 import { PRODUCT_TYPES, canonicalProductType, parseReserveLocations } from "./shared/productCsvMapping.js";
-
-declare global {
-  namespace Express {
-    interface Request {
-      user?: AuthenticatedUser;
-      panelApiKey?: {
-        id: string;
-        name: string;
-        permissions: string[];
-      }
-    }
-  }
-}
-
-type AuthenticatedUser = {
-  id: string;
-  username: string;
-  role: string;
-  permissions: Record<string, unknown>;
-  must_change_password: boolean;
-};
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -141,6 +132,12 @@ if (!fs.existsSync(uploadsDir)) {
 const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), "dsdst_panel.db");
 let db = openDatabase(DB_PATH);
 initializeDatabase(db);
+const {
+  getProductBomComponents,
+  getProductStockProfile,
+  getProductBomUsage,
+  hydrateProductStock,
+} = createProductStockModule(db);
 
 // Multer setup for image uploads
 const storage = multer.diskStorage({
@@ -327,42 +324,6 @@ function mergeProductPlatforms(platforms: any[] | undefined, fallbackPrice?: unk
   return [...merged.values()];
 }
 
-function stockQuantity(value: unknown): number {
-  const parsed = Math.trunc(Number(value));
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-}
-
-function legacyPlatformStockTotal(platforms: any[] | undefined): number {
-  if (!Array.isArray(platforms)) return 0;
-  return platforms.reduce((total, platform) => total + stockQuantity(platform?.stock), 0);
-}
-
-function hasCentralStockPayload(body: any): boolean {
-  if (!body) return false;
-  if (body.central_stock !== undefined || body.total_stock !== undefined || body.stock !== undefined) return true;
-  return Array.isArray(body.platforms) && body.platforms.some((platform: any) => platform?.stock !== undefined && platform?.stock !== null);
-}
-
-function resolveCentralStock(body: any, fallback = 0): number {
-  if (body?.central_stock !== undefined && body.central_stock !== null && body.central_stock !== '') {
-    return stockQuantity(body.central_stock);
-  }
-  if (body?.total_stock !== undefined && body.total_stock !== null && body.total_stock !== '') {
-    return stockQuantity(body.total_stock);
-  }
-  if (body?.stock !== undefined && body.stock !== null && body.stock !== '') {
-    return stockQuantity(body.stock);
-  }
-  const legacyStock = legacyPlatformStockTotal(body?.platforms);
-  if (legacyStock > 0) return legacyStock;
-  return stockQuantity(fallback);
-}
-
-function centralStockChannel(platformName?: string | null): string {
-  const channel = cleanText(platformName);
-  return channel || 'Merkez Depo';
-}
-
 function isLocalAddress(ip?: string): boolean {
   if (!ip) return false;
   return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
@@ -371,137 +332,6 @@ function isLocalAddress(ip?: string): boolean {
 function shouldSkipGeneralLimiter(req: express.Request): boolean {
   if (req.path === '/api/public/health') return true;
   return process.env.NODE_ENV !== 'production' && isLocalAddress(req.ip);
-}
-
-function getProductBomComponents(productId: string): any[] {
-  if (!productId) return [];
-  return db.prepare(`
-    SELECT
-      b.component_product_id,
-      b.quantity_per_unit,
-      b.component_role,
-      p.id,
-      p.sku,
-      p.name,
-      p.title,
-      COALESCE(p.central_stock, 0) as central_stock,
-      COALESCE(p.purchase_cost, 0) as purchase_cost,
-      COALESCE(p.purchase_price_usd, 0) as purchase_price_usd,
-      COALESCE(p.weight_grams, p.weight, 0) as weight_grams
-    FROM product_bom b
-    JOIN products p ON p.id = b.component_product_id
-    WHERE b.parent_product_id = ?
-    ORDER BY b.component_role ASC, p.sku ASC
-  `).all(productId) as any[];
-}
-
-function getProductStockProfile(product: any) {
-  const physicalStock = stockQuantity(product?.central_stock);
-  const components = product?.id ? getProductBomComponents(product.id) : [];
-
-  if (components.length === 0) {
-    return {
-      hasBom: false,
-      available_stock: physicalStock,
-      physical_stock: physicalStock,
-      unit_purchase_cost: Number(product?.purchase_cost) || 0,
-      unit_weight: Number(product?.weight_grams ?? product?.weight) || 0,
-      components: [],
-    };
-  }
-
-  let availableStock = Number.POSITIVE_INFINITY;
-  let unitPurchaseCost = 0;
-  let unitWeight = 0;
-
-  const normalizedComponents = components.map((component) => {
-    const quantityPerUnit = Math.max(Number(component.quantity_per_unit) || 0, 0);
-    const componentStock = stockQuantity(component.central_stock);
-    const componentAvailable = quantityPerUnit > 0 ? Math.floor(componentStock / quantityPerUnit) : 0;
-    availableStock = Math.min(availableStock, componentAvailable);
-    unitPurchaseCost += (Number(component.purchase_cost) || 0) * quantityPerUnit;
-    unitWeight += (Number(component.weight_grams) || 0) * quantityPerUnit;
-
-    return {
-      ...component,
-      quantity_per_unit: quantityPerUnit,
-      available_for_parent: componentAvailable,
-    };
-  });
-
-  if (!Number.isFinite(availableStock)) availableStock = 0;
-
-  return {
-    hasBom: true,
-    available_stock: Math.max(Math.floor(availableStock), 0),
-    physical_stock: physicalStock,
-    unit_purchase_cost: unitPurchaseCost || (Number(product?.purchase_cost) || 0),
-    unit_weight: unitWeight || (Number(product?.weight_grams ?? product?.weight) || 0),
-    components: normalizedComponents,
-  };
-}
-
-function getProductBomUsage(componentProductId: string): any[] {
-  if (!componentProductId) return [];
-
-  const rows = db.prepare(`
-    SELECT
-      b.parent_product_id,
-      b.quantity_per_unit,
-      b.component_role,
-      p.*
-    FROM product_bom b
-    JOIN products p ON p.id = b.parent_product_id
-    WHERE b.component_product_id = ?
-      AND COALESCE(p.status, 'Active') != 'deleted'
-    ORDER BY p.sku ASC
-  `).all(componentProductId) as any[];
-
-  return rows.map((row) => {
-    const stockProfile = getProductStockProfile(row);
-    const bottleneck = stockProfile.components.reduce(
-      (min: any, component: any) => (!min || component.available_for_parent < min.available_for_parent ? component : min),
-      null
-    );
-
-    return {
-      parent_product_id: row.parent_product_id,
-      quantity_per_unit: Number(row.quantity_per_unit) || 0,
-      component_role: row.component_role,
-      sku: row.sku,
-      name: row.name,
-      title: row.title,
-      available_stock: stockProfile.available_stock,
-      physical_stock: stockProfile.physical_stock,
-      bottleneck_component: bottleneck ? {
-        sku: bottleneck.sku,
-        name: bottleneck.name || bottleneck.title,
-        quantity_per_unit: bottleneck.quantity_per_unit,
-        central_stock: bottleneck.central_stock,
-        available_for_parent: bottleneck.available_for_parent,
-      } : null,
-    };
-  });
-}
-
-function hydrateProductStock(product: any, includeBom = false) {
-  const stockProfile = getProductStockProfile(product);
-  const weightGrams = stockProfile.hasBom
-    ? stockProfile.unit_weight
-    : Number(product?.weight_grams ?? product?.weight) || 0;
-  return {
-    ...product,
-    total_stock: stockProfile.available_stock,
-    available_stock: stockProfile.available_stock,
-    physical_stock: stockProfile.physical_stock,
-    is_assembly: stockProfile.hasBom ? 1 : 0,
-    stock_source: stockProfile.hasBom ? 'bom' : 'central',
-    purchase_cost: stockProfile.hasBom ? stockProfile.unit_purchase_cost : product.purchase_cost,
-    weight_grams: weightGrams,
-    // Compatibility alias for older clients; persistence uses weight_grams only.
-    weight: weightGrams,
-    ...(includeBom ? { bom_components: stockProfile.components } : {}),
-  };
 }
 
 function catalogVisibilityWhere(includeComponents: boolean): string {
@@ -1513,51 +1343,7 @@ async function startServer() {
   // JWT_SECRET validated at startup — no fallback allowed.
   const JWT_SECRET = process.env.JWT_SECRET!;
 
-  const parseUserPermissions = (permissions: string | null | undefined): Record<string, unknown> => {
-    try {
-      const parsed = JSON.parse(permissions || '{}');
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-    } catch {
-      return {};
-    }
-  };
-
-  const loadUserForAuth = (userId: string): { user?: AuthenticatedUser; disabled?: boolean } => {
-    const dbUser = db.prepare(`
-      SELECT id, username, role, is_active, permissions, must_change_password
-      FROM users
-      WHERE id = ?
-    `).get(userId) as any;
-
-    if (!dbUser) return {};
-    if (dbUser.is_active === 0) return { disabled: true };
-
-    return {
-      user: {
-        id: dbUser.id,
-        username: dbUser.username,
-        role: dbUser.role,
-        permissions: parseUserPermissions(dbUser.permissions),
-        must_change_password: dbUser.must_change_password === 1,
-      },
-    };
-  };
-
-  const validUserRoles = new Set(['admin', 'user', 'readonly']);
-  const appPermissionKeys = new Set([
-    'warehouse:receive', 'warehouse:print_labels', 'warehouse:place_packages', 'warehouse:move_stock',
-    'warehouse:manage_locations', 'warehouse:count_stock', 'warehouse:edit_label_templates',
-    'warehouse:view_map', 'warehouse:view_analytics',
-    'labels:view', 'labels:edit', 'labels:admin',
-  ]);
-  const sanitizePermissions = (value: unknown, fallback: Record<string, unknown> = {}) => {
-    const source = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
-    const result = { ...fallback };
-    for (const key of appPermissionKeys) {
-      if (Object.prototype.hasOwnProperty.call(source, key)) result[key] = source[key] === true;
-    }
-    return result;
-  };
+  const auth = createAuthModule({ db, jwtSecret: JWT_SECRET, logActivity, logger: AppLogger });
   const hasOwn = (obj: unknown, key: string) => Object.prototype.hasOwnProperty.call(obj || {}, key);
 
   const toBit = (value: unknown, defaultValue: number) => {
@@ -1628,228 +1414,12 @@ async function startServer() {
     }
   };
 
-  const authRouter = express.Router();
-  authRouter.post('/login', (req, res) => {
-    try {
-      const { username, password } = req.body;
-      if (!username || !password) {
-        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Kullanıcı adı ve şifre zorunludur.' } });
-      }
-
-      const login = String(username).trim();
-      const user = db.prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE OR email = ? COLLATE NOCASE").get(login, login) as any;
-      if (!user) {
-        logActivity('LOGIN_FAILED', 'auth', 'unknown', { username, ip: req.ip, reason: 'user_not_found' });
-        return res.status(401).json({ success: false, error: { code: 'AUTH_FAILED', message: 'Geçersiz kullanıcı adı veya şifre.' } });
-      }
-
-      if (user.is_active === 0) {
-        return res.status(403).json({ success: false, error: { code: 'ACCOUNT_DISABLED', message: 'Bu hesap devre dışı bırakılmış.' } });
-      }
-
-      const valid = bcrypt.compareSync(password, user.password_hash);
-      if (!valid) {
-        logActivity('LOGIN_FAILED', 'auth', user.id, { username, ip: req.ip, reason: 'wrong_password' });
-        return res.status(401).json({ success: false, error: { code: 'AUTH_FAILED', message: 'Geçersiz kullanıcı adı veya şifre.' } });
-      }
-
-      db.prepare("UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?").run(user.id);
-      logActivity('LOGIN_SUCCESS', 'auth', user.id, { username, ip: req.ip }, user.id);
-
-      const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '12h' });
-      res.json({
-        success: true,
-        token,
-        user: {
-          id: user.id,
-          username: user.username,
-          role: user.role,
-          must_change_password: user.must_change_password === 1,
-        },
-      });
-    } catch (err: any) {
-      AppLogger.error('AUTH_ERROR', 'Login failed', err);
-      res.status(500).json({ success: false, error: { code: 'INTERNAL_ERROR', message: err.message } });
-    }
-  });
-
-  // Change own password — requires current password verification.
-  // Also used for forced password change after first login.
-  authRouter.post('/change-password', (req, res) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Token gerekli.' } });
-    }
-    try {
-      const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET) as any;
-      const { current_password, new_password } = req.body;
-
-      if (!current_password || !new_password) {
-        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Mevcut ve yeni şifre zorunludur.' } });
-      }
-      if (new_password.length < 8) {
-        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Yeni şifre en az 8 karakter olmalıdır.' } });
-      }
-
-      const user = db.prepare("SELECT * FROM users WHERE id = ?").get(decoded.id) as any;
-      if (!user) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Kullanıcı bulunamadı.' } });
-      if (user.is_active === 0) {
-        return res.status(403).json({ success: false, error: { code: 'USER_DISABLED', message: 'Bu hesap devre dışı bırakılmış.' } });
-      }
-
-      if (!bcrypt.compareSync(current_password, user.password_hash)) {
-        return res.status(401).json({ success: false, error: { code: 'AUTH_FAILED', message: 'Mevcut şifre yanlış.' } });
-      }
-
-      const newHash = bcrypt.hashSync(new_password, 10);
-      db.prepare("UPDATE users SET password_hash = ?, must_change_password = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-        .run(newHash, user.id);
-
-      logActivity('PASSWORD_CHANGED', 'auth', user.id, { ip: req.ip }, user.id);
-      res.json({ success: true, message: 'Şifre başarıyla değiştirildi.' });
-    } catch (err: any) {
-      res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Geçersiz token.' } });
-    }
-  });
-
-  authRouter.post('/logout', (req, res) => {
-    res.json({ success: true, message: 'Logged out' });
-  });
-
-  authRouter.get('/me', (req, res) => {
-     const authHeader = req.headers.authorization;
-     if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'No token' } });
-     try {
-       const token = authHeader.split(' ')[1];
-       const decoded = jwt.verify(token, JWT_SECRET) as any;
-       const authUser = loadUserForAuth(decoded.id);
-       if (authUser.disabled) {
-         return res.status(403).json({ success: false, error: { code: 'USER_DISABLED', message: 'Bu hesap devre dışı bırakılmış.' } });
-       }
-       if (!authUser.user) {
-         return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Invalid user' } });
-       }
-       res.json({
-         success: true,
-         user: authUser.user,
-       });
-     } catch (err) {
-       res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Invalid token' } });
-     }
-  });
-
-  // Strict rate-limit on login — brute-force protection.
-  // 10 attempts per 15 min per IP, only failed attempts count toward the limit.
-  const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 10,
-    standardHeaders: true,
-    legacyHeaders: false,
-    skipSuccessfulRequests: true,
-    message: { success: false, error: { code: 'TOO_MANY_REQUESTS', message: 'Çok fazla başarısız giriş denemesi. 15 dakika sonra tekrar deneyin.' } },
-  });
-  app.use("/api/auth/login", loginLimiter);
-
-  app.use("/api/auth", authRouter);
-
-  // API Authentication Middleware
-  app.use("/api", (req, res, next) => {
-    // Auth, public API, and warehouse API routes apply their own authentication/limits.
-    if (req.path.startsWith('/auth/') || req.path.startsWith('/public/') || req.path.startsWith('/warehouse/') || req.path.startsWith('/kit-catalog/')) return next();
-
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-       try {
-         const token = authHeader.split(' ')[1];
-         const decoded = jwt.verify(token, JWT_SECRET) as any;
-         const authUser = loadUserForAuth(decoded.id);
-         if (authUser.disabled) {
-           return res.status(403).json({
-             success: false,
-             error: { code: 'USER_DISABLED', message: 'Bu hesap devre dışı bırakılmış.' },
-           });
-         }
-         if (!authUser.user) {
-           return res.status(401).json({
-             success: false,
-             error: { code: 'UNAUTHORIZED', message: 'Invalid user.' },
-           });
-         }
-         req.user = authUser.user;
-         return next();
-       } catch (err: any) {
-         AppLogger.warn('AUTH_ERROR', 'JWT verification failed', { message: err.message, ip: req.ip });
-         return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Invalid or expired token.' } });
-       }
-    }
-
-    const apiKeyHeader = req.headers['x-api-key'] || (authHeader && !authHeader.startsWith('Bearer ') ? authHeader : undefined);
-    const settingsApiKey = db.prepare("SELECT value FROM settings WHERE key='api_key'").get() as any;
-
-    if (settingsApiKey && settingsApiKey.value && apiKeyHeader === settingsApiKey.value) {
-        req.user = {
-          id: 'legacy-api-key',
-          username: 'legacy-api-key',
-          role: 'api_key',
-          permissions: {},
-          must_change_password: false,
-        };
-        return next();
-    }
-
-    return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Unauthorized access.' } });
-  });
-
-  // Enforce first-login password changes server-side. Login and change-password
-  // remain available through /api/auth; every other JWT-backed route is blocked
-  // until the user's password is changed.
-  app.use("/api", (req, res, next) => {
-    if (req.path.startsWith('/auth/') || req.path.startsWith('/public/') || req.path.startsWith('/warehouse/') || req.path.startsWith('/kit-catalog/')) return next();
-
-    const user = req.user;
-    if (!user || user.role === 'api_key') return next();
-
-    if (user.must_change_password) {
-      return res.status(403).json({
-        success: false,
-        error: {
-          code: 'PASSWORD_CHANGE_REQUIRED',
-          message: 'Devam etmeden önce şifrenizi değiştirmeniz gerekiyor.',
-        },
-      });
-    }
-
-    next();
-  });
-
-  // Server-side write protection: readonly users and the legacy static API key cannot call mutating methods.
-  // This enforces access control on the server, not just the client.
-  app.use("/api", (req, res, next) => {
-    if (req.path.startsWith('/auth/') || req.path.startsWith('/public/') || req.path.startsWith('/warehouse/') || req.path.startsWith('/kit-catalog/')) return next();
-    if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
-
-    const user = req.user;
-    if (user?.role === 'readonly' || user?.role === 'api_key') {
-      return res.status(403).json({
-        success: false,
-        error: { code: 'FORBIDDEN', message: 'Bu kimlik bilgisi yazma işlemleri için yetkili değil.' },
-      });
-    }
-    next();
-  });
-
-  // Helper middleware — admin-only routes (backup, restore, user management, settings).
-  const requireAdmin = (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const user = req.user;
-    if (!user || user.role !== 'admin') {
-      logActivity('FORBIDDEN_ACCESS', 'system', req.path, { method: req.method, ip: req.ip }, user?.id);
-      return res.status(403).json({
-        success: false,
-        error: { code: 'FORBIDDEN', message: 'Bu işlem için admin yetkisi gereklidir.' },
-      });
-    }
-    next();
-  };
+  app.use("/api/auth/login", auth.loginLimiter);
+  app.use("/api/auth", auth.router);
+  app.use("/api", auth.authenticateApi);
+  app.use("/api", auth.requireCompletedPasswordChange);
+  app.use("/api", auth.protectWrites);
+  const requireAdmin = auth.requireAdmin;
 
   // --- API ROUTES ---
 
@@ -5791,36 +5361,31 @@ async function startServer() {
       logActivity,
     }),
   );
-  app.use(
-    "/api/warehouse/v1",
-    publicAuthFailedLimiter,
-    publicApiLimiter,
-    createWarehouseRouter({
-      db,
-      hashApiKey,
-      logActivity,
-      uploadsDir,
-      authenticateUserToken: (token) => {
+  mountWarehouseModule({
+    app,
+    db,
+    hashApiKey,
+    logActivity,
+    uploadsDir,
+    rateLimiters: [publicAuthFailedLimiter, publicApiLimiter],
+    authenticateUserToken: (token) => {
         try {
           const decoded = jwt.verify(token, JWT_SECRET) as { id?: string };
           if (!decoded.id) return null;
-          const auth = loadUserForAuth(decoded.id);
-          if (!auth.user || auth.disabled) return null;
+          const sessionAuth = auth.loadUserForAuth(decoded.id);
+          if (!sessionAuth.user || sessionAuth.disabled) return null;
           return {
-            id: auth.user.id,
-            username: auth.user.username,
-            role: auth.user.role,
-            permissions: auth.user.permissions,
-            must_change_password: auth.user.must_change_password,
+            id: sessionAuth.user.id,
+            username: sessionAuth.user.username,
+            role: sessionAuth.user.role,
+            permissions: sessionAuth.user.permissions,
+            must_change_password: sessionAuth.user.must_change_password,
           };
         } catch {
           return null;
         }
       },
-    }),
-  );
-
-  startPrintQueueWorker(db);
+  });
 
   app.get("/api/public/health", (req, res) => {
     // Health doesn't require auth but we can validate it if present manually or just return ok
