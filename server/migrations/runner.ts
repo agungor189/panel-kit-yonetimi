@@ -2332,6 +2332,61 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 60,
+    name: "repair_physical_warehouse_layout_and_locations",
+    up(db) {
+      const layoutTableExists = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'warehouse_layouts'").get());
+      const locationsTableExists = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'warehouse_locations'").get());
+      if (!layoutTableExists || !locationsTableExists) return;
+
+      const activeLayout = db.prepare("SELECT id, layout_json FROM warehouse_layouts WHERE active = 1").get() as
+        | { id: string; layout_json: string }
+        | undefined;
+      if (!activeLayout) return;
+
+      const layout = JSON.parse(activeLayout.layout_json) as {
+        objects?: Array<Record<string, unknown>>;
+        [key: string]: unknown;
+      };
+      if (!Array.isArray(layout.objects)) return;
+
+      const rackCodes: string[] = [];
+      for (const object of layout.objects) {
+        if (object?.type !== "rack") continue;
+        const rackCode = String(object.rackCode ?? "").trim().toUpperCase().replace(/\s+/g, "");
+        if (!rackCode) continue;
+        object.rackCode = rackCode;
+        object.shelfCount = 4;
+        object.positionsPerShelf = 7;
+        rackCodes.push(rackCode);
+      }
+
+      db.prepare("UPDATE warehouse_layouts SET layout_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .run(JSON.stringify(layout), activeLayout.id);
+
+      const insertLocation = db.prepare(`
+        INSERT OR IGNORE INTO warehouse_locations
+          (id, code, package_capacity, purpose, reserve_weight_preference, notes)
+        VALUES (lower(hex(randomblob(16))), ?, 4, ?, ?, 'Fiziksel depo layout senkronizasyonu')
+      `);
+      for (const rackCode of [...new Set(rackCodes)]) {
+        for (let level = 1; level <= 4; level += 1) {
+          const purpose = level <= 2 ? "PICK" : "RESERVE";
+          const weightPreference = level === 3 ? "HEAVY" : level === 4 ? "LIGHT" : "ANY";
+          for (let position = 1; position <= 7; position += 1) {
+            insertLocation.run(`${rackCode}-K${level}-P${position}`, purpose, weightPreference);
+          }
+        }
+      }
+
+      const rackMetadataTableExists = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'warehouse_rack_metadata'").get());
+      if (rackMetadataTableExists) {
+        db.prepare(`INSERT OR IGNORE INTO warehouse_rack_metadata (rack_code, status, placement_priority, notes)
+          VALUES ('C2', 'RESTRICTED', 'LAST_RESORT', 'Kısıtlı erişim / Son çare')`).run();
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

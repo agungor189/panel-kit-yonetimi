@@ -81,6 +81,30 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     assert.equal(JSON.stringify(snapshot.warehouse.layout).includes("IMPORT-ETME"), false);
   });
 
+  test("placement layout rack listesini doğal rackCode sırasında döndürür", () => {
+    const rackCodes = ["H1", "G2", "F1", "E2", "D4", "C2", "B2", "A2", "G1", "F2", "E1", "D3", "C1", "B1", "A1"];
+    service.importLegacyLayout({
+      warehouseConfig: { name: "DSDST Depo", width: 10, length: 5, height: 4 },
+      objects: rackCodes.map((rackCode) => ({
+        id: `rack-${rackCode}`,
+        type: "rack",
+        name: `${rackCode} Rafı`,
+        rackCode,
+        x: 0,
+        z: 0,
+        width: 2,
+        depth: 1,
+        height: 2,
+        shelfCount: 4,
+        positionsPerShelf: 7,
+      })),
+    }, actor);
+
+    assert.deepEqual((service.getPlacementLayout() as any).racks.map((rack: any) => rack.rack_code), [
+      "A1", "A2", "B1", "B2", "C1", "C2", "D3", "D4", "E1", "E2", "F1", "F2", "G1", "G2", "H1",
+    ]);
+  });
+
   test("yerleşim CSV önizlenir, atomik sürümlenir ve Mal Kabul hedefini aktif layouttan alır", () => {
     for (const [code, purpose] of [["A1-K1-P1", "PICK"], ["A1-K3-P1", "RESERVE"], ["A1-K4-P1", "RESERVE"]] as const) {
       service.createLocation({ code, package_capacity: 2, purpose }, actor);

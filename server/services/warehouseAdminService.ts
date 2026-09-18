@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { createHash, randomUUID } from "node:crypto";
 import Papa from "papaparse";
 import { WarehouseServiceError, type WarehousePicker } from "./warehouseService.js";
-import { layoutLocationCodes, parseLegacyWarehouseLayout, type WarehouseLayout } from "./warehouseLayout.js";
+import { compareWarehouseRackCodes, layoutLocationCodes, parseLegacyWarehouseLayout, type WarehouseLayout } from "./warehouseLayout.js";
 
 export type WarehouseActor = WarehousePicker & { role: string; permissions: Record<string, unknown> };
 
@@ -929,11 +929,13 @@ export class WarehouseAdminService {
     try { physicalLayout = active ? JSON.parse(active.layout_json) : null; } catch { physicalLayout = null; }
     const rackMetadata = this.db.prepare("SELECT * FROM warehouse_rack_metadata ORDER BY rack_code COLLATE NOCASE").all() as any[];
     const rackByCode = new Map(rackMetadata.map((rack) => [String(rack.rack_code).toUpperCase(), rack]));
-    const racks = (physicalLayout?.objects.filter((object) => object.type === "rack") || []).map((rack) => ({
-      rack_code: rack.rackCode, name: rack.name, shelf_count: rack.shelfCount, positions_per_shelf: rack.positionsPerShelf,
-      status: rackByCode.get(rack.rackCode!)?.status || "ACTIVE", placement_priority: rackByCode.get(rack.rackCode!)?.placement_priority || "NORMAL",
-      notes: rackByCode.get(rack.rackCode!)?.notes || null,
-    }));
+    const racks = (physicalLayout?.objects.filter((object) => object.type === "rack") || [])
+      .sort((left, right) => compareWarehouseRackCodes(left.rackCode || "", right.rackCode || ""))
+      .map((rack) => ({
+        rack_code: rack.rackCode, name: rack.name, shelf_count: rack.shelfCount, positions_per_shelf: rack.positionsPerShelf,
+        status: rackByCode.get(rack.rackCode!)?.status || "ACTIVE", placement_priority: rackByCode.get(rack.rackCode!)?.placement_priority || "NORMAL",
+        notes: rackByCode.get(rack.rackCode!)?.notes || null,
+      }));
     const placedSkuCount = active ? Number((this.db.prepare(`SELECT COUNT(DISTINCT assignment.product_id) AS count
       FROM warehouse_layout_assignments assignment
       WHERE assignment.layout_id = ? AND EXISTS (

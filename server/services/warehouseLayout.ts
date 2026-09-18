@@ -19,6 +19,11 @@ export type WarehouseLayout = {
   objects: WarehouseLayoutObject[];
 };
 
+export const compareWarehouseRackCodes = (left: string, right: string) => left.localeCompare(right, "en", {
+  numeric: true,
+  sensitivity: "base",
+});
+
 const text = (value: unknown, fallback = "") => typeof value === "string" ? value.trim() : fallback;
 const finite = (value: unknown, fallback = 0) => {
   const parsed = Number(value);
@@ -79,14 +84,16 @@ export function parseLegacyWarehouseLayout(input: unknown): WarehouseLayout {
 }
 
 export function layoutLocationCodes(layout: WarehouseLayout) {
-  return layout.objects.flatMap((object) => {
-    if (object.type !== "rack" || !object.rackCode) return [];
-    const codes: string[] = [];
-    for (let shelf = 1; shelf <= (object.shelfCount || 1); shelf += 1) {
-      for (let position = 1; position <= (object.positionsPerShelf || 1); position += 1) {
-        codes.push(`${object.rackCode}-K${shelf}-P${position}`);
+  return layout.objects
+    .filter((object) => object.type === "rack" && object.rackCode)
+    .sort((left, right) => compareWarehouseRackCodes(left.rackCode!, right.rackCode!))
+    .flatMap((object) => {
+      const codes: string[] = [];
+      for (let shelf = 1; shelf <= (object.shelfCount || 1); shelf += 1) {
+        for (let position = 1; position <= (object.positionsPerShelf || 1); position += 1) {
+          codes.push(`${object.rackCode}-K${shelf}-P${position}`);
+        }
       }
-    }
-    return codes;
-  });
+      return codes;
+    });
 }

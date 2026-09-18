@@ -388,3 +388,95 @@ test("v56 yalnız otomatik senkronize edilmiş kapasitesi 1 olan rafları 4'e y�
   assert.equal((legacy.prepare("SELECT package_capacity FROM warehouse_locations WHERE id = 'customized-auto-location'").get() as any).package_capacity, 2);
   legacy.close();
 });
+
+test("v60 aktif fiziksel layoutu 4x7 olarak onarır ve eksik lokasyonları ilişkileri bozmadan tamamlar", () => {
+  const legacy = new Database(":memory:");
+  legacy.pragma("foreign_keys = ON");
+  applySchema(legacy);
+  runMigrations(legacy);
+
+  const rackCodes = ["H1", "G2", "F1", "E2", "D4", "C2", "B2", "A2", "G1", "F2", "E1", "D3", "C1", "B1", "A1"];
+  const fiveShelfRacks = new Set(["C2", "D3", "D4", "E1", "E2"]);
+  const layout = {
+    warehouse: { name: "DSDST Depo", width: 20, length: 10, height: 4 },
+    objects: rackCodes.map((rackCode) => ({
+      id: `rack-${rackCode}`,
+      type: "rack",
+      name: `${rackCode} Rafı`,
+      rackCode,
+      x: 0,
+      z: 0,
+      rotation: 0,
+      width: 2,
+      depth: 1,
+      height: 2,
+      shelfCount: fiveShelfRacks.has(rackCode) ? 5 : 4,
+      positionsPerShelf: 7,
+    })),
+  };
+  legacy.prepare(`INSERT INTO warehouse_layouts
+    (id, name, layout_version, layout_json, active, status)
+    VALUES ('physical-layout', 'DSDST Depo', 1, ?, 1, 'ACTIVE')`).run(JSON.stringify(layout));
+  legacy.prepare("INSERT INTO users (id, username, password_hash) VALUES ('layout-user', 'Layout User', 'hash')").run();
+  legacy.prepare("INSERT INTO products (id, title, sku, central_stock, product_type, status) VALUES ('layout-product', 'Layout ürün', 'LAYOUT-1', 4, 'simple', 'Active')").run();
+  legacy.prepare(`INSERT INTO warehouse_locations
+    (id, code, package_capacity, active, purpose, reserve_weight_preference, notes)
+    VALUES ('preserved-location-id', 'A1-K1-P1', 4, 1, 'PICK', 'ANY', 'Korunacak mevcut lokasyon')`).run();
+  legacy.prepare(`INSERT INTO inbound_batches
+    (id, batch_number, supplier_code, status, created_by)
+    VALUES ('layout-batch', 'LAYOUT-BATCH', 'SUP-LAYOUT', 'COMPLETED', 'layout-user')`).run();
+  legacy.prepare(`INSERT INTO inbound_batch_lines (
+    id, batch_id, line_number, supplier_code, product_id, sku_snapshot, product_name_snapshot,
+    expected_package_count, units_per_package, last_package_units, total_units
+  ) VALUES ('layout-line', 'layout-batch', 1, 'SUP-LAYOUT', 'layout-product', 'LAYOUT-1', 'Layout ürün', 1, 4, 4, 4)`).run();
+  legacy.prepare(`INSERT INTO warehouse_packages (
+    id, package_code, batch_id, batch_line_id, product_id, supplier_code,
+    package_number, total_packages, planned_quantity, remaining_quantity, status, current_location_id
+  ) VALUES ('preserved-package', 'PKG-LAYOUT', 'layout-batch', 'layout-line', 'layout-product', 'SUP-LAYOUT',
+    1, 1, 4, 4, 'PLACED', 'preserved-location-id')`).run();
+  legacy.prepare("DELETE FROM schema_migrations WHERE version = 60").run();
+
+  runMigrations(legacy);
+
+  const repairedLayout = JSON.parse((legacy.prepare("SELECT layout_json FROM warehouse_layouts WHERE id = 'physical-layout'").get() as any).layout_json);
+  assert.equal(repairedLayout.objects.filter((object: any) => object.type === "rack").length, 15);
+  assert.ok(repairedLayout.objects.filter((object: any) => object.type === "rack")
+    .every((object: any) => object.shelfCount === 4 && object.positionsPerShelf === 7));
+
+  for (const rackCode of rackCodes) {
+    const totals = legacy.prepare(`SELECT COUNT(*) AS locations, SUM(package_capacity) AS capacity
+      FROM warehouse_locations WHERE active = 1 AND code LIKE ?`).get(`${rackCode}-K%-P%`) as any;
+    assert.deepEqual({ locations: Number(totals.locations), capacity: Number(totals.capacity) }, { locations: 28, capacity: 112 });
+  }
+  assert.equal((legacy.prepare("SELECT COUNT(*) AS count FROM warehouse_locations WHERE active = 1").get() as any).count, 420);
+  assert.equal((legacy.prepare("SELECT SUM(package_capacity) AS capacity FROM warehouse_locations WHERE active = 1").get() as any).capacity, 1680);
+  assert.equal((legacy.prepare("SELECT COUNT(*) AS count FROM warehouse_locations WHERE active = 1 AND code LIKE 'H1-K%-P%'").get() as any).count, 28);
+  assert.deepEqual(legacy.prepare("SELECT id, package_capacity, purpose, reserve_weight_preference, notes FROM warehouse_locations WHERE code = 'A1-K1-P1'").get(), {
+    id: "preserved-location-id",
+    package_capacity: 4,
+    purpose: "PICK",
+    reserve_weight_preference: "ANY",
+    notes: "Korunacak mevcut lokasyon",
+  });
+  assert.equal((legacy.prepare("SELECT current_location_id FROM warehouse_packages WHERE id = 'preserved-package'").get() as any).current_location_id, "preserved-location-id");
+  assert.deepEqual(legacy.prepare("SELECT package_capacity, purpose, reserve_weight_preference FROM warehouse_locations WHERE code = 'H1-K3-P7'").get(), {
+    package_capacity: 4,
+    purpose: "RESERVE",
+    reserve_weight_preference: "HEAVY",
+  });
+  assert.deepEqual(legacy.prepare("SELECT package_capacity, purpose, reserve_weight_preference FROM warehouse_locations WHERE code = 'H1-K4-P7'").get(), {
+    package_capacity: 4,
+    purpose: "RESERVE",
+    reserve_weight_preference: "LIGHT",
+  });
+  assert.deepEqual(legacy.prepare("SELECT status, placement_priority FROM warehouse_rack_metadata WHERE rack_code = 'C2'").get(), {
+    status: "RESTRICTED",
+    placement_priority: "LAST_RESORT",
+  });
+
+  legacy.prepare("DELETE FROM schema_migrations WHERE version = 60").run();
+  runMigrations(legacy);
+  assert.equal((legacy.prepare("SELECT COUNT(*) AS count FROM warehouse_locations WHERE active = 1").get() as any).count, 420);
+  assert.equal((legacy.prepare("SELECT current_location_id FROM warehouse_packages WHERE id = 'preserved-package'").get() as any).current_location_id, "preserved-location-id");
+  legacy.close();
+});
