@@ -52,6 +52,12 @@ const APP_PERMISSIONS = [
   ['labels:view', 'Label Printer görüntüleme'],
   ['labels:edit', 'Label Printer şablon/veri düzenleme'],
   ['labels:admin', 'Label Printer yönetimi'],
+  ['customer_hub:view', 'Customer Hub görüntüleme'],
+  ['customer_hub:reply', 'Customer Hub müşteri yanıtı'],
+  ['customer_hub:assign', 'Customer Hub atama ve durum yönetimi'],
+  ['customer_hub:manage_channels', 'Customer Hub kanal yönetimi'],
+  ['customer_hub:manage_tags', 'Customer Hub etiket yönetimi'],
+  ['customer_hub:view_customer_context', 'Customer Hub ticari müşteri bağlamı'],
 ] as const;
 
 export default function SettingsView({ onUpdate }: SettingsViewProps) {

@@ -1391,6 +1391,65 @@ async function startServer() {
 
   // --- API ROUTES ---
 
+  // Customer Hub reads commercial context through this API only; it never opens Panel SQLite.
+  app.get("/api/customer-hub/context", (req, res) => {
+    const user = req.user;
+    const canViewContext = user?.role === 'admin' || user?.permissions?.['customer_hub:view_customer_context'] === true;
+    if (!canViewContext) {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Customer Hub müşteri bağlamı izni gerekli.' } });
+    }
+    try {
+      const customerId = cleanText(req.query.customer_id);
+      const email = cleanText(req.query.email).toLocaleLowerCase('tr-TR');
+      const phone = cleanText(req.query.phone).replace(/\D/g, '');
+      if (!customerId && !email && !phone) {
+        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Müşteri kimliği, e-posta veya telefon gerekli.' } });
+      }
+
+      const firm = customerId
+        ? db.prepare("SELECT id, name, email, phone, city, status FROM firms WHERE id = ? AND COALESCE(is_active, 1) = 1").get(customerId) as any
+        : db.prepare(`
+            SELECT id, name, email, phone, city, status
+            FROM firms
+            WHERE COALESCE(is_active, 1) = 1
+              AND ((? != '' AND lower(email) = ?) OR (? != '' AND replace(replace(replace(replace(phone, ' ', ''), '+', ''), '-', ''), '(', '') LIKE '%' || ?))
+            ORDER BY updated_at DESC LIMIT 1
+          `).get(email, email, phone, phone) as any;
+
+      const effectivePhone = phone || String(firm?.phone || '').replace(/\D/g, '');
+      const orders = effectivePhone
+        ? db.prepare(`
+            SELECT id, order_code, external_order_id, status, platform, total_amount, created_at
+            FROM sales
+            WHERE replace(replace(replace(replace(customer_phone, ' ', ''), '+', ''), '-', ''), '(', '') LIKE '%' || ?
+            ORDER BY datetime(created_at) DESC LIMIT 10
+          `).all(effectivePhone) as any[]
+        : [];
+      const orderIds = orders.map((order) => order.id);
+      const products = orderIds.length
+        ? db.prepare(`
+            SELECT DISTINCT si.product_id, si.product_name, p.sku
+            FROM sale_items si
+            LEFT JOIN products p ON p.id = si.product_id
+            WHERE si.sale_id IN (${orderIds.map(() => '?').join(',')})
+            LIMIT 20
+          `).all(...orderIds)
+        : [];
+      const totals = orders.reduce((sum, order) => sum + Number(order.total_amount || 0), 0);
+      return res.json({
+        customer: firm || null,
+        total_orders: orders.length,
+        total_sales_amount: totals,
+        total_sales: new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY' }).format(totals),
+        recent_orders: orders,
+        related_products: products,
+      });
+    } catch (err: any) {
+      AppLogger.error('CUSTOMER_HUB_CONTEXT_ERROR', 'Customer Hub context query failed', err);
+      return res.status(500).json({ success: false, error: { code: 'CONTEXT_FETCH_FAILED', message: 'Müşteri bağlamı alınamadı.' } });
+    }
+  });
+
   // Activity Logs
   app.get("/api/activity-logs", (req, res) => {
     try {

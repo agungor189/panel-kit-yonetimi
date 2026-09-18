@@ -200,6 +200,8 @@ Yerleşim CSV'si yalnız `sku,pick_face_location,reserve_locations` taşır; ür
 
 Kullanıcı izinleri Panel'de **Ayarlar → Kullanıcı Yönetimi → Uygulama yetkileri** bölümünden verilir. `admin` tüm izinlere sahiptir; Warehouse izinlerine ek olarak Label Printer için `labels:view`, `labels:edit` ve `labels:admin` ayrı ayrı denetlenir. Label Printer Panel login'ini server-side proxy eder ve JWT'yi yalnız `HttpOnly` cookie'de tutar.
 
+Customer Hub da aynı Panel login sözleşmesini kullanır. `customer_hub:view`, `customer_hub:reply`, `customer_hub:assign`, `customer_hub:manage_channels`, `customer_hub:manage_tags` ve `customer_hub:view_customer_context` izinleri Kullanıcı Yönetimi'nden verilir. Hub ticari müşteri özetini yalnız yetkili `GET /api/customer-hub/context` API'sinden okur; Panel SQLite dosyasına doğrudan erişmez.
+
 Worker, Label Printer renderer'dan PDF'i HTTP ile alır ve shell oluşturmadan `lp -d <printer> <file>` çağırır. Başarısız işler en fazla üç kez denenir; son hata paketi `PRINT_FAILED` durumuna taşır. Yeniden baskı yeni bir iş açar ama aynı global paket kodunu kullanır.
 
 ### Yedek & Geri Yükleme

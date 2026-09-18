@@ -5,6 +5,8 @@ const appPermissionKeys = new Set([
   "warehouse:manage_locations", "warehouse:count_stock", "warehouse:edit_label_templates",
   "warehouse:view_map", "warehouse:view_analytics",
   "labels:view", "labels:edit", "labels:admin",
+  "customer_hub:view", "customer_hub:reply", "customer_hub:assign",
+  "customer_hub:manage_channels", "customer_hub:manage_tags", "customer_hub:view_customer_context",
 ]);
 
 export function parseUserPermissions(permissions: string | null | undefined): Record<string, unknown> {
@@ -26,4 +28,3 @@ export function sanitizePermissions(value: unknown, fallback: Record<string, unk
   }
   return result;
 }
-
