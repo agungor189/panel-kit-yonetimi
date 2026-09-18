@@ -31,6 +31,10 @@ const asNumber = (value: unknown) => {
 const clean = (value: unknown, max = 250) => String(value ?? "").trim().slice(0, max);
 export const normalizeWarehouseLocationCode = (value: unknown) => clean(value, 100).toUpperCase().replace(/\s+/g, "");
 export const isValidWarehouseLocationCode = (value: unknown) => /^[A-Z]+\d+-K\d+-P\d+$/.test(normalizeWarehouseLocationCode(value));
+export const receivingCapacityForLocation = (code: string, physicalCapacity: number) => {
+  const level = normalizeWarehouseLocationCode(code).match(/-K(\d+)-/)?.[1];
+  return level === "1" || level === "2" ? Math.min(physicalCapacity, 3) : physicalCapacity;
+};
 const RECEIVING_ACTIVE_STATUSES = ["CLAIMED", "LABEL_QUEUED", "LABELED", "PRINT_FAILED"];
 const hasActorPermission = (actor: WarehouseActor, permission: string) => {
   if (actor.role === "admin" || actor.permissions?.[permission] === true) return true;
@@ -1079,21 +1083,29 @@ export class WarehouseAdminService {
     const packageId = clean(packageIdValue, 100);
     const pkg = packageId ? this.db.prepare("SELECT * FROM warehouse_packages WHERE id = ?").get(packageId) as any : null;
     if (packageId && !pkg) throw new WarehouseServiceError(404, "PACKAGE_NOT_FOUND", "Paket bulunamadı.");
-    const row = this.db.prepare(`
-      SELECT l.*, COUNT(p.id) AS occupied_packages,
-             l.package_capacity - COUNT(p.id) AS available_capacity,
-             SUM(CASE WHEN p.product_id = ? AND p.status IN ('PLACED','OPEN') THEN 1 ELSE 0 END) AS same_sku_packages
+    const rows = this.db.prepare(`
+      SELECT l.*, COUNT(DISTINCT p.id) AS occupied_packages,
+             COUNT(DISTINCT reservation.id) AS reserved_packages,
+             COUNT(DISTINCT CASE WHEN p.product_id = ? AND p.status IN ('PLACED','OPEN') THEN p.id END) AS same_sku_packages
       FROM warehouse_locations l
       LEFT JOIN warehouse_packages p ON p.current_location_id = l.id AND p.status IN ('PLACED','OPEN')
+      LEFT JOIN warehouse_packages reservation ON reservation.recommended_location_id = l.id
+        AND reservation.receiving_location_reserved_at IS NOT NULL
+        AND reservation.current_location_id IS NULL
+        AND reservation.status IN ('CLAIMED','LABEL_QUEUED','LABELED','PRINT_FAILED')
       WHERE l.active = 1
-      GROUP BY l.id HAVING COUNT(p.id) < l.package_capacity
-      ORDER BY CASE WHEN SUM(CASE WHEN p.product_id = ? AND p.status IN ('PLACED','OPEN') THEN 1 ELSE 0 END) > 0 THEN 0 ELSE 1 END,
+      GROUP BY l.id
+      ORDER BY CASE WHEN COUNT(DISTINCT CASE WHEN p.product_id = ? AND p.status IN ('PLACED','OPEN') THEN p.id END) > 0 THEN 0 ELSE 1 END,
                CASE WHEN EXISTS (SELECT 1 FROM products preferred WHERE preferred.id = ? AND preferred.warehouse_location = l.code COLLATE NOCASE)
                           OR EXISTS (SELECT 1 FROM product_reserve_locations reserve WHERE reserve.product_id = ? AND reserve.location = l.code COLLATE NOCASE)
                     THEN 0 ELSE 1 END,
-               same_sku_packages DESC, COUNT(p.id), l.code COLLATE NOCASE LIMIT 1
-    `).get(pkg?.product_id || "", pkg?.product_id || "", pkg?.product_id || "", pkg?.product_id || "") as any;
+               same_sku_packages DESC, occupied_packages, l.code COLLATE NOCASE
+    `).all(pkg?.product_id || "", pkg?.product_id || "", pkg?.product_id || "", pkg?.product_id || "") as any[];
+    const row = rows.find((candidate) => Number(candidate.occupied_packages) + Number(candidate.reserved_packages)
+      < receivingCapacityForLocation(candidate.code, Number(candidate.package_capacity)));
     if (!row) throw new WarehouseServiceError(409, "NO_LOCATION_CAPACITY", "Kullanılabilir lokasyon kapasitesi yok.");
+    row.available_capacity = Math.max(0, receivingCapacityForLocation(row.code, Number(row.package_capacity))
+      - Number(row.occupied_packages) - Number(row.reserved_packages));
     if (pkg) {
       this.db.prepare("UPDATE warehouse_packages SET recommended_location_id = ?, recommended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
         .run(row.id, pkg.id);
@@ -1143,7 +1155,8 @@ export class WarehouseAdminService {
         const usage = this.locationUsage(location.id, packageId);
         const reservation = this.db.prepare("SELECT receiving_location_reserved_at FROM warehouse_packages WHERE id = ?").get(packageId) as any;
         const alreadyReservedHere = pkg.recommended_location_id === location.id && Boolean(reservation?.receiving_location_reserved_at);
-        if (!alreadyReservedHere && usage.occupied + usage.reserved >= Number(location.package_capacity)) continue;
+        const receivingLimit = receivingCapacityForLocation(location.code, Number(location.package_capacity));
+        if (!alreadyReservedHere && usage.occupied + usage.reserved >= receivingLimit) continue;
         this.db.prepare(`UPDATE warehouse_packages SET recommended_location_id = ?, recommended_at = CURRENT_TIMESTAMP,
           receiving_location_reserved_at = COALESCE(receiving_location_reserved_at, CURRENT_TIMESTAMP),
           receiving_last_activity_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
@@ -1153,7 +1166,7 @@ export class WarehouseAdminService {
           ...location,
           occupied_packages: usage.occupied,
           reserved_packages: reservedAfter,
-          available_capacity: Math.max(0, Number(location.package_capacity) - usage.occupied - reservedAfter),
+          available_capacity: Math.max(0, receivingLimit - usage.occupied - reservedAfter),
           planned_location: plannedCode,
           using_reserve: code !== plannedCode,
         };
@@ -1191,7 +1204,8 @@ export class WarehouseAdminService {
         throw new WarehouseServiceError(409, "WRONG_LOCATION", `Yanlış lokasyon. Paketi ${recommended?.code || "önerilen lokasyona"} yerleştirin.`);
       }
       const usage = this.locationUsage(location.id, pkg.id);
-      if (usage.occupied + usage.reserved >= Number(location.package_capacity)) throw new WarehouseServiceError(409, "LOCATION_FULL", "Lokasyon kapasitesi dolu.");
+      const receivingLimit = receivingCapacityForLocation(location.code, Number(location.package_capacity));
+      if (usage.occupied + usage.reserved >= receivingLimit) throw new WarehouseServiceError(409, "LOCATION_FULL", "Lokasyon kapasitesi dolu.");
       const lowerPending = this.db.prepare(`
         SELECT package_code FROM warehouse_packages
         WHERE batch_line_id = ? AND package_number < ?
@@ -1224,7 +1238,7 @@ export class WarehouseAdminService {
       }
       this.audit("WAREHOUSE_PACKAGE_PLACED", "warehouse_package", pkg.id, { location_code: location.code, quantity: pkg.planned_quantity, override_reason: overrideReason || null }, actor);
       return { placement: this.db.prepare("SELECT * FROM package_placements WHERE id = ?").get(placementId), package: this.getPackage(pkg.id), idempotent: false };
-    })();
+    }).immediate();
   }
 
   releaseReceivingPackage(packageIdValue: string, actor: WarehouseActor, deviceId?: string) {
