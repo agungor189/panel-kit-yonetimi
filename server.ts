@@ -25,7 +25,9 @@ import { createKitRouter } from "./server/routes/kitRoutes.js";
 import { createKitCatalogRouter } from "./server/routes/kitCatalogRoutes.js";
 import { createCatalogV1Router } from "./server/routes/catalogV1Routes.js";
 import { createCatalogAdminV1Router } from "./server/routes/catalogAdminV1Routes.js";
+import { createProcurementV1Router } from "./server/routes/procurementV1Routes.js";
 import { rejectLegacyCatalogMutation } from "./server/modules/catalog/legacyCatalogGuard.js";
+import { CommandExecutor } from "./server/modules/commands/commandFoundation.js";
 import { createPanelApiAuth } from "./server/middleware/panelApiAuth.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
 import { restoreUploadEntry } from "./server/utils/restoreUploads.js";
@@ -51,7 +53,7 @@ import {
   normalizeBackupConfig,
   type BackupConfig,
 } from "./server/modules/backup/config.js";
-import { createActiveExchangeRateReader } from "./server/modules/finance/exchangeRates.js";
+import { createActiveExchangeRateReader, ExchangeRateService } from "./server/modules/finance/exchangeRates.js";
 import {
   defaultTrendyolConfig,
   normalizeTrendyolEnvironment,
@@ -1244,11 +1246,25 @@ async function fetchExchangeRate() {
     }
 
     if (rate > 0) {
-       db.prepare(`UPDATE exchange_rates SET is_active = 0 WHERE is_active = 1`).run();
-       db.prepare(`
-         INSERT INTO exchange_rates (id, base_currency, target_currency, rate, source, is_active)
-         VALUES (?, 'USD', 'TRY', ?, ?, 1)
-       `).run(uuidv4(), rate, source);
+       const changedAt = new Date().toISOString();
+       new CommandExecutor(db).execute({
+         operationId: `fx-provider:${source}:${changedAt}`,
+         commandType: "finance.fx.usd-try.import-current.v1",
+         payload: { rate: String(rate), source, changedAt },
+         actor: { service: { id: "system:fx-provider", name: source } },
+         authorization: { decision: "ALLOW", capability: "fx:write" },
+       }, (context) => {
+         const snapshot = new ExchangeRateService(db).recordCurrentUsdTry({
+           rate: String(rate), source, changedAt,
+           actorId: "system:fx-provider", actorType: "SYSTEM",
+         });
+         context.addOutbox({
+           topic: "finance.fx", eventType: "finance.fx.current-changed.v1",
+           aggregateType: "fx_pair", aggregateId: "USD/TRY",
+           payload: { observation_id: snapshot.observationId },
+         });
+         return { statusCode: 201, body: { success: true, observation_id: snapshot.observationId } };
+       });
        console.log(`[ExchangeRate] Successfully fetched ${rate} from ${source}`);
 
        // logActivity('CREATE', 'setting', 'exchange_rate', { details: `Kur güncellendi: ${rate} (Kaynak: ${source})` });
@@ -5382,6 +5398,16 @@ async function startServer() {
   app.use(
     "/api/catalog-admin/v1",
     createCatalogAdminV1Router({ db, authorize: auth.requireCapability("catalog:write") }),
+  );
+  app.use(
+    "/api/procurement/v1",
+    createProcurementV1Router({
+      db,
+      authorizeProcurement: auth.requireCapability("procurement:write"),
+      authorizeCostApproval: auth.requireCapability("acquisition-cost:approve"),
+      authorizePayment: auth.requireCapability("finance:write"),
+      authorizeFx: auth.requireCapability("fx:write"),
+    }),
   );
   mountWarehouseModule({
     app,

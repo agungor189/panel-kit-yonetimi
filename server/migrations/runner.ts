@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { PROCUREMENT_SCHEMA_V67 } from "../db/procurementSchema.js";
 
 interface Migration {
   version: number;
@@ -2744,9 +2745,35 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 67,
+    name: "add_procurement_acquisition_cost_contract",
+    up(db) {
+      db.exec(PROCUREMENT_SCHEMA_V67);
+      const active = db.prepare(`SELECT id, rate, source, fetched_at
+        FROM exchange_rates WHERE base_currency='USD' AND target_currency='TRY' AND is_active=1
+        ORDER BY datetime(fetched_at) DESC, rowid DESC LIMIT 1`).get() as
+        | { id: string; rate: number; source: string | null; fetched_at: string }
+        | undefined;
+      if (active && Number.isFinite(active.rate) && active.rate > 0) {
+        const denominator = 1_000_000;
+        const numerator = Math.round(active.rate * denominator);
+        const observationId = `legacy-exchange-rate:${active.id}`;
+        db.prepare(`INSERT OR IGNORE INTO fx_rate_observations
+          (id,base_currency,quote_currency,rate_numerator,rate_denominator,source,observed_at,actor_id,actor_type)
+          VALUES (?, 'USD', 'TRY', ?, ?, ?, ?, 'system:legacy-fx-migration', 'SYSTEM')`)
+          .run(observationId, numerator, denominator, active.source || "LEGACY", active.fetched_at);
+        db.prepare(`INSERT INTO fx_current_rates (pair_key,observation_id,changed_at,changed_by)
+          VALUES ('USD/TRY',?,?, 'system:legacy-fx-migration')
+          ON CONFLICT(pair_key) DO UPDATE SET observation_id=excluded.observation_id,
+            changed_at=excluded.changed_at,changed_by=excluded.changed_by`)
+          .run(observationId, active.fetched_at);
+      }
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 66;
+export const CURRENT_SCHEMA_VERSION = 67;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),
@@ -2761,7 +2788,7 @@ export type MigrationManifestEntry = {
 };
 
 const checksumFor = (migration: Migration): string => createHash("sha256")
-  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}`)
+  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}`)
   .digest("hex");
 
 export function getMigrationManifest(): MigrationManifestEntry[] {
@@ -2868,6 +2895,13 @@ const V66_CATALOG_SCHEMA_OBJECTS = [
   { type: "trigger", name: "trg_products_base_uom_valid_update" },
 ] as const;
 
+const V67_PROCUREMENT_TABLES = new Set([
+  "fx_rate_observations", "fx_current_rates", "procurement_suppliers", "purchase_orders",
+  "purchase_order_lines", "purchase_attachments", "purchase_cost_components",
+  "purchase_cost_allocations", "acquisition_lot_cost_snapshots", "purchase_payments",
+  "procurement_cash_postings",
+]);
+
 type SchemaDefinition = { type: string; name: string; sql: string };
 
 const canonicalSchemaDefinition = (sql: string): string => sql
@@ -2944,6 +2978,24 @@ function assertV66CatalogSchemaDefinitions(actual: Database.Database): void {
         .get(object.type, object.name) as SchemaDefinition | undefined;
       if (!expected || !found || canonicalSchemaDefinition(found.sql) !== canonicalSchemaDefinition(expected.sql)) {
         throw new Error(`Migration v66 schema effect is missing or incompatible: ${object.type} ${object.name}`);
+      }
+    }
+  } finally {
+    reference.close();
+  }
+}
+
+function assertV67ProcurementSchemaDefinitions(actual: Database.Database): void {
+  const reference = new Database(":memory:");
+  try {
+    reference.exec(PROCUREMENT_SCHEMA_V67);
+    const expected = (reference.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE sql IS NOT NULL").all() as Array<SchemaDefinition & { tbl_name: string }>)
+      .filter((object) => V67_PROCUREMENT_TABLES.has(object.tbl_name));
+    for (const object of expected) {
+      const found = actual.prepare("SELECT type,name,sql FROM sqlite_master WHERE type=? AND name=? AND sql IS NOT NULL")
+        .get(object.type, object.name) as SchemaDefinition | undefined;
+      if (!found || canonicalSchemaDefinition(found.sql) !== canonicalSchemaDefinition(object.sql)) {
+        throw new Error(`Migration v67 schema effect is missing or incompatible: ${object.type} ${object.name}`);
       }
     }
   } finally {
@@ -3033,6 +3085,7 @@ function validateAppliedMigrations(db: Database.Database, manifest: MigrationMan
     if (maxVersion >= 63) assertV63CommandSchemaDefinitions(db);
     if (maxVersion >= 64) assertV64CatalogSchemaDefinitions(db, maxVersion);
     if (maxVersion >= 66) assertV66CatalogSchemaDefinitions(db);
+    if (maxVersion >= 67) assertV67ProcurementSchemaDefinitions(db);
   }
   if (!hasChecksumColumn) {
     db.transaction(() => {
@@ -3077,6 +3130,7 @@ export function runMigrations(
       if (migration.version === 63) assertV63CommandSchemaDefinitions(db);
       if (migration.version === 64) assertV64CatalogSchemaDefinitions(db);
       if (migration.version === 66) assertV66CatalogSchemaDefinitions(db);
+      if (migration.version === 67) assertV67ProcurementSchemaDefinitions(db);
       insertMigration.run(migration.version, migration.name, checksumFor(migration));
     })();
 

@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { PROCUREMENT_SCHEMA_V67 } from "./procurementSchema.js";
 
 /**
  * applySchema — creates all tables that don't yet exist.
@@ -1031,4 +1032,5 @@ export function applySchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_command_outbox_dispatch
       ON command_outbox(status, available_at, created_at);
   `);
+  db.exec(PROCUREMENT_SCHEMA_V67);
 }

@@ -56,6 +56,17 @@ const businessTablesThatMustStartEmpty = [
   "command_audit_log",
   "command_outbox",
   "catalog_product_versions",
+  "fx_rate_observations",
+  "fx_current_rates",
+  "procurement_suppliers",
+  "purchase_orders",
+  "purchase_order_lines",
+  "purchase_attachments",
+  "purchase_cost_components",
+  "purchase_cost_allocations",
+  "acquisition_lot_cost_snapshots",
+  "purchase_payments",
+  "procurement_cash_postings",
 ] as const;
 
 test("fresh production schema is exact, versioned and has zero business history", () => {
@@ -64,7 +75,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 65);
+  assert.equal(manifest.length, 66);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -89,6 +100,16 @@ test("fresh production schema is exact, versioned and has zero business history"
     command_operations: ["actor_scope", "command_type", "id", "operation_id", "payload_hash", "result_json", "result_status_code"],
     command_audit_log: ["command_type", "human_actor_id", "operation_id", "payload_hash", "service_actor_id"],
     command_outbox: ["event_type", "operation_record_id", "payload_hash", "payload_json", "status", "topic"],
+    fx_rate_observations: ["actor_id", "actor_type", "base_currency", "id", "observed_at", "quote_currency", "rate_denominator", "rate_numerator", "source"],
+    fx_current_rates: ["changed_at", "changed_by", "observation_id", "pair_key"],
+    procurement_suppliers: ["default_currency", "id", "name"],
+    purchase_orders: ["direct_cost_net_minor", "merchandise_net_minor", "paid_minor", "payment_status", "status", "supplier_currency", "supplier_id", "total_base_try_gross_minor", "total_gross_minor"],
+    purchase_order_lines: ["base_try_net_minor", "fx_rate_denominator", "fx_rate_numerator", "normalized_cost_denominator", "normalized_cost_numerator", "product_id", "purchase_order_id", "quantity_base_int", "quote_basis", "supplier_net_minor", "supplier_vat_minor", "supplier_gross_minor", "vat_mode"],
+    purchase_cost_components: ["allocation_method", "base_try_net_minor", "category", "purchase_order_id", "rounding_residual_minor", "suggestion_json"],
+    purchase_cost_allocations: ["amount_try_minor", "component_id", "line_id", "provenance", "purchase_order_id"],
+    acquisition_lot_cost_snapshots: ["allocation_snapshot_json", "landed_cost_try_minor", "merchandise_cost_try_minor", "normalized_cost_denominator", "normalized_cost_numerator", "purchase_line_id", "state", "vat_try_minor"],
+    purchase_payments: ["amount_minor", "cash_account_id", "currency", "paid_at", "purchase_order_id"],
+    procurement_cash_postings: ["amount_minor", "currency", "direction", "payment_id", "purchase_id", "source_type"],
     schema_migrations: ["applied_at", "checksum", "name", "version"],
   };
   for (const [table, expected] of Object.entries(requiredColumns)) {
@@ -99,6 +120,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   assert.ok(indexes(db, "stock_movements").includes("idx_stock_movements_product"));
   assert.ok(indexes(db, "sales").includes("idx_sales_order_code_unique"));
   assert.ok(indexes(db, "command_outbox").includes("idx_command_outbox_dispatch"));
+  assert.ok(indexes(db, "acquisition_lot_cost_snapshots").includes("idx_acquisition_lots_product"));
 
   for (const table of businessTablesThatMustStartEmpty) {
     assert.equal(count(db, table), 0, `${table} must contain no bootstrap business rows`);
