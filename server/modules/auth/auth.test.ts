@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import Database from "better-sqlite3";
+import bcrypt from "bcrypt";
 import express from "express";
 import { applySchema } from "../../db/schema.js";
-import { applySeed } from "../../db/seed.js";
 import { createAuthModule } from "./index.js";
 
 test("auth module preserves login, current-user and protected API contracts", async () => {
   const db = new Database(":memory:");
   applySchema(db);
-  applySeed(db);
-  db.prepare("UPDATE users SET must_change_password = 0 WHERE username = 'admin'").run();
+  db.prepare("INSERT INTO users (id, username, password_hash, role, must_change_password) VALUES (?, ?, ?, ?, 0)")
+    .run("test-admin", "admin", bcrypt.hashSync("admin", 4), "admin");
 
   const activity: string[] = [];
   const auth = createAuthModule({
@@ -54,4 +54,3 @@ test("auth module preserves login, current-user and protected API contracts", as
     db.close();
   }
 });
-

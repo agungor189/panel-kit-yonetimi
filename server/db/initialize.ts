@@ -2,7 +2,6 @@ import Database from "better-sqlite3";
 import { runMigrations } from "../migrations/runner.js";
 import { generateNormalizedFields } from "../utils/normalizeProductFields.js";
 import { applySchema } from "./schema.js";
-import { applySeed } from "./seed.js";
 
 export function openDatabase(dbPath: string): Database.Database {
   const db = new Database(dbPath);
@@ -20,15 +19,16 @@ export function initializeDatabase(db: Database.Database): void {
   `).get() as { count: number }).count === 0;
   applySchema(db);
   runMigrations(db);
-  if (isFresh) removeLegacyFreshBootstrapBusinessRows(db);
+  if (isFresh) clearFreshBootstrapDefaults(db);
   backfillNormalizedProductFields(db);
-  applySeed(db);
 }
 
-function removeLegacyFreshBootstrapBusinessRows(db: Database.Database): void {
+function clearFreshBootstrapDefaults(db: Database.Database): void {
   db.transaction(() => {
     db.prepare("DELETE FROM kit_profile_offers").run();
     db.prepare("DELETE FROM kit_profiles").run();
+    db.prepare("DELETE FROM dashboard_widgets").run();
+    db.prepare("DELETE FROM settings").run();
   })();
 }
 

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { applySchema } from "../db/schema.js";
-import { getMigrationManifest, runMigrations } from "../migrations/runner.js";
+import { runMigrations } from "../migrations/runner.js";
 import { importProductsFromCsvRows, parseCsvNumber } from "./productCsvImport.js";
 import { resolveProductCsvHeaders } from "../../shared/productCsvMapping.js";
 
@@ -176,24 +178,8 @@ test("duplicates, invalid types, invalid numbers and bad BOM block apply", () =>
 
 test("v50 preserves legacy names and weights while standardizing BOM parents", () => {
   const db = new Database(":memory:");
+  db.exec(fs.readFileSync(fileURLToPath(new URL("../db/fixtures/panel-v48.sql", import.meta.url)), "utf8"));
   db.exec(`
-    CREATE TABLE products (
-      id TEXT PRIMARY KEY,
-      name TEXT,
-      title TEXT NOT NULL,
-      product_type TEXT DEFAULT 'finished',
-      weight REAL DEFAULT 0,
-      weight_grams REAL DEFAULT 0
-    );
-    CREATE TABLE product_bom (
-      parent_product_id TEXT NOT NULL,
-      component_product_id TEXT NOT NULL
-    );
-    CREATE TABLE schema_migrations (
-      version INTEGER PRIMARY KEY,
-      name TEXT NOT NULL,
-      applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
     INSERT INTO products (id, name, title, product_type, weight)
       VALUES ('simple', 'Eski Ürün', 'Eski Başlık', 'finished', 125);
     INSERT INTO products (id, name, title, product_type, weight)
@@ -201,10 +187,6 @@ test("v50 preserves legacy names and weights while standardizing BOM parents", (
     INSERT INTO product_bom (parent_product_id, component_product_id)
       VALUES ('assembly', 'simple');
   `);
-  const markApplied = db.prepare("INSERT INTO schema_migrations (version, name) VALUES (?, ?)");
-  for (const migration of getMigrationManifest().filter(({ version }) => version <= 49)) {
-    markApplied.run(migration.version, migration.name);
-  }
 
   try { runMigrations(db); }
   catch (error) { throw new Error(`Legacy migration failed: ${error instanceof Error ? error.message : String(error)}`); }

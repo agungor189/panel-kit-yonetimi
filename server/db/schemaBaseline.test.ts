@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { initializeDatabase } from "./initialize.js";
-import { applySchema } from "./schema.js";
-import { CURRENT_SCHEMA_VERSION, getMigrationManifest, runMigrations, SUPPORTED_UPGRADE_STARTS } from "../migrations/runner.js";
+import { CURRENT_SCHEMA_VERSION, getMigrationManifest, runMigrations, SUPPORTED_UPGRADE_STARTS, validateMigrationManifest } from "../migrations/runner.js";
 
 const count = (db: Database.Database, table: string): number => Number(
   (db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count,
 );
+const fixtureDirectory = fileURLToPath(new URL("./fixtures/", import.meta.url));
 
 const columns = (db: Database.Database, table: string): string[] => (
   db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
@@ -16,6 +19,17 @@ const columns = (db: Database.Database, table: string): string[] => (
 const indexes = (db: Database.Database, table: string): string[] => (
   db.prepare(`PRAGMA index_list(${table})`).all() as Array<{ name: string }>
 ).map(({ name }) => name).filter((name) => !name.startsWith("sqlite_autoindex_")).sort();
+
+const schemaShape = (db: Database.Database) => (
+  db.prepare("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name <> 'schema_migrations' AND sql IS NOT NULL ORDER BY type, name").all()
+    .map((object: any) => ({
+      ...object,
+      columns: object.type === "table" ? (db.prepare(`PRAGMA table_info(\"${object.name.replaceAll('"', '""')}\")`).all() as any[])
+        .map(({ name, type, notnull, dflt_value, pk }) => ({ name, type, notnull, dflt_value, pk })).sort((a, b) => a.name.localeCompare(b.name)) : undefined,
+      indexColumns: object.type === "index" ? (db.prepare(`PRAGMA index_info(\"${object.name.replaceAll('"', '""')}\")`).all() as any[])
+        .map(({ seqno, name }) => ({ seqno, name })) : undefined,
+    }))
+);
 
 const businessTablesThatMustStartEmpty = [
   "products",
@@ -45,7 +59,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 59);
+  assert.equal(manifest.length, 60);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -74,10 +88,11 @@ test("fresh production schema is exact, versioned and has zero business history"
   for (const table of businessTablesThatMustStartEmpty) {
     assert.equal(count(db, table), 0, `${table} must contain no bootstrap business rows`);
   }
-  assert.equal(count(db, "users"), 1);
-  assert.equal(count(db, "cash_accounts"), 6);
-  assert.equal(count(db, "dashboard_widgets"), 8);
-  assert.equal(count(db, "settings"), 15);
+  assert.equal(count(db, "users"), 0, "fresh bootstrap must require secure one-time admin provisioning");
+  assert.equal(count(db, "cash_accounts"), 0, "cash accounts are business configuration, not technical seed data");
+  assert.equal(count(db, "dashboard_widgets"), 0, "user-owned dashboard data must not be invented before a user exists");
+  assert.equal(count(db, "settings"), 0, "unresolved business policy must remain unconfigured");
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM users WHERE username='admin'").pluck().get(), 0);
 
   const before = Object.fromEntries([
     ...businessTablesThatMustStartEmpty,
@@ -114,30 +129,60 @@ test("migration history fails closed on unknown, renamed or changed entries", ()
 });
 
 for (const start of SUPPORTED_UPGRADE_STARTS) {
-  test(`supported v${start} fixture converges exactly and repeatably to v${CURRENT_SCHEMA_VERSION}`, () => {
+  test(`historical v${start} SQL fixture is provenance-pinned and upgrades to v${CURRENT_SCHEMA_VERSION}`, () => {
+    const sql = fs.readFileSync(path.join(fixtureDirectory, `panel-v${start}.sql`), "utf8");
+    assert.match(sql, new RegExp(`^-- source-commit: [a-f0-9]{40}\\n-- schema-version: ${start}\\n`));
     const db = new Database(":memory:");
-    db.pragma("foreign_keys = ON");
-    applySchema(db);
-    const manifest = getMigrationManifest();
-    const markApplied = db.prepare("INSERT INTO schema_migrations (version, name) VALUES (?, ?)");
-    for (const migration of manifest.filter(({ version }) => version <= SUPPORTED_UPGRADE_STARTS[0])) {
-      markApplied.run(migration.version, migration.name);
-    }
-    if (start > SUPPORTED_UPGRADE_STARTS[0]) runMigrations(db, start);
+    db.exec(sql);
     db.prepare("INSERT INTO products (id, title, product_type) VALUES (?, ?, ?)")
-      .run(`fixture-v${start}`, `Synthetic v${start} product`, "simple");
-
+      .run(`fixture-v${start}`, `Historical v${start} product`, "simple");
     runMigrations(db);
+    assert.equal(count(db, "products"), 1);
     assert.deepEqual(
       db.prepare("SELECT version, name, checksum FROM schema_migrations ORDER BY version").all(),
-      manifest,
+      getMigrationManifest(),
     );
-    assert.equal(count(db, "products"), 1, "supported upgrade must preserve fixture business data");
+    const fresh = new Database(":memory:");
+    initializeDatabase(fresh);
+    assert.deepEqual(schemaShape(db), schemaShape(fresh), `v${start} upgrade must converge to the fresh schema shape`);
+    const first = db.prepare("SELECT version, name, checksum FROM schema_migrations ORDER BY version").all();
     runMigrations(db);
-    assert.deepEqual(
-      db.prepare("SELECT version, name, checksum FROM schema_migrations ORDER BY version").all(),
-      manifest,
-    );
+    assert.deepEqual(db.prepare("SELECT version, name, checksum FROM schema_migrations ORDER BY version").all(), first);
+    fresh.close();
     db.close();
   });
 }
+
+test("the historical v41 hole is frozen against retroactive migration insertion", () => {
+  const manifest = getMigrationManifest();
+  const insertionPoint = manifest.findIndex(({ version }) => version === 42);
+  manifest.splice(insertionPoint, 0, { version: 41, name: "retroactive", checksum: "0".repeat(64) });
+  assert.throws(() => validateMigrationManifest(manifest), /Frozen migration sequence mismatch/);
+});
+
+test("migration history rejects deleted records and claimed schema effects that are absent", () => {
+  const deletedV1 = new Database(":memory:");
+  initializeDatabase(deletedV1);
+  deletedV1.prepare("DELETE FROM schema_migrations WHERE version = 1").run();
+  assert.throws(() => runMigrations(deletedV1), /history.*prefix|missing.*v1/i);
+  deletedV1.close();
+
+  const deletedV30 = new Database(":memory:");
+  initializeDatabase(deletedV30);
+  deletedV30.prepare("DELETE FROM schema_migrations WHERE version = 30").run();
+  assert.throws(() => runMigrations(deletedV30), /history.*prefix|missing.*v30/i);
+  deletedV30.close();
+
+  const missingEffect = new Database(":memory:");
+  initializeDatabase(missingEffect);
+  missingEffect.exec("DROP TABLE backup_runs");
+  assert.throws(() => runMigrations(missingEffect), /schema effect|backup_runs/i);
+  missingEffect.close();
+
+  const unverifiableNull = new Database(":memory:");
+  initializeDatabase(unverifiableNull);
+  unverifiableNull.prepare("UPDATE schema_migrations SET checksum = NULL WHERE version = 30").run();
+  unverifiableNull.exec("DROP TABLE backup_runs");
+  assert.throws(() => runMigrations(unverifiableNull), /schema effect|checksum history|backup_runs/i);
+  unverifiableNull.close();
+});

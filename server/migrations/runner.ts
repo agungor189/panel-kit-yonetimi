@@ -1,5 +1,8 @@
 import Database from "better-sqlite3";
 import { createHash } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 interface Migration {
   version: number;
@@ -2388,10 +2391,30 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 61,
+    name: "normalize_products_product_type_default",
+    up(db) {
+      const productType = (db.prepare("PRAGMA table_info(products)").all() as Array<{ name: string; dflt_value: string | null }>)
+        .find(({ name }) => name === "product_type");
+      if (!productType || productType.dflt_value === "'simple'") return;
+      db.exec(`
+        ALTER TABLE products RENAME COLUMN product_type TO product_type_legacy_v61;
+        ALTER TABLE products ADD COLUMN product_type TEXT DEFAULT 'simple';
+        UPDATE products SET product_type = product_type_legacy_v61;
+        ALTER TABLE products DROP COLUMN product_type_legacy_v61;
+      `);
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 60;
+export const CURRENT_SCHEMA_VERSION = 61;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
+const FROZEN_MIGRATION_SEQUENCE = [
+  ...Array.from({ length: 40 }, (_, index) => index + 1),
+  ...Array.from({ length: 20 }, (_, index) => index + 42),
+] as const;
+const fixtureDirectory = fileURLToPath(new URL("../db/fixtures/", import.meta.url));
 
 export type MigrationManifestEntry = {
   version: number;
@@ -2411,8 +2434,7 @@ export function getMigrationManifest(): MigrationManifestEntry[] {
   }));
 }
 
-function validateMigrationDefinitions(): MigrationManifestEntry[] {
-  const manifest = getMigrationManifest();
+export function validateMigrationManifest(manifest: MigrationManifestEntry[]): void {
   const versions = new Set<number>();
   let previous = 0;
   for (const entry of manifest) {
@@ -2427,10 +2449,20 @@ function validateMigrationDefinitions(): MigrationManifestEntry[] {
   if (manifest.at(-1)?.version !== CURRENT_SCHEMA_VERSION) {
     throw new Error(`Migration manifest ends at v${manifest.at(-1)?.version ?? "none"}, expected v${CURRENT_SCHEMA_VERSION}`);
   }
+  for (const [index, frozenVersion] of FROZEN_MIGRATION_SEQUENCE.entries()) {
+    if (manifest[index]?.version !== frozenVersion) {
+      throw new Error(`Frozen migration sequence mismatch at position ${index + 1}: expected v${frozenVersion}, found v${manifest[index]?.version ?? "none"}`);
+    }
+  }
+}
+
+function validateMigrationDefinitions(): MigrationManifestEntry[] {
+  const manifest = getMigrationManifest();
+  validateMigrationManifest(manifest);
   return manifest;
 }
 
-function ensureMigrationTable(db: Database.Database): void {
+function ensureMigrationTable(db: Database.Database): boolean {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version    INTEGER PRIMARY KEY,
@@ -2442,30 +2474,85 @@ function ensureMigrationTable(db: Database.Database): void {
   const columns = new Set(
     (db.prepare("PRAGMA table_info(schema_migrations)").all() as { name: string }[]).map((column) => column.name),
   );
-  if (!columns.has("checksum")) db.exec("ALTER TABLE schema_migrations ADD COLUMN checksum TEXT");
+  return columns.has("checksum");
 }
 
-function validateAppliedMigrations(db: Database.Database, manifest: MigrationManifestEntry[]): Set<number> {
-  const expected = new Map(manifest.map((entry) => [entry.version, entry]));
-  const rows = db.prepare("SELECT version, name, checksum FROM schema_migrations ORDER BY version").all() as Array<{
+type ColumnInfo = { name: string; type: string; notnull: number; dflt_value: unknown; pk: number };
+
+const quoteIdentifier = (value: string): string => `"${value.replaceAll('"', '""')}"`;
+
+function assertSchemaEffects(actual: Database.Database, maxVersion: number): void {
+  if (maxVersion < SUPPORTED_UPGRADE_STARTS[0]) {
+    throw new Error(`Migration checksum history at v${maxVersion} is not a supported verifiable checkpoint`);
+  }
+  const baseVersion = maxVersion >= SUPPORTED_UPGRADE_STARTS[1] ? SUPPORTED_UPGRADE_STARTS[1] : SUPPORTED_UPGRADE_STARTS[0];
+  const reference = new Database(":memory:");
+  try {
+    reference.exec(fs.readFileSync(path.join(fixtureDirectory, `panel-v${baseVersion}.sql`), "utf8"));
+    for (const migration of migrations) {
+      if (migration.version <= baseVersion || migration.version > maxVersion) continue;
+      reference.transaction(() => migration.up(reference))();
+    }
+    const expectedObjects = reference.prepare(`
+      SELECT type, name FROM sqlite_master
+      WHERE name NOT LIKE 'sqlite_%' AND name <> 'schema_migrations' AND sql IS NOT NULL
+      ORDER BY type, name
+    `).all() as Array<{ type: string; name: string }>;
+    for (const object of expectedObjects) {
+      const exists = actual.prepare("SELECT 1 FROM sqlite_master WHERE type = ? AND name = ? AND sql IS NOT NULL")
+        .get(object.type, object.name);
+      if (!exists) throw new Error(`Migration schema effect is missing: ${object.type} ${object.name}`);
+      if (object.type === "table") {
+        const expectedColumns = reference.prepare(`PRAGMA table_info(${quoteIdentifier(object.name)})`).all() as ColumnInfo[];
+        const actualColumns = actual.prepare(`PRAGMA table_info(${quoteIdentifier(object.name)})`).all() as ColumnInfo[];
+        for (const expectedColumn of expectedColumns) {
+          const actualColumn = actualColumns.find((column) => column.name === expectedColumn.name);
+          if (!actualColumn || actualColumn.type !== expectedColumn.type || actualColumn.notnull !== expectedColumn.notnull
+            || actualColumn.dflt_value !== expectedColumn.dflt_value || actualColumn.pk !== expectedColumn.pk) {
+            throw new Error(`Migration schema effect is missing or incompatible: ${object.name}.${expectedColumn.name}`);
+          }
+        }
+      }
+      if (object.type === "index") {
+        const expectedIndex = (reference.prepare(`PRAGMA index_info(${quoteIdentifier(object.name)})`).all() as Array<{ seqno: number; name: string }>)
+          .map(({ seqno, name }) => ({ seqno, name }));
+        const actualIndex = (actual.prepare(`PRAGMA index_info(${quoteIdentifier(object.name)})`).all() as Array<{ seqno: number; name: string }>)
+          .map(({ seqno, name }) => ({ seqno, name }));
+        if (JSON.stringify(actualIndex) !== JSON.stringify(expectedIndex)) {
+          throw new Error(`Migration schema effect is incompatible: index ${object.name}`);
+        }
+      }
+    }
+  } finally {
+    reference.close();
+  }
+}
+
+function validateAppliedMigrations(db: Database.Database, manifest: MigrationManifestEntry[], hasChecksumColumn: boolean): Set<number> {
+  const rows = db.prepare(`SELECT version, name, ${hasChecksumColumn ? "checksum" : "NULL AS checksum"} FROM schema_migrations ORDER BY version`).all() as Array<{
     version: number;
     name: string;
     checksum: string | null;
   }>;
   const applied = new Set<number>();
-  const backfillChecksum = db.prepare("UPDATE schema_migrations SET checksum = ? WHERE version = ? AND checksum IS NULL");
-  for (const row of rows) {
-    const entry = expected.get(row.version);
+  for (const [index, row] of rows.entries()) {
+    const entry = manifest[index];
     if (!entry) throw new Error(`Database contains unsupported migration version v${row.version}`);
+    if (row.version !== entry.version) {
+      throw new Error(`Migration history is not an exact prefix: expected v${entry.version}, found v${row.version}`);
+    }
     if (row.name !== entry.name) {
       throw new Error(`Migration v${row.version} name mismatch: database=${row.name}, source=${entry.name}`);
     }
     if (row.checksum && row.checksum !== entry.checksum) {
       throw new Error(`Migration v${row.version} checksum mismatch`);
     }
-    if (!row.checksum) backfillChecksum.run(entry.checksum, row.version);
     applied.add(row.version);
   }
+  if (rows.length > 0) assertSchemaEffects(db, rows.at(-1)!.version);
+  if (!hasChecksumColumn) db.exec("ALTER TABLE schema_migrations ADD COLUMN checksum TEXT");
+  const backfillChecksum = db.prepare("UPDATE schema_migrations SET checksum = ? WHERE version = ? AND checksum IS NULL");
+  for (const row of rows) if (!row.checksum) backfillChecksum.run(manifest.find(({ version }) => version === row.version)!.checksum, row.version);
   return applied;
 }
 
@@ -2474,8 +2561,8 @@ export function runMigrations(db: Database.Database, targetVersion = CURRENT_SCH
   if (!manifest.some(({ version }) => version === targetVersion)) {
     throw new Error(`Unsupported migration target v${targetVersion}`);
   }
-  ensureMigrationTable(db);
-  const applied = validateAppliedMigrations(db, manifest);
+  const hasChecksumColumn = ensureMigrationTable(db);
+  const applied = validateAppliedMigrations(db, manifest, hasChecksumColumn);
 
   const insertMigration = db.prepare(
     "INSERT INTO schema_migrations (version, name, checksum) VALUES (?, ?, ?)",

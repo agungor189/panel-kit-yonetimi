@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { beforeEach, describe, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { WarehouseService, WarehouseServiceError } from "./warehouseService.js";
-import { applySchema } from "../db/schema.js";
-import { getMigrationManifest, runMigrations } from "../migrations/runner.js";
+import { runMigrations } from "../migrations/runner.js";
+
+const historicalFixture = (version: 48 | 53): Database.Database => {
+  const legacy = new Database(":memory:");
+  legacy.exec(fs.readFileSync(fileURLToPath(new URL(`../db/fixtures/panel-v${version}.sql`, import.meta.url)), "utf8"));
+  return legacy;
+};
 
 const alper = { id: "user-1", username: "Alper" };
 const ayse = { id: "user-2", username: "Ayşe" };
@@ -312,16 +319,8 @@ describe("WarehouseService güvenli toplama akışı", () => {
 });
 
 test("v49 mevcut email kolonu olmayan panel veritabanını güvenle yükseltir", () => {
-  const legacy = new Database(":memory:");
-  legacy.exec(`
-    CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL);
-    INSERT INTO users (id, username, password_hash) VALUES ('legacy-user', 'Alper', 'hash');
-  `);
-  applySchema(legacy);
-  const insertApplied = legacy.prepare("INSERT INTO schema_migrations (version, name, checksum) VALUES (?, ?, ?)");
-  for (const migration of getMigrationManifest().filter(({ version }) => version <= 48)) {
-    insertApplied.run(migration.version, migration.name, migration.checksum);
-  }
+  const legacy = historicalFixture(48);
+  legacy.prepare("INSERT INTO users (id, username, password_hash) VALUES ('legacy-user', 'Alper', 'hash')").run();
   runMigrations(legacy);
 
   const userColumns = legacy.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
@@ -337,9 +336,7 @@ test("v49 mevcut email kolonu olmayan panel veritabanını güvenle yükseltir",
 });
 
 test("v54-v55 mevcut aktif mal kabulü snapshot, katalog ve kullanıcı işiyle kayıpsız yükseltir", () => {
-  const legacy = new Database(":memory:");
-  applySchema(legacy);
-  runMigrations(legacy);
+  const legacy = historicalFixture(53);
   legacy.prepare("INSERT INTO users (id, username, password_hash) VALUES ('legacy-user', 'Legacy', 'hash')").run();
   legacy.prepare("INSERT INTO products (id, title, sku, warehouse_location) VALUES ('legacy-product', 'Legacy ürün', 'LEG-1', 'A3-K2-P5')").run();
   legacy.prepare("INSERT INTO product_reserve_locations (id, product_id, location, sort_order) VALUES ('legacy-reserve', 'legacy-product', 'A3-K2-P6', 0)").run();
@@ -348,9 +345,7 @@ test("v54-v55 mevcut aktif mal kabulü snapshot, katalog ve kullanıcı işiyle 
     id, batch_id, line_number, supplier_code, product_id, sku_snapshot, product_name_snapshot,
     expected_package_count, units_per_package, last_package_units, total_units
   ) VALUES ('legacy-line', 'legacy-batch', 1, 'SUP-1', 'legacy-product', 'LEG-1', 'Legacy ürün', 1, 5, 5, 5)`).run();
-  legacy.prepare("DELETE FROM schema_migrations WHERE version = 54").run();
-
-  runMigrations(legacy);
+  runMigrations(legacy, 54);
 
   const line = legacy.prepare("SELECT planned_location_snapshot, reserve_locations_snapshot FROM inbound_batch_lines WHERE id = 'legacy-line'").get() as any;
   assert.equal(line.planned_location_snapshot, "A3-K2-P5");
@@ -360,9 +355,7 @@ test("v54-v55 mevcut aktif mal kabulü snapshot, katalog ve kullanıcı işiyle 
     package_number, total_packages, planned_quantity, remaining_quantity, status, claimed_by
   ) VALUES ('legacy-package', 'PKG-LEGACY', 'legacy-batch', 'legacy-line', 'legacy-product', 'SUP-1', 1, 1, 5, 5, 'LABELED', 'legacy-user')`).run();
   legacy.prepare("UPDATE inbound_batch_lines SET planned_location_snapshot = ' a3 - k2 - p5 '").run();
-  legacy.prepare("DELETE FROM schema_migrations WHERE version = 55").run();
-
-  runMigrations(legacy);
+  runMigrations(legacy, 55);
 
   assert.ok(legacy.prepare("SELECT id FROM warehouse_locations WHERE code = 'A3-K2-P5'").get());
   const activePackage = legacy.prepare("SELECT receiving_work_started_at, receiving_last_activity_at FROM warehouse_packages WHERE id = 'legacy-package'").get() as any;
@@ -372,18 +365,15 @@ test("v54-v55 mevcut aktif mal kabulü snapshot, katalog ve kullanıcı işiyle 
 });
 
 test("v56 yalnız otomatik senkronize edilmiş kapasitesi 1 olan rafları 4'e yükseltir", () => {
-  const legacy = new Database(":memory:");
-  applySchema(legacy);
-  runMigrations(legacy);
+  const legacy = historicalFixture(53);
+  runMigrations(legacy, 55);
   legacy.prepare(`INSERT INTO warehouse_locations (id, code, package_capacity, notes)
     VALUES ('auto-location', 'A8-K1-P1', 1, 'Mal Kabul V2 master lokasyon senkronizasyonu')`).run();
   legacy.prepare(`INSERT INTO warehouse_locations (id, code, package_capacity, notes)
     VALUES ('manual-location', 'A8-K1-P2', 1, 'Kullanıcı tarafından tanımlandı')`).run();
   legacy.prepare(`INSERT INTO warehouse_locations (id, code, package_capacity, notes)
     VALUES ('customized-auto-location', 'A8-K1-P3', 2, 'Mal Kabul V2 master lokasyon senkronizasyonu')`).run();
-  legacy.prepare("DELETE FROM schema_migrations WHERE version = 56").run();
-
-  runMigrations(legacy);
+  runMigrations(legacy, 56);
 
   assert.equal((legacy.prepare("SELECT package_capacity FROM warehouse_locations WHERE id = 'auto-location'").get() as any).package_capacity, 4);
   assert.equal((legacy.prepare("SELECT package_capacity FROM warehouse_locations WHERE id = 'manual-location'").get() as any).package_capacity, 1);
@@ -392,10 +382,9 @@ test("v56 yalnız otomatik senkronize edilmiş kapasitesi 1 olan rafları 4'e y�
 });
 
 test("v60 aktif fiziksel layoutu 4x7 olarak onarır ve eksik lokasyonları ilişkileri bozmadan tamamlar", () => {
-  const legacy = new Database(":memory:");
+  const legacy = historicalFixture(53);
   legacy.pragma("foreign_keys = ON");
-  applySchema(legacy);
-  runMigrations(legacy);
+  runMigrations(legacy, 59);
 
   const rackCodes = ["H1", "G2", "F1", "E2", "D4", "C2", "B2", "A2", "G1", "F2", "E1", "D3", "C1", "B1", "A1"];
   const fiveShelfRacks = new Set(["C2", "D3", "D4", "E1", "E2"]);
@@ -436,8 +425,6 @@ test("v60 aktif fiziksel layoutu 4x7 olarak onarır ve eksik lokasyonları iliş
     package_number, total_packages, planned_quantity, remaining_quantity, status, current_location_id
   ) VALUES ('preserved-package', 'PKG-LAYOUT', 'layout-batch', 'layout-line', 'layout-product', 'SUP-LAYOUT',
     1, 1, 4, 4, 'PLACED', 'preserved-location-id')`).run();
-  legacy.prepare("DELETE FROM schema_migrations WHERE version = 60").run();
-
   runMigrations(legacy);
 
   const repairedLayout = JSON.parse((legacy.prepare("SELECT layout_json FROM warehouse_layouts WHERE id = 'physical-layout'").get() as any).layout_json);
@@ -476,7 +463,6 @@ test("v60 aktif fiziksel layoutu 4x7 olarak onarır ve eksik lokasyonları iliş
     placement_priority: "LAST_RESORT",
   });
 
-  legacy.prepare("DELETE FROM schema_migrations WHERE version = 60").run();
   runMigrations(legacy);
   assert.equal((legacy.prepare("SELECT COUNT(*) AS count FROM warehouse_locations WHERE active = 1").get() as any).count, 420);
   assert.equal((legacy.prepare("SELECT current_location_id FROM warehouse_packages WHERE id = 'preserved-package'").get() as any).current_location_id, "preserved-location-id");
