@@ -47,6 +47,8 @@ export class InventoryService {
     receivedAt: string;
     location: { id: string; kind: LocationKind };
     operationId: string;
+    acceptedQuantityBaseInt?: number;
+    lotId?: string;
   }) {
     const receiptId = text(input.receiptId, "receiptId");
     const costSnapshotId = text(input.costSnapshotId, "costSnapshotId");
@@ -64,24 +66,27 @@ export class InventoryService {
       if (snapshot.state !== "COSTED_PENDING_RECEIPT" || snapshot.purchase_status !== "APPROVED") {
         throw new InventoryValidationError("COST_SNAPSHOT_NOT_RECEIVABLE", "Only an approved COSTED_PENDING_RECEIPT snapshot may create inventory.", 409);
       }
-      const lotId = `inventory-lot:${receiptId}`;
+      const quantity = input.acceptedQuantityBaseInt === undefined
+        ? Number(snapshot.quantity_base_int)
+        : positiveInteger(input.acceptedQuantityBaseInt, "acceptedQuantityBaseInt");
+      const lotId = input.lotId ? text(input.lotId, "lotId") : `inventory-lot:${receiptId}`;
       this.db.prepare(`INSERT INTO inventory_lots (
         id,receipt_id,acquisition_cost_snapshot_id,purchase_order_id,purchase_line_id,product_id,
         base_uom_code_snapshot,received_quantity_base_int,on_hand_base_int,reserved_base_int,status,
         received_at,receipt_operation_id,updated_at
       ) VALUES (?,?,?,?,?,?,?,?,?,0,'USABLE',?,?,?)`).run(
         lotId, receiptId, snapshot.id, snapshot.purchase_order_id, snapshot.purchase_line_id,
-        snapshot.product_id, snapshot.base_uom_code_snapshot, snapshot.quantity_base_int,
-        snapshot.quantity_base_int, receivedAt, operationId, receivedAt,
+        snapshot.product_id, snapshot.base_uom_code_snapshot, quantity,
+        quantity, receivedAt, operationId, receivedAt,
       );
       this.db.prepare(`INSERT INTO inventory_lot_location_balances
         (id,lot_id,location_id,location_kind,quantity_base_int,active,physical_state,updated_at)
-        VALUES (?,?,?,?,?,1,'CONFIRMED',?)`).run(randomUUID(), lotId, locationId, input.location.kind, snapshot.quantity_base_int, receivedAt);
+        VALUES (?,?,?,?,?,1,'CONFIRMED',?)`).run(randomUUID(), lotId, locationId, input.location.kind, quantity, receivedAt);
       this.db.prepare(`INSERT INTO inventory_ledger_events (
         id,operation_id,event_type,product_id,lot_id,quantity_delta_base_int,base_uom_code_snapshot,
         reason_code,reference_type,reference_id,occurred_at
       ) VALUES (?,?,'RECEIPT',?,?,?,?, 'APPROVED_GOODS_RECEIPT','goods_receipt',?,?)`).run(
-        randomUUID(), operationId, snapshot.product_id, lotId, snapshot.quantity_base_int,
+        randomUUID(), operationId, snapshot.product_id, lotId, quantity,
         snapshot.base_uom_code_snapshot, receiptId, receivedAt,
       );
       this.syncProjection(snapshot.product_id);
@@ -92,8 +97,8 @@ export class InventoryService {
           costSnapshotId,
           productId: snapshot.product_id,
           baseUomCode: snapshot.base_uom_code_snapshot,
-          receivedQuantityBaseInt: snapshot.quantity_base_int,
-          onHandBaseInt: snapshot.quantity_base_int,
+          receivedQuantityBaseInt: quantity,
+          onHandBaseInt: quantity,
           reservedBaseInt: 0,
           receivedAt,
           status: "USABLE" as const,

@@ -1,12 +1,13 @@
 import express from "express";
 import Database from "better-sqlite3";
 import { WarehousePicker, WarehouseService, WarehouseServiceError } from "../services/warehouseService.js";
-import { normalizeWarehouseLocationCode, WarehouseAdminService, type WarehouseActor } from "../services/warehouseAdminService.js";
+import { WarehouseAdminService, type WarehouseActor } from "../services/warehouseAdminService.js";
 import { resolveStoredUpload } from "../services/uploadSecurity.js";
 import { CommandExecutor, CommandFoundationError } from "../modules/commands/commandFoundation.js";
 import { CatalogService } from "../modules/catalog/catalogService.js";
 import { UOM_DEFINITIONS, UOM_REGISTRY_VERSION } from "../modules/catalog/uom.js";
 import { InventoryService, InventoryValidationError } from "../modules/inventory/inventoryService.js";
+import { WarehouseExecutionError, WarehouseExecutionService, type WarehouseTopologyInput } from "../modules/warehouse/warehouseExecutionService.js";
 
 type WarehouseUser = WarehousePicker & {
   role: string;
@@ -64,6 +65,7 @@ export function createWarehouseRouter({
   const commandExecutor = new CommandExecutor(db);
   const catalogService = new CatalogService(db);
   const inventoryService = new InventoryService(db);
+  const executionService = new WarehouseExecutionService(db);
 
   const authenticate = (requiredPermissions: string | string[]) => (
     req: express.Request,
@@ -212,6 +214,9 @@ export function createWarehouseRouter({
     if (error instanceof InventoryValidationError) {
       return errorResponse(res, error.statusCode, error.code, error.message);
     }
+    if (error instanceof WarehouseExecutionError) {
+      return errorResponse(res, error.statusCode, error.code, error.message);
+    }
     throw error;
   };
 
@@ -253,6 +258,161 @@ export function createWarehouseRouter({
     const source = queryText(value, 40);
     return source && Number.isFinite(new Date(source).getTime()) ? source : undefined;
   };
+
+  const executeWarehouseCommand = (
+    req: express.Request,
+    res: express.Response,
+    capability: string,
+    commandType: string,
+    payload: Record<string, unknown>,
+    handler: (context: { addOutbox(message: { topic: string; eventType: string; payload: unknown; aggregateType?: string; aggregateId?: string }): void }) => unknown,
+  ) => {
+    const outcome = commandExecutor.execute<any>(commandRequest(req, res, commandType, capability, payload), (context) => ({
+      statusCode: 200,
+      body: { success: true, contract: "dsdst.warehouse-execution.v1", data: handler(context) },
+    }));
+    return res.status(outcome.result.statusCode).json({ ...outcome.result.body, idempotent: outcome.replayed });
+  };
+
+  router.get("/execution/topology", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:view_map"), (req, res) => {
+    try { auditRead(req); return res.json({ success: true, contract: "dsdst.warehouse-topology.v1", data: executionService.getTopology() }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/execution/topology", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:manage_locations"), (req, res) => {
+    try {
+      const payload = { topology: req.body?.topology ?? null };
+      return executeWarehouseCommand(req, res, "warehouse:manage_locations", "warehouse.topology.configure.v1", payload, (context) => {
+        const data = executionService.configureTopology(payload.topology as WarehouseTopologyInput);
+        context.addOutbox({ topic: "warehouse", eventType: "warehouse.topology.configured.v1", aggregateType: "warehouse_topology", aggregateId: data.id, payload: { topology_id: data.id, config_hash: data.configHash } });
+        return data;
+      });
+    } catch (error) { return handleServiceError(res, error); }
+  });
+  router.get("/execution/settings", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:view_map"), (req, res) => {
+    auditRead(req); return res.json({ success: true, contract: "dsdst.warehouse-settings.v1", data: executionService.getSettings() });
+  });
+  router.post("/execution/settings", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:manage_locations"), (req, res) => {
+    try {
+      const payload = { watchThresholdPct: req.body?.watchThresholdPct ?? null, prepareThresholdPct: req.body?.prepareThresholdPct ?? null, heavyPackageThresholdGrams: req.body?.heavyPackageThresholdGrams ?? null };
+      return executeWarehouseCommand(req, res, "warehouse:manage_locations", "warehouse.settings.configure.v1", payload, (context) => {
+        const data = executionService.configureSettings(payload as any);
+        context.addOutbox({ topic: "warehouse", eventType: "warehouse.settings.configured.v1", aggregateType: "warehouse_settings", aggregateId: "default", payload: data });
+        return data;
+      });
+    } catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/execution/receipts/excess-approvals", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("inventory:receive"), (req, res) => {
+    try {
+      const payload = { approvalId: req.body?.approvalId ?? null, costSnapshotId: req.body?.costSnapshotId ?? null, maximumAcceptedQuantityBaseInt: req.body?.maximumAcceptedQuantityBaseInt ?? null, reason: req.body?.reason ?? null, approvedAt: req.body?.approvedAt ?? null };
+      return executeWarehouseCommand(req, res, "inventory:receive", "warehouse.goods-receipt.excess-approve.v1", payload, (context) => {
+        const data = executionService.approveExcess({ ...payload, operationId: operationIdFromRequest(req) } as any);
+        context.addOutbox({ topic: "warehouse", eventType: "warehouse.goods-receipt.excess-approved.v1", aggregateType: "warehouse_excess_approval", aggregateId: data.id, payload: { approval_id: data.id, cost_snapshot_id: data.costSnapshotId } });
+        return data;
+      });
+    } catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/execution/receipts", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (req, res) => {
+    try {
+      const { idempotency_key: _idempotencyKey, ...payload } = req.body || {};
+      return executeWarehouseCommand(req, res, "inventory:receive", "warehouse.goods-receipt.accept.v1", payload, (context) => {
+        const data = executionService.receiveGoods({ ...payload, operationId: operationIdFromRequest(req) });
+        context.addOutbox({ topic: "warehouse", eventType: "warehouse.goods-receipt.accepted.v1", aggregateType: "warehouse_goods_receipt", aggregateId: data.id, payload: { receipt_id: data.id, product_id: data.productId, inventory_lot_id: data.inventoryLotId, accepted_quantity_base_int: data.acceptedQuantityBaseInt } });
+        return data;
+      });
+    } catch (error) { return handleServiceError(res, error); }
+  });
+  router.get("/execution/packages/:id", authenticate("read:products"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:receive", "warehouse:place_packages", "warehouse:move_stock", "warehouse:count_stock"]), (req, res) => {
+    try { auditRead(req); return res.json({ success: true, contract: "dsdst.warehouse-package.v1", data: executionService.getPackage(req.params.id) }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/execution/packages/:id/identity", authenticate("write:warehouse_status"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:receive", "warehouse:print_labels"]), (req, res) => {
+    try {
+      const payload = { packageId: req.params.id, labelIdentity: req.body?.labelIdentity ?? null };
+      return executeWarehouseCommand(req, res, "warehouse:print_labels", "warehouse.package.identify.v1", payload, (context) => {
+        const data = executionService.identifyPackage(payload as any);
+        context.addOutbox({ topic: "warehouse", eventType: "warehouse.package.identified.v1", aggregateType: "warehouse_package", aggregateId: data.id, payload: { package_id: data.id, label_identity: data.labelIdentity } });
+        return data;
+      });
+    } catch (error) { return handleServiceError(res, error); }
+  });
+  router.get("/execution/packages/:id/suggestion", authenticate("read:products"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:receive", "warehouse:place_packages", "warehouse:move_stock"]), (req, res) => {
+    try { auditRead(req); return res.json({ success: true, contract: "dsdst.warehouse-placement-suggestion.v1", data: executionService.suggestLocation(req.params.id) }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/execution/packages/:id/place", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:place_packages"), (req, res) => {
+    try {
+      const payload = { packageId: req.params.id, destinationCode: req.body?.destinationCode ?? null, scannedDestinationCode: req.body?.scannedDestinationCode ?? null, placedAt: req.body?.placedAt ?? null };
+      return executeWarehouseCommand(req, res, "warehouse:place_packages", "warehouse.package.place.v1", payload, (context) => {
+        const data = executionService.placePackage({ ...payload, operationId: operationIdFromRequest(req) } as any);
+        context.addOutbox({ topic: "warehouse", eventType: "warehouse.package.placed.v1", aggregateType: "warehouse_package", aggregateId: data.package.id, payload: { package_id: data.package.id, destination_code: data.destination.code } });
+        return data;
+      });
+    } catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/execution/packages/:id/move", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:move_stock"), (req, res) => {
+    try {
+      const payload = { packageId: req.params.id, destinationCode: req.body?.destinationCode ?? null, scannedDestinationCode: req.body?.scannedDestinationCode ?? null, movedAt: req.body?.movedAt ?? null };
+      return executeWarehouseCommand(req, res, "warehouse:move_stock", "warehouse.package.move.v1", payload, (context) => {
+        const data = executionService.movePackage({ ...payload, operationId: operationIdFromRequest(req) } as any);
+        context.addOutbox({ topic: "warehouse", eventType: "warehouse.package.moved.v1", aggregateType: "warehouse_package", aggregateId: data.package.id, payload: { package_id: data.package.id, destination_code: data.destination.code } });
+        return data;
+      });
+    } catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/execution/replenishments/prepare", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:move_stock"), (req, res) => {
+    try {
+      const payload = { productId: req.body?.productId ?? null };
+      return executeWarehouseCommand(req, res, "warehouse:move_stock", "warehouse.replenishment.prepare.v1", payload, (context) => {
+        const data = executionService.prepareReplenishment({ ...payload, operationId: operationIdFromRequest(req) } as any);
+        context.addOutbox({ topic: "warehouse", eventType: `warehouse.replenishment.${String(data.state).toLowerCase()}.v1`, aggregateType: "warehouse_replenishment", aggregateId: data.id ?? data.lotId, payload: { product_id: data.productId, lot_id: data.lotId, state: data.state } });
+        return data;
+      });
+    } catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/execution/replenishments/:id/complete", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:move_stock"), (req, res) => {
+    try {
+      const payload = { taskId: req.params.id, destinationCode: req.body?.destinationCode ?? null, scannedDestinationCode: req.body?.scannedDestinationCode ?? null, movedAt: req.body?.movedAt ?? null };
+      return executeWarehouseCommand(req, res, "warehouse:move_stock", "warehouse.replenishment.complete.v1", payload, (context) => {
+        const data = executionService.completeReplenishment({ ...payload, operationId: operationIdFromRequest(req) } as any);
+        context.addOutbox({ topic: "warehouse", eventType: "warehouse.replenishment.completed.v1", aggregateType: "warehouse_replenishment", aggregateId: data.id, payload: { task_id: data.id, lot_id: data.lotId } });
+        return data;
+      });
+    } catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/execution/discrepancies", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:count_stock"), (req, res) => {
+    try {
+      const { idempotency_key: _idempotencyKey, ...payload } = req.body || {};
+      return executeWarehouseCommand(req, res, "warehouse:count_stock", "warehouse.stock-discrepancy.report.v1", payload, (context) => {
+        const data = executionService.reportDiscrepancy({ ...payload, operationId: operationIdFromRequest(req) });
+        context.addOutbox({ topic: "warehouse", eventType: "warehouse.stock-discrepancy.reported.v1", aggregateType: "warehouse_discrepancy", aggregateId: data.id, payload: { discrepancy_id: data.id, lot_id: data.lotId } });
+        return data;
+      });
+    } catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/execution/counts", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:count_stock"), (req, res) => {
+    try {
+      const { idempotency_key: _idempotencyKey, ...payload } = req.body || {};
+      return executeWarehouseCommand(req, res, "warehouse:count_stock", "warehouse.stock-count.record.v1", payload, (context) => {
+        const data = executionService.recordCount({ ...payload, operationId: operationIdFromRequest(req) });
+        context.addOutbox({ topic: "warehouse", eventType: "warehouse.stock-count.recorded.v1", aggregateType: "warehouse_stock_count", aggregateId: data.id, payload: { count_id: data.id, package_id: data.packageId, status: data.status } });
+        return data;
+      });
+    } catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/execution/counts/:id/approve", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("inventory:correct"), (req, res) => {
+    try {
+      const payload = { countId: req.params.id, approvalReference: req.body?.approvalReference ?? null, approvedAt: req.body?.approvedAt ?? null };
+      return executeWarehouseCommand(req, res, "inventory:correct", "warehouse.stock-count.approve.v1", payload, (context) => {
+        const data = executionService.approveCount({ ...payload, operationId: operationIdFromRequest(req) } as any);
+        context.addOutbox({ topic: "warehouse", eventType: "warehouse.stock-count.approved.v1", aggregateType: "warehouse_stock_count", aggregateId: data.id, payload: { count_id: data.id, difference_base_int: data.differenceBaseInt } });
+        return data;
+      });
+    } catch (error) { return handleServiceError(res, error); }
+  });
+  router.get("/execution/products/:id/reconciliation", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:view_analytics"), (req, res) => {
+    try { auditRead(req); return res.json({ success: true, contract: "dsdst.warehouse-reconciliation.v1", data: executionService.getReconciliation(req.params.id) }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
 
   router.get("/catalog/products", authenticate("read:products"), requireWarehouseUser, (req, res) => {
     const requested = typeof req.query.catalog_type === "string" ? req.query.catalog_type : undefined;
@@ -661,39 +821,13 @@ export function createWarehouseRouter({
     catch (error) { return handleServiceError(res, error); }
   });
   router.post("/admin/placements", authenticate("write:warehouse_status"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:place_packages", "warehouse:receive"]), (req, res) => {
-    const currentActor = actor(res);
-    if (req.body?.override_reason && !userHasWarehousePermission(currentActor, "warehouse:move_stock")) {
-      return errorResponse(res, 403, "FORBIDDEN", "Sıra atlama için warehouse:move_stock yetkisi gerekli.");
-    }
-    try {
-      const result = adminService.placePackage(String(req.body?.package_code || ""), String(req.body?.location_code || ""), req.body || {}, currentActor);
-      res.json({ success: true, data: result, idempotent: result.idempotent });
-    } catch (error) { return handleServiceError(res, error); }
+    return errorResponse(res, 410, "V2_WAREHOUSE_EXECUTION_REQUIRED", "Legacy placement is closed; use /execution/packages/:id/place.");
   });
   router.post("/admin/moves", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:move_stock"), (req, res) => {
-    try {
-      const input = req.body || {};
-      const operationId = operationIdFromRequest(req);
-      const packageCode = String(input.package_code || "").trim().toLocaleUpperCase("tr-TR");
-      const locationCode = normalizeWarehouseLocationCode(input.location_code);
-      const outcome = commandExecutor.execute(commandRequest(
-        req,
-        res,
-        "warehouse.package.move.v1",
-        "warehouse:move_stock",
-        { package_code: packageCode, location_code: locationCode },
-      ), () => {
-        const result = adminService.movePackage(packageCode, locationCode, { ...input, idempotency_key: operationId }, actor(res));
-        return { statusCode: 200, body: { success: true, data: result, idempotent: result.idempotent } };
-      });
-      res.status(outcome.result.statusCode).json(outcome.result.body);
-    } catch (error) { return handleServiceError(res, error); }
+    return errorResponse(res, 410, "V2_WAREHOUSE_EXECUTION_REQUIRED", "Legacy movement is closed; use /execution/packages/:id/move.");
   });
   router.post("/admin/stock-counts", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:count_stock"), (req, res) => {
-    try {
-      const result = adminService.countPackage(String(req.body?.package_code || ""), req.body?.counted_quantity, req.body || {}, actor(res));
-      res.json({ success: true, data: result, idempotent: result.idempotent });
-    } catch (error) { return handleServiceError(res, error); }
+    return errorResponse(res, 410, "V2_WAREHOUSE_EXECUTION_REQUIRED", "Legacy count mutation is closed; use /execution/counts.");
   });
 
   router.get("/admin/label-templates", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:edit_label_templates"), (_req, res) => {

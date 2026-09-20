@@ -246,7 +246,7 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     }
   });
 
-  test("temsilî move ve location-print commandları exact replay, payload conflict ve actor audit uygular", async () => {
+  test("legacy move fail-closed olur; location-print exact replay, payload conflict ve actor audit uygular", async () => {
     db.prepare(`INSERT INTO panel_api_keys (id, name, key_prefix, key_hash, last4, permissions)
       VALUES ('warehouse-command-key', 'Warehouse Command', 'test', 'command-secret', 'cret', ?)`)
       .run(JSON.stringify(["read:products", "write:warehouse_status"]));
@@ -284,15 +284,9 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
       const moveBody = { package_code: pkg.package_code, location_code: locationB.code, idempotency_key: "command-move" };
       const firstMove = await call("/admin/moves", moveBody);
       const firstMoveJson = await firstMove.json() as any;
-      assert.equal(firstMove.status, 200);
-      const replayMove = await call("/admin/moves", moveBody);
-      assert.equal(replayMove.status, 200);
-      assert.deepEqual(await replayMove.json(), firstMoveJson);
-
-      const conflictMove = await call("/admin/moves", { ...moveBody, location_code: locationC.code });
-      assert.equal(conflictMove.status, 409);
-      assert.equal((await conflictMove.json() as any).error.code, "IDEMPOTENCY_KEY_CONFLICT");
-      assert.equal((db.prepare("SELECT COUNT(*) FROM package_placements WHERE action = 'MOVE'").pluck().get()), 1);
+      assert.equal(firstMove.status, 410);
+      assert.equal(firstMoveJson.error.code, "V2_WAREHOUSE_EXECUTION_REQUIRED");
+      assert.equal((db.prepare("SELECT COUNT(*) FROM package_placements WHERE action = 'MOVE'").pluck().get()), 0);
 
       const printBody = { idempotency_key: "command-location-print", printer_name: "dry-run-printer" };
       const firstPrint = await call(`/admin/locations/${locationC.id}/print`, printBody);
@@ -317,17 +311,8 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
           request_id: "warehouse-request",
           command_type: "warehouse.location-label.queue.v1",
         },
-        {
-          human_actor_id: actor.id,
-          human_actor_name: actor.username,
-          service_actor_id: "warehouse-command-key",
-          service_actor_name: "Warehouse Command",
-          correlation_id: "warehouse-correlation",
-          request_id: "warehouse-request",
-          command_type: "warehouse.package.move.v1",
-        },
       ]);
-      assert.equal(db.prepare("SELECT COUNT(*) FROM command_operations").pluck().get(), 2);
+      assert.equal(db.prepare("SELECT COUNT(*) FROM command_operations").pluck().get(), 1);
     } finally {
       await new Promise<void>((resolve, reject) => http.close((error) => error ? reject(error) : resolve()));
     }
@@ -369,6 +354,15 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
       ["GET", "/admin/packages/test/receiving-location"], ["POST", "/admin/locations"],
       ["POST", "/admin/placements"], ["POST", "/admin/moves"], ["POST", "/admin/stock-counts"],
       ["GET", "/admin/label-templates"], ["POST", "/admin/label-templates"],
+      ["GET", "/execution/topology"], ["POST", "/execution/topology"],
+      ["GET", "/execution/settings"], ["POST", "/execution/settings"],
+      ["POST", "/execution/receipts"], ["POST", "/execution/receipts/excess-approvals"],
+      ["GET", "/execution/packages/test"], ["GET", "/execution/packages/test/suggestion"],
+      ["POST", "/execution/packages/test/identity"], ["POST", "/execution/packages/test/place"],
+      ["POST", "/execution/packages/test/move"], ["POST", "/execution/replenishments/prepare"],
+      ["POST", "/execution/replenishments/test/complete"], ["POST", "/execution/discrepancies"],
+      ["POST", "/execution/counts"], ["POST", "/execution/counts/test/approve"],
+      ["GET", "/execution/products/test/reconciliation"],
     ];
     try {
       for (const [method, route] of routes) {
