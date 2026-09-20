@@ -1,5 +1,6 @@
 import "dotenv/config";
 import crypto from "node:crypto";
+import bcrypt from "bcrypt";
 import { initializeDatabase, openDatabase } from "../server/db/initialize.js";
 
 if (process.env.NODE_ENV !== "test" || process.env.E2E_ALLOW_SEED !== "true") {
@@ -15,6 +16,16 @@ if (!dbPath || !clearApiKey || !hashSecret) {
 
 const db = openDatabase(dbPath);
 initializeDatabase(db);
+
+db.prepare(`
+  INSERT INTO users (id, username, password_hash, role, must_change_password, is_active)
+  VALUES ('operations-e2e-admin', 'admin', ?, 'admin', 1, 1)
+  ON CONFLICT(username) DO UPDATE SET
+    password_hash = excluded.password_hash,
+    role = 'admin',
+    must_change_password = 1,
+    is_active = 1
+`).run(bcrypt.hashSync("admin", 4));
 
 const permissions = [
   "read:warehouse_orders",
@@ -52,4 +63,3 @@ db.prepare(`
 
 db.close();
 console.log("Operations E2E fixtures are ready in the isolated test database.");
-
