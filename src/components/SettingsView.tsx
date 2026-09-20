@@ -24,7 +24,7 @@ import {
   Upload
 } from 'lucide-react';
 import { useCurrency } from '../CurrencyContext';
-import { api, getToken } from '../lib/api';
+import { api } from '../lib/api';
 import { useAuth } from '../App';
 import { Settings, type BackupConfig, type BackupRun, type BackupStatus, type ManagedUser, type UserRole } from '../types';
 import { clsx, type ClassValue } from 'clsx';
@@ -41,6 +41,13 @@ interface SettingsViewProps {
 const APP_PERMISSIONS = [
   ['panel:read', 'Panel görüntüleme'],
   ['panel:write', 'Panel veri düzenleme'],
+  ['identity:admin', 'Kullanıcı ve yetki yönetimi'],
+  ['integrations:admin', 'Entegrasyon ve service principal yönetimi'],
+  ['backup:admin', 'Yedekleme ve geri yükleme yönetimi'],
+  ['catalog:admin', 'Katalog silme yönetimi'],
+  ['settings:admin', 'Sistem ayarları yönetimi'],
+  ['maintenance:admin', 'Bakım operasyonları'],
+  ['finance:write', 'Manuel gider ve kasa işlemleri'],
   ['kits:view', 'Kit Studio görüntüleme'],
   ['kits:write', 'Kit Studio taslak düzenleme'],
   ['kits:approve', 'Kit Studio versiyon onayı'],
@@ -193,9 +200,7 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
     setLoading(true);
     try {
       const res = await fetch('/api/backup/download', {
-        headers: {
-          Authorization: `Bearer ${getToken() || ''}`,
-        },
+        credentials: 'same-origin',
       });
 
       if (!res.ok) {
@@ -257,7 +262,7 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
   const downloadStoredBackup = async (run: BackupRun) => {
     try {
       const res = await fetch(`/api/backup/files/${run.id}/download`, {
-        headers: { Authorization: `Bearer ${getToken() || ''}` },
+        credentials: 'same-origin',
       });
       if (!res.ok) {
         let message = "Yedek indirilemedi.";
@@ -1265,8 +1270,7 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
                      
                      const xhr = new XMLHttpRequest();
                      xhr.open("POST", "/api/backup/restore", true);
-                     const token = getToken();
-                     if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+                     xhr.withCredentials = true;
                      
                      xhr.upload.onprogress = (event) => {
                        if (event.lengthComputable) {

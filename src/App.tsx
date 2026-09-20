@@ -114,11 +114,6 @@ export default function App() {
 
   useEffect(() => {
     const verifyToken = async () => {
-      const token = localStorage.getItem('token');
-      if (!token) {
-        setIsCheckingAuth(false);
-        return;
-      }
       try {
         const res = await api.get('/auth/me');
         if (res.success) {
@@ -127,13 +122,11 @@ export default function App() {
           loadSettings();
           fetchRate();
         } else {
-          localStorage.removeItem('token');
-          localStorage.removeItem('userRole');
+          setIsAuthenticated(false);
         }
       } catch (err) {
         console.error("Auth verification failed", err);
-        localStorage.removeItem('token');
-        localStorage.removeItem('userRole');
+        setIsAuthenticated(false);
       } finally {
         setIsCheckingAuth(false);
       }
@@ -167,8 +160,6 @@ export default function App() {
   const handleConfirmLogout = async () => {
     try {
       await api.post('/auth/logout', {});
-      localStorage.removeItem('token');
-      localStorage.removeItem('userRole');
     } catch {
       return;
     }

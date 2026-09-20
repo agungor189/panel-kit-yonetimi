@@ -19,7 +19,6 @@ export default function LoginPage({ onLogin }: Props) {
   const [loginLoading, setLoginLoading] = useState(false);
 
   // change-password form state
-  const [pendingToken, setPendingToken] = useState('');
   const [pendingRole, setPendingRole]   = useState<UserRole>('user');
   const [currentPw,  setCurrentPw]      = useState('');
   const [newPw,      setNewPw]          = useState('');
@@ -33,17 +32,13 @@ export default function LoginPage({ onLogin }: Props) {
     setLoginError('');
     try {
       const res = await api.post('/auth/login', { username, password });
-      if (res.success && res.token) {
+      if (res.success && res.user) {
         if (res.user.must_change_password) {
-          // Store token temporarily so change-password can call the endpoint.
-          setPendingToken(res.token);
           setPendingRole(normalizeRole(res.user.role));
           setCurrentPw(password); // pre-fill current password
           setView('change-password');
         } else {
           const role = normalizeRole(res.user.role);
-          localStorage.setItem('token', res.token);
-          localStorage.setItem('userRole', role);
           onLogin(role);
         }
       } else {
@@ -69,23 +64,9 @@ export default function LoginPage({ onLogin }: Props) {
     }
     setCpLoading(true);
     try {
-      const res = await fetch('/api/auth/change-password', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${pendingToken}`,
-        },
-        body: JSON.stringify({ current_password: currentPw, new_password: newPw }),
-      });
-      const data = await res.json();
+      const data = await api.post('/auth/change-password', { current_password: currentPw, new_password: newPw });
       if (data.success) {
-        // Re-login with new password to get a fresh token.
-        const loginRes = await api.post('/auth/login', { username, password: newPw });
-        if (loginRes.success && loginRes.token) {
-          localStorage.setItem('token', loginRes.token);
-          localStorage.setItem('userRole', pendingRole);
-          onLogin(pendingRole);
-        }
+        onLogin(pendingRole);
       } else {
         setCpError(data.error?.message || 'Şifre değiştirilemedi.');
       }

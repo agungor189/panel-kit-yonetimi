@@ -1,15 +1,4 @@
-import type { UserRole } from '../types';
-
 const API_URL = "";
-
-export const getToken = () => localStorage.getItem('token');
-
-const checkAccess = () => {
-  const role = localStorage.getItem('userRole') as UserRole | null;
-  if (role === 'readonly') {
-    throw new Error('Yetkisiz işlem. Yalnızca okuma izniniz var.');
-  }
-};
 
 const handleResponse = async (res: Response, skip401Reload = false) => {
   let data;
@@ -25,13 +14,8 @@ const handleResponse = async (res: Response, skip401Reload = false) => {
     (res.status === 403 && data?.error?.code === 'USER_DISABLED');
 
   if (shouldClearSession && !skip401Reload) {
-    const hadToken = !!localStorage.getItem('token');
-    localStorage.removeItem('token');
-    localStorage.removeItem('userRole');
-    if (hadToken) {
-       window.location.href = '/'; 
-       return; // stop execution
-    }
+    window.location.href = '/';
+    return;
   }
   
   if (jsonError && !res.ok) {
@@ -47,59 +31,48 @@ const handleResponse = async (res: Response, skip401Reload = false) => {
 export const api = {
   get: async (endpoint: string) => {
     const res = await fetch(`${API_URL}/api${endpoint}`, {
-      headers: { "Authorization": `Bearer ${getToken()}` }
+      credentials: 'same-origin',
     });
     return handleResponse(res, endpoint.startsWith('/auth/'));
   },
   post: async (endpoint: string, data: any) => {
-    if (!endpoint.startsWith('/auth/')) checkAccess();
     const res = await fetch(`${API_URL}/api${endpoint}`, {
       method: "POST",
-      headers: { 
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${getToken()}`
-      },
+      credentials: 'same-origin',
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
     });
     return handleResponse(res, endpoint.startsWith('/auth/'));
   },
   put: async (endpoint: string, data: any) => {
-    checkAccess();
     const res = await fetch(`${API_URL}/api${endpoint}`, {
       method: "PUT",
-      headers: { 
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${getToken()}`
-      },
+      credentials: 'same-origin',
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
     });
     return handleResponse(res);
   },
   patch: async (endpoint: string, data: any) => {
-    checkAccess();
     const res = await fetch(`${API_URL}/api${endpoint}`, {
       method: "PATCH",
-      headers: { 
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${getToken()}`
-      },
+      credentials: 'same-origin',
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
     });
     return handleResponse(res);
   },
   delete: async (endpoint: string) => {
-    checkAccess();
     const res = await fetch(`${API_URL}/api${endpoint}`, {
       method: "DELETE",
-      headers: { "Authorization": `Bearer ${getToken()}` }
+      credentials: 'same-origin',
     });
     return handleResponse(res);
   },
   upload: async (endpoint: string, formData: FormData) => {
-    checkAccess();
     const res = await fetch(`${API_URL}/api${endpoint}`, {
       method: "POST",
-      headers: { "Authorization": `Bearer ${getToken()}` },
+      credentials: 'same-origin',
       body: formData,
     });
     return handleResponse(res);

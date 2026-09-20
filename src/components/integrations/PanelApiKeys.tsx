@@ -8,7 +8,7 @@ import toast, { Toaster } from 'react-hot-toast';
 const AVAILABLE_PERMISSIONS = [
   'products:read', 'products:write', 'stock:read', 'stock:write',
   'orders:read', 'orders:write', 'sales:read',
-  'expenses:read', 'expenses:write',
+  'expenses:read',
   'dashboard:read', 'movements:read', 'integrations:read',
   'assistant:read',
   'read:warehouse_orders', 'read:products', 'read:bom', 'write:warehouse_status'
