@@ -6,6 +6,7 @@ import { resolveStoredUpload } from "../services/uploadSecurity.js";
 import { CommandExecutor, CommandFoundationError } from "../modules/commands/commandFoundation.js";
 import { CatalogService } from "../modules/catalog/catalogService.js";
 import { UOM_DEFINITIONS, UOM_REGISTRY_VERSION } from "../modules/catalog/uom.js";
+import { InventoryService, InventoryValidationError } from "../modules/inventory/inventoryService.js";
 
 type WarehouseUser = WarehousePicker & {
   role: string;
@@ -62,6 +63,7 @@ export function createWarehouseRouter({
   });
   const commandExecutor = new CommandExecutor(db);
   const catalogService = new CatalogService(db);
+  const inventoryService = new InventoryService(db);
 
   const authenticate = (requiredPermissions: string | string[]) => (
     req: express.Request,
@@ -207,6 +209,9 @@ export function createWarehouseRouter({
     if (error instanceof CommandFoundationError) {
       return errorResponse(res, error.statusCode, error.code, error.message);
     }
+    if (error instanceof InventoryValidationError) {
+      return errorResponse(res, error.statusCode, error.code, error.message);
+    }
     throw error;
   };
 
@@ -269,6 +274,83 @@ export function createWarehouseRouter({
       },
     });
   });
+
+  router.get("/inventory/products/:id/availability", authenticate("read:products"), requireWarehouseUser,
+    requireAnyWarehousePermission(["warehouse:receive", "warehouse:pick_orders", "warehouse:view_analytics"]), (req, res) => {
+      try {
+        auditRead(req);
+        return res.json({ success: true, contract: "dsdst.inventory-availability.v1", data: inventoryService.getProductAvailability(req.params.id) });
+      } catch (error) { return handleServiceError(res, error); }
+    });
+  router.get("/inventory/reservations/:id/fulfillment", authenticate("read:warehouse_orders"), requireWarehouseUser,
+    requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
+      try {
+        auditRead(req);
+        return res.json({ success: true, contract: "dsdst.inventory-fulfillment.v1", data: inventoryService.getFulfillmentState(req.params.id) });
+      } catch (error) { return handleServiceError(res, error); }
+    });
+
+  router.post("/inventory/receipts", authenticate("write:warehouse_status"), requireWarehouseUser,
+    requireWarehousePermission("warehouse:receive"), (req, res) => {
+      try {
+        const payload = {
+          receiptId: req.body?.receiptId ?? null,
+          costSnapshotId: req.body?.costSnapshotId ?? null,
+          receivedAt: req.body?.receivedAt ?? null,
+          location: req.body?.location ?? null,
+        };
+        const outcome = commandExecutor.execute(commandRequest(req, res, "inventory.receipt.approve.v1", "inventory:receive", payload), (context) => {
+          const data = inventoryService.receiveCostedLot({ ...payload, operationId: operationIdFromRequest(req) } as any);
+          context.addOutbox({ topic: "inventory", eventType: "inventory.receipt.posted.v1", aggregateType: "inventory_lot", aggregateId: data.lot.id, payload: { lot_id: data.lot.id, product_id: data.lot.productId, quantity_base_int: data.lot.receivedQuantityBaseInt } });
+          return { statusCode: 201, body: { success: true, contract: "dsdst.inventory-receipt.v1", data } };
+        });
+        return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
+      } catch (error) { return handleServiceError(res, error); }
+    });
+
+  for (const transition of ["pick", "pack"] as const) {
+    router.post(`/inventory/reservations/:id/${transition}`, authenticate("write:warehouse_status"), requireWarehouseUser,
+      requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
+        try {
+          const payload = { reservationId: req.params.id, at: req.body?.at ?? null };
+          const commandType = `inventory.reservation.${transition}.v1`;
+          const outcome = commandExecutor.execute(commandRequest(req, res, commandType, "warehouse:pick_orders", payload), (context) => {
+            const data = transition === "pick"
+              ? inventoryService.markPicked({ reservationId: req.params.id, pickedAt: req.body?.at, operationId: operationIdFromRequest(req) })
+              : inventoryService.markPacked({ reservationId: req.params.id, packedAt: req.body?.at, operationId: operationIdFromRequest(req) });
+            context.addOutbox({ topic: "inventory", eventType: `inventory.reservation.${transition}ed.v1`, aggregateType: "reservation", aggregateId: data.id, payload: { reservation_id: data.id } });
+            return { statusCode: 200, body: { success: true, contract: "dsdst.inventory-reservation.v1", data } };
+          });
+          return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
+        } catch (error) { return handleServiceError(res, error); }
+      });
+  }
+
+  router.post("/inventory/reservations/:id/dispatch", authenticate("write:warehouse_status"), requireWarehouseUser,
+    requireWarehousePermission("shipping:dispatch"), (req, res) => {
+      try {
+        const payload = { reservationId: req.params.id, shipmentId: req.body?.shipmentId ?? null, dispatchedAt: req.body?.dispatchedAt ?? null };
+        const outcome = commandExecutor.execute(commandRequest(req, res, "inventory.reservation.dispatch.v1", "shipping:dispatch", payload), (context) => {
+          const data = inventoryService.dispatchReservation({ ...payload, operationId: operationIdFromRequest(req) } as any);
+          context.addOutbox({ topic: "inventory", eventType: "inventory.shipment.dispatched.v1", aggregateType: "reservation", aggregateId: data.id, payload: { reservation_id: data.id, shipment_id: data.shipmentId } });
+          return { statusCode: 200, body: { success: true, contract: "dsdst.inventory-dispatch.v1", data } };
+        });
+        return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
+      } catch (error) { return handleServiceError(res, error); }
+    });
+
+  router.post("/inventory/reservations/:id/discrepancies", authenticate("write:warehouse_status"), requireWarehouseUser,
+    requireWarehousePermission("warehouse:count_stock"), (req, res) => {
+      try {
+        const payload = { reservationId: req.params.id, lotId: req.body?.lotId ?? null, locationId: req.body?.locationId ?? null, reason: req.body?.reason ?? null };
+        const outcome = commandExecutor.execute(commandRequest(req, res, "inventory.stock-discrepancy.report.v1", "warehouse:count_stock", payload), (context) => {
+          const data = inventoryService.reportStockDiscrepancy({ ...payload, operationId: operationIdFromRequest(req) } as any);
+          context.addOutbox({ topic: "inventory", eventType: "inventory.stock-discrepancy.reported.v1", aggregateType: "reservation", aggregateId: req.params.id, payload: { reservation_id: req.params.id, lot_id: payload.lotId } });
+          return { statusCode: 200, body: { success: true, contract: "dsdst.inventory-fulfillment.v1", data } };
+        });
+        return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
+      } catch (error) { return handleServiceError(res, error); }
+    });
 
   router.get("/orders", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
     const page = Math.max(1, Math.trunc(Number(req.query.page)) || 1);

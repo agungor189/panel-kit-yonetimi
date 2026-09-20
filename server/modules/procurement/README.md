@@ -54,4 +54,5 @@ place. After V2-06 records exist, rollback requires preserving those tables and 
 compatible application; dropping or rewriting them is not an approved rollback or data
 repair. No production migration or repair is performed by this change.
 
-V2-07 inventory/reservation behavior is intentionally absent.
+V2-07 goods receipt references these immutable cost snapshots; it does not update
+or recalculate them.

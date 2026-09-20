@@ -26,6 +26,7 @@ import { createKitCatalogRouter } from "./server/routes/kitCatalogRoutes.js";
 import { createCatalogV1Router } from "./server/routes/catalogV1Routes.js";
 import { createCatalogAdminV1Router } from "./server/routes/catalogAdminV1Routes.js";
 import { createProcurementV1Router } from "./server/routes/procurementV1Routes.js";
+import { createInventoryV1Router } from "./server/routes/inventoryV1Routes.js";
 import { rejectLegacyCatalogMutation } from "./server/modules/catalog/legacyCatalogGuard.js";
 import { CommandExecutor } from "./server/modules/commands/commandFoundation.js";
 import { createPanelApiAuth } from "./server/middleware/panelApiAuth.js";
@@ -43,8 +44,6 @@ import { mountWarehouseModule } from "./server/modules/warehouse/index.js";
 import {
   centralStockChannel,
   createProductStockModule,
-  hasCentralStockPayload,
-  resolveCentralStock,
   stockQuantity,
 } from "./server/modules/products/stock.js";
 import { createApiKeyHasher } from "./server/modules/integrations/apiKeys.js";
@@ -2342,7 +2341,6 @@ async function startServer() {
           }
 
           const id = uuidv4();
-          const centralStock = resolveCentralStock(validated);
           const productSeries = deriveProductSeries(validated);
           assertUniqueSupplierCode(validated.supplier_code);
           const { normalized_material, normalized_model, normalized_size, normalized_tube_type } = generateNormalizedFields({ material: validated.material, model: validated.model, size: validated.size, category: validated.category, name: validated.name });
@@ -2353,7 +2351,7 @@ async function startServer() {
           `).run(
             id, validated.name_tr || validated.name_en || validated.name, validated.name_tr || validated.name || null, validated.name_en || null, validated.title || validated.name_tr || validated.name_en || validated.name, validated.sku, validated.supplier_code || null, validated.barcode, validated.category, validated.model, productSeries, validated.description,
             validated.purchase_price_usd || 0, validated.purchase_cost || 0, validated.sale_price || 0, validated.buffer_percentage || 0, validated.profit_percentage || 0, validated.exchange_rate_used || 0, validated.price_locked ? 1 : 0,
-            validated.weight_grams ?? validated.weight ?? 0, validated.status || 'Active', validated.material, validated.size, validated.connection_type, validated.usage_area, validated.supplier, validated.min_stock_level !== undefined ? validated.min_stock_level : 50, centralStock, requestProductType(validated.product_type),
+            validated.weight_grams ?? validated.weight ?? 0, validated.status || 'Active', validated.material, validated.size, validated.connection_type, validated.usage_area, validated.supplier, validated.min_stock_level !== undefined ? validated.min_stock_level : 50, 0, requestProductType(validated.product_type),
             normalized_material, normalized_model, normalized_size, normalized_tube_type
           );
 
@@ -2417,7 +2415,6 @@ async function startServer() {
       const resolvedName = resolvedNameTr || resolvedNameEn || cleanText(name) || resolvedTitle;
       const resolvedType = requestProductType(req.body.product_type);
       const weightGrams = Math.max(0, Number(weight_grams ?? weight) || 0);
-      const centralStock = resolveCentralStock(req.body);
       const productSeries = deriveProductSeries({ ...req.body, product_series, sku: resolvedSku, title: resolvedTitle, name: resolvedName, material, category, model });
       assertUniqueSupplierCode(supplier_code);
 
@@ -2483,7 +2480,7 @@ async function startServer() {
           usage_area: cleanText(usage_area) || null,
           supplier: cleanText(supplier) || null,
           min_stock_level: min_stock_level !== undefined ? Number(min_stock_level) || 0 : 50,
-          central_stock: resolvedType === "assembly" ? 0 : centralStock,
+          central_stock: 0,
           product_type: resolvedType,
           is_sellable: resolvedType === "component" ? 0 : 1,
           visible_in_catalog: resolvedType === "component" ? 0 : 1,
@@ -2502,13 +2499,6 @@ async function startServer() {
 
       for (const p of mergeProductPlatforms(platforms, sale_price)) {
         insertPlatform.run(uuidv4(), id, p.name, 0, p.price ?? sale_price ?? 0, p.is_listed ? 1 : 0);
-      }
-
-      if (resolvedType !== "assembly" && centralStock > 0) {
-        db.prepare(`
-          INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(uuidv4(), id, 'Merkez Depo', centralStock, 'İlk merkez depo stoğu', 'ADJUST');
       }
 
       if (images && Array.isArray(images)) {
@@ -2650,26 +2640,18 @@ async function startServer() {
         beforeState.platforms = db.prepare("SELECT platform_name, stock, price, is_listed FROM product_platforms WHERE product_id = ?").all(req.params.id);
         beforeState.images = db.prepare("SELECT id, path, sort_order FROM product_images WHERE product_id = ? ORDER BY sort_order ASC").all(req.params.id);
       }
-      const previousCentralStock = stockQuantity(beforeState?.central_stock);
-      const hasBom = beforeState
-        ? (db.prepare("SELECT COUNT(*) as count FROM product_bom WHERE parent_product_id = ?").get(req.params.id) as any)?.count > 0
-        : false;
-      const nextCentralStock = hasCentralStockPayload(req.body)
-        ? (hasBom ? previousCentralStock : resolveCentralStock(req.body, previousCentralStock))
-        : previousCentralStock;
-
       db.prepare(`
         UPDATE products SET
           name=?, name_tr=?, name_en=?, title=?, warehouse_location=?, sku=?, supplier_code=?, barcode=?, category=?, model=?, product_series=?, tube_type_code=?, form_code=?, description=?,
           purchase_price_usd=?, purchase_cost=?, sale_price=?, buffer_percentage=?, profit_percentage=?, exchange_rate_used=?, price_locked=?,
-          weight_grams=?, status=?, notes=?, material=?, size=?, pipe_size=?, connection_type=?, usage_area=?, supplier=?, min_stock_level=?, central_stock=?,
+          weight_grams=?, status=?, notes=?, material=?, size=?, pipe_size=?, connection_type=?, usage_area=?, supplier=?, min_stock_level=?,
           product_type=?, is_sellable=?, visible_in_catalog=?, exclude_from_analysis=?,
           normalized_material=?, normalized_model=?, normalized_size=?, normalized_tube_type=?, normalized_pipe_size=?, updated_at=CURRENT_TIMESTAMP
         WHERE id=?
       `).run(
         resolvedName, resolvedNameTr, resolvedNameEn, resolvedTitle, warehouse_location, sku, resolvedSupplierCode, barcode, category, model, productSeries, tube_type_code, form_code, description,
         purchase_price_usd || 0, purchase_cost || 0, sale_price || 0, buffer_percentage || 0, profit_percentage || 0, exchange_rate_used || 0, price_locked ? 1 : 0,
-        weightGrams, status, notes, material, size, pipe_size, connection_type, usage_area, supplier, min_stock_level !== undefined ? min_stock_level : 50, nextCentralStock,
+        weightGrams, status, notes, material, size, pipe_size, connection_type, usage_area, supplier, min_stock_level !== undefined ? min_stock_level : 50,
         resolvedType, resolvedType === "component" ? 0 : 1, resolvedType === "component" ? 0 : 1, resolvedType === "component" ? 1 : 0,
         normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size, req.params.id
       );
@@ -2711,14 +2693,6 @@ async function startServer() {
             insertPlatform.run(uuidv4(), req.params.id, platformName, 0, priceValue, listedValue);
           }
         }
-      }
-
-      const centralStockDiff = nextCentralStock - previousCentralStock;
-      if (centralStockDiff !== 0) {
-        db.prepare(`
-          INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(uuidv4(), req.params.id, 'Merkez Depo', centralStockDiff, 'Oto: Ürün Güncelleme', 'ADJUST');
       }
 
       if (images && Array.isArray(images)) {
@@ -5407,6 +5381,19 @@ async function startServer() {
       authorizeCostApproval: auth.requireCapability("acquisition-cost:approve"),
       authorizePayment: auth.requireCapability("finance:write"),
       authorizeFx: auth.requireCapability("fx:write"),
+    }),
+  );
+  app.use(
+    "/api/inventory/v1",
+    createInventoryV1Router({
+      db,
+      authorizeRead: auth.requireCapability("read:products"),
+      authorizeReceipt: auth.requireCapability("inventory:receive"),
+      authorizeReserve: auth.requireCapability("inventory:reserve"),
+      authorizeRelease: auth.requireCapability("inventory:release"),
+      authorizeWarehouse: auth.requireCapability("warehouse:pick_orders"),
+      authorizeDispatch: auth.requireCapability("shipping:dispatch"),
+      authorizeCorrection: auth.requireCapability("inventory:correct"),
     }),
   );
   mountWarehouseModule({

@@ -67,6 +67,12 @@ const businessTablesThatMustStartEmpty = [
   "acquisition_lot_cost_snapshots",
   "purchase_payments",
   "procurement_cash_postings",
+  "inventory_lots",
+  "inventory_ledger_events",
+  "inventory_lot_location_balances",
+  "inventory_reservations",
+  "inventory_reservation_lines",
+  "inventory_reservation_allocations",
 ] as const;
 
 test("fresh production schema is exact, versioned and has zero business history", () => {
@@ -75,7 +81,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 67);
+  assert.equal(manifest.length, 68);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -110,6 +116,12 @@ test("fresh production schema is exact, versioned and has zero business history"
     acquisition_lot_cost_snapshots: ["allocation_snapshot_json", "landed_cost_try_minor", "merchandise_cost_try_minor", "normalized_cost_denominator", "normalized_cost_numerator", "purchase_line_id", "state", "vat_policy_snapshot", "vat_try_minor"],
     purchase_payments: ["amount_minor", "cash_account_id", "currency", "paid_at", "purchase_order_id"],
     procurement_cash_postings: ["amount_minor", "currency", "direction", "payment_id", "purchase_id", "source_type"],
+    inventory_lots: ["acquisition_cost_snapshot_id", "base_uom_code_snapshot", "on_hand_base_int", "product_id", "receipt_id", "reserved_base_int", "status"],
+    inventory_ledger_events: ["event_type", "lot_id", "operation_id", "product_id", "quantity_delta_base_int", "reason_code", "reference_id"],
+    inventory_lot_location_balances: ["active", "location_id", "location_kind", "lot_id", "physical_state", "quantity_base_int"],
+    inventory_reservations: ["dispatch_operation_id", "id", "order_id", "reserve_operation_id", "shipment_id", "status"],
+    inventory_reservation_lines: ["base_uom_code_snapshot", "product_id", "quantity_base_int", "reservation_id"],
+    inventory_reservation_allocations: ["fifo_sequence", "lot_id", "product_id", "quantity_base_int", "reservation_id"],
     schema_migrations: ["applied_at", "checksum", "name", "version"],
   };
   for (const [table, expected] of Object.entries(requiredColumns)) {
@@ -122,6 +134,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   assert.ok(indexes(db, "command_outbox").includes("idx_command_outbox_dispatch"));
   assert.ok(indexes(db, "acquisition_lot_cost_snapshots").includes("idx_acquisition_lots_product"));
   assert.ok(indexes(db, "cash_transactions").includes("idx_cash_transactions_procurement_payment"));
+  assert.ok(indexes(db, "inventory_lots").includes("idx_inventory_lots_product_fifo"));
 
   for (const table of businessTablesThatMustStartEmpty) {
     assert.equal(count(db, table), 0, `${table} must contain no bootstrap business rows`);

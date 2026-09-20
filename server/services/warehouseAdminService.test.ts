@@ -499,7 +499,7 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     await new Promise<void>((resolve, reject) => renderer.close((error) => error ? reject(error) : resolve()));
   });
 
-  test("yerleştirme sıra, kapasite, stok senkronu ve idempotency kurallarını uygular", () => {
+  test("yerleştirme sıra, kapasite, projeksiyon sınırı ve idempotency kurallarını uygular", () => {
     const batch = createImportedBatch();
     const packages = db.prepare("SELECT * FROM warehouse_packages WHERE batch_id = ? ORDER BY package_number").all(batch.id) as any[];
     db.prepare("UPDATE warehouse_packages SET status = 'LABELED'").run();
@@ -509,7 +509,7 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     const placed = service.placePackage(packages[0].package_code, "A1-K1-P1", { idempotency_key: "place-1" }, actor) as any;
     const replay = service.placePackage(packages[0].package_code, "A1-K1-P1", { idempotency_key: "place-1" }, actor) as any;
     assert.equal(placed.placement.id, replay.placement.id);
-    assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'product-1'").get() as any).central_stock, 6);
+    assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'product-1'").get() as any).central_stock, 0);
     assert.throws(() => service.placePackage(packages[0].package_code, "A1-K1-P1", { idempotency_key: "competing-place" }, { ...actor, id: "warehouse-user-2", username: "Ayşe" }),
       (error: unknown) => error instanceof WarehouseServiceError && error.code === "PACKAGE_NOT_LABELED");
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM package_placements WHERE package_id = ?").get(packages[0].id) as any).count, 1);
@@ -518,7 +518,7 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
       (error: unknown) => error instanceof WarehouseServiceError && error.code === "LOCATION_FULL");
   });
 
-  test("taşıma ve sayım paket/merkez stoğunu atomik tutar", () => {
+  test("taşıma ve sayım paket projeksiyonunu değiştirir, kanonik stoğa yazmaz", () => {
     const batch = createImportedBatch(importRows({ "Paket Sayısı": 1, "Paket İçi Adet": 6, "Toplam Adet": 6 }));
     const pkg = db.prepare("SELECT * FROM warehouse_packages WHERE batch_id = ?").get(batch.id) as any;
     db.prepare("UPDATE warehouse_packages SET status = 'LABELED' WHERE id = ?").run(pkg.id);
@@ -529,7 +529,7 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     assert.equal(moved.package.location_code, "B1");
     const counted = service.countPackage(pkg.package_code, 4, { idempotency_key: "count" }, actor) as any;
     assert.equal(counted.package.remaining_quantity, 4);
-    assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'product-1'").get() as any).central_stock, 4);
+    assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'product-1'").get() as any).central_stock, 0);
   });
 
   test("iki farklı kullanıcı audit kayıtlarında doğru kimlikle korunur", () => {
@@ -819,7 +819,7 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     assert.equal((service.listReceivingSessions() as any[]).filter((item) => item.receiving_state === "active").length, 2);
   });
 
-  test("önerilmeyen rafı reddeder, tekrar yerleştirmede stoğu bir kez artırır ve sessionı tamamlar", () => {
+  test("önerilmeyen rafı reddeder, yerleşimi tekilleştirir ve kanonik stoğa dokunmadan sessionı tamamlar", () => {
     const session = createLotSession("LOT-PLACE", 1, 5);
     const pkg = service.claimNextPackage("SUP-SKU-1", actor, session.id) as any;
     service.queuePrint(pkg.id, { claim_token: pkg.claim_token, idempotency_key: "lot-print" }, actor);
@@ -833,7 +833,7 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     const placed = service.placePackage(pkg.package_code, "A1", { idempotency_key: "place-once", device_id: "device-a" }, actor) as any;
     const replay = service.placePackage(pkg.package_code, "A1", { idempotency_key: "place-once", device_id: "device-a" }, actor) as any;
     assert.equal(placed.placement.id, replay.placement.id);
-    assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'product-1'").get() as any).central_stock, 5);
+    assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'product-1'").get() as any).central_stock, 0);
     assert.equal((db.prepare("SELECT COUNT(*) count FROM warehouse_package_movements WHERE idempotency_key = ?").get(`place:${pkg.id}`) as any).count, 1);
     assert.equal((service.getReceivingSession(session.id) as any).receiving_state, "completed");
   });
@@ -849,7 +849,7 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
       (error: unknown) => error instanceof WarehouseServiceError && error.code === "SESSION_CLOSED");
   });
 
-  test("75'lik paketlerde 40 sonra 50 toplama 35+15 bölünür ve ikinci pakette 60 bırakır", () => {
+  test("V2-07 toplama tamamlaması paket ve fiziksel stoğu düşürmez", () => {
     const batch = createImportedBatch(importRows({ "Paket Sayısı": 2, "Paket İçi Adet": 75, "Toplam Adet": 150 }));
     const packages = db.prepare("SELECT * FROM warehouse_packages WHERE batch_id = ? ORDER BY package_number").all(batch.id) as any[];
     service.createLocation({ code: "A1", package_capacity: 2 }, actor);
@@ -864,17 +864,17 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     picking.verifyPick("order-1", "product-1", packages[0].package_code, actor);
     picking.completePickItem("order-1", "product-1", 40, actor);
     let after = db.prepare("SELECT status, remaining_quantity FROM warehouse_packages WHERE batch_id = ? ORDER BY package_number").all(batch.id) as any[];
-    assert.deepEqual(after.map((pkg) => [pkg.status, pkg.remaining_quantity]), [["OPEN", 35], ["PLACED", 75]]);
+    assert.deepEqual(after.map((pkg) => [pkg.status, pkg.remaining_quantity]), [["PLACED", 75], ["PLACED", 75]]);
 
     db.prepare("INSERT INTO sales (id, order_code, status, total_quantity) VALUES ('order-2', 'DS-2', 'Hazırlanıyor', 50)").run();
     db.prepare("INSERT INTO sale_items (id, sale_id, product_id, product_name, quantity, weight) VALUES ('item-2', 'order-2', 'product-1', 'Test ürün', 50, 0)").run();
     const plan = picking.buildPickPlan("order-2")!;
-    assert.deepEqual(plan.items[0].package_allocations.map((allocation: any) => allocation.pick_quantity), [35, 15]);
+    assert.deepEqual(plan.items[0].package_allocations.map((allocation: any) => allocation.pick_quantity), [50]);
     picking.startPicking("order-2", actor);
     picking.verifyPick("order-2", "product-1", packages[0].package_code, actor);
     picking.completePickItem("order-2", "product-1", 50, actor);
     after = db.prepare("SELECT status, remaining_quantity FROM warehouse_packages WHERE batch_id = ? ORDER BY package_number").all(batch.id) as any[];
-    assert.deepEqual(after.map((pkg) => [pkg.status, pkg.remaining_quantity]), [["EMPTY", 0], ["OPEN", 60]]);
-    assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'product-1'").get() as any).central_stock, 60);
+    assert.deepEqual(after.map((pkg) => [pkg.status, pkg.remaining_quantity]), [["PLACED", 75], ["PLACED", 75]]);
+    assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'product-1'").get() as any).central_stock, 0);
   });
 });

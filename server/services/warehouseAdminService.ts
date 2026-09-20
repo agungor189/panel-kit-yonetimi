@@ -1229,9 +1229,6 @@ export class WarehouseAdminService {
           updated_at = CURRENT_TIMESTAMP WHERE id = ?
       `).run(location.id, actor.id, actor.username, pkg.id);
       this.recordStockMovement(pkg, "INBOUND", pkg.planned_quantity, "package_placement", placementId, `place:${pkg.id}`, actor);
-      this.db.prepare("UPDATE products SET central_stock = COALESCE(central_stock, 0) + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(pkg.planned_quantity, pkg.product_id);
-      this.db.prepare("INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type) VALUES (?, ?, 'WAREHOUSE', ?, ?, 'IN')")
-        .run(randomUUID(), pkg.product_id, pkg.planned_quantity, `Paket girişi: ${pkg.package_code}`);
       const sessionCompleted = this.refreshBatchStatus(pkg.batch_id);
       this.sessionEvent(pkg.batch_id, pkg.id, "PACKAGE_PLACED", actor, clean(input.device_id, 150), { location_code: location.code, quantity: pkg.planned_quantity, override_reason: overrideReason || null });
       if (sessionCompleted) {
@@ -1315,9 +1312,6 @@ export class WarehouseAdminService {
       this.db.prepare("UPDATE warehouse_packages SET remaining_quantity = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(quantity, nextStatus, pkg.id);
       if (delta !== 0) {
         this.recordStockMovement(pkg, "COUNT_ADJUST", delta, "stock_count", id, `count:${idempotencyKey}`, actor);
-        this.db.prepare("UPDATE products SET central_stock = MAX(0, COALESCE(central_stock, 0) + ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(delta, pkg.product_id);
-        this.db.prepare("INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type) VALUES (?, ?, 'WAREHOUSE', ?, ?, 'ADJUST')")
-          .run(randomUUID(), pkg.product_id, delta, `Paket sayımı: ${pkg.package_code}`);
       }
       this.audit("WAREHOUSE_PACKAGE_COUNTED", "warehouse_package", pkg.id, { previous_quantity: pkg.remaining_quantity, counted_quantity: quantity, delta }, actor);
       return { count: this.db.prepare("SELECT * FROM warehouse_stock_counts WHERE id = ?").get(id), package: this.getPackage(pkg.id), idempotent: false };

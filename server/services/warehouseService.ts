@@ -831,7 +831,8 @@ export class WarehouseService {
       if (asNumber(progress.required_quantity) !== item.required_quantity) {
         throw new WarehouseServiceError(409, "PICK_PLAN_CHANGED", "Toplama planı değişti. Ürünü yeniden doğrulayın.");
       }
-      if (item.package_tracking) this.consumePackageStock(orderId, item, picker);
+      // V2-07: pick confirmation is an internal workflow transition. Physical
+      // stock and package balances remain unchanged until approved dispatch.
       this.db.prepare(`
         UPDATE warehouse_pick_progress
         SET picked_quantity = ?, completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
@@ -851,40 +852,6 @@ export class WarehouseService {
         SELECT * FROM warehouse_pick_progress WHERE order_id = ? AND product_id = ?
       `).get(orderId, productId);
     })();
-  }
-
-  private consumePackageStock(orderId: string, item: any, picker: WarehousePicker) {
-    const totalAllocated = (item.package_allocations || []).reduce((sum: number, allocation: any) => sum + asNumber(allocation.pick_quantity), 0);
-    if (totalAllocated !== asNumber(item.required_quantity)) {
-      throw new WarehouseServiceError(409, "PACKAGE_STOCK_CHANGED", "Paket stoğu değişti. Toplama planını yenileyin.");
-    }
-    for (const allocation of item.package_allocations) {
-      const idempotencyKey = `pick:${orderId}:${item.product_id}:${allocation.package_id}`;
-      const existing = this.db.prepare("SELECT id FROM warehouse_package_movements WHERE idempotency_key = ?").get(idempotencyKey);
-      if (existing) continue;
-      const changed = this.db.prepare(`
-        UPDATE warehouse_packages
-        SET remaining_quantity = remaining_quantity - ?,
-            status = CASE WHEN remaining_quantity - ? <= 0 THEN 'EMPTY' ELSE 'OPEN' END,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND status IN ('PLACED','OPEN') AND remaining_quantity >= ?
-      `).run(allocation.pick_quantity, allocation.pick_quantity, allocation.package_id, allocation.pick_quantity);
-      if (changed.changes !== 1) {
-        throw new WarehouseServiceError(409, "PACKAGE_STOCK_CHANGED", `${allocation.package_code} paketi başka bir işlemde değişti.`);
-      }
-      this.db.prepare(`
-        INSERT INTO warehouse_package_movements (
-          id, package_id, product_id, movement_type, quantity_delta, reference_type, reference_id, idempotency_key, actor_id
-        ) VALUES (?, ?, ?, 'PICK', ?, 'sale', ?, ?, ?)
-      `).run(randomUUID(), allocation.package_id, item.product_id, -allocation.pick_quantity, orderId, idempotencyKey, picker.id);
-    }
-    const changed = this.db.prepare(`
-      UPDATE products SET central_stock = central_stock - ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND COALESCE(central_stock, 0) >= ?
-    `).run(item.required_quantity, item.product_id, item.required_quantity);
-    if (changed.changes !== 1) throw new WarehouseServiceError(409, "CENTRAL_STOCK_CHANGED", "Merkez stok bakiyesi değişti.");
-    this.db.prepare("INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type) VALUES (?, ?, 'WAREHOUSE', ?, ?, 'OUT')")
-      .run(randomUUID(), item.product_id, -item.required_quantity, `Paketli sipariş toplama: ${orderId}`);
   }
 
   completePicking(orderId: string, picker: WarehousePicker, note?: string | null): StatusTransitionResult {

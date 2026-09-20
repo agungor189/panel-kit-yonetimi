@@ -233,6 +233,9 @@ export function importProductsFromCsvRows(
   if (resolution.byField.warehouse_location || resolution.byField.reserve_locations) {
     warnings.push("Depo lokasyonu kolonları ürün master importunda yok sayıldı; yerleşimi Warehouse Depo Yerleşimi CSV akışından yönetin.");
   }
+  if (resolution.byField.central_stock) {
+    warnings.push("Stok kolonları V2-07 ürün master importunda yok sayıldı; fiziksel stok yalnız onaylı mal kabulünden oluşur.");
+  }
 
   for (const field of resolution.missingRequiredFields) {
     errors.push({ field: "headers", code: "MISSING_REQUIRED_COLUMN", message: `${field} için zorunlu CSV kolonu bulunamadı.` });
@@ -361,7 +364,7 @@ export function importProductsFromCsvRows(
     const effectiveType = productType || legacyProductType(existing?.product_type, existing ? existingBomParents.has(existing.id) : false) || "simple";
     const effectiveWeightGrams = weightGrams ?? (Number(existing?.weight_grams ?? existing?.weight ?? 0) || 0);
     const effectivePurchasePrice = purchasePriceUsd ?? (Number(existing?.purchase_price_usd ?? 0) || 0);
-    const effectiveStock = stock ?? Number(existing?.central_stock || 0);
+    const effectiveStock = Number(existing?.central_stock || 0);
     const lotQuantity = explicitLotQuantity ?? (lotNumber ? stock : null) ?? (boxCount && unitsPerBox ? boxCount * unitsPerBox : null);
     if (lotNumber && (!supplierCode || !boxCount || !unitsPerBox || !lotQuantity
       || lotQuantity > boxCount * unitsPerBox || lotQuantity <= (boxCount - 1) * unitsPerBox)) {
@@ -407,7 +410,7 @@ export function importProductsFromCsvRows(
       form_code: clean(existing?.form_code) || clean(sku.split("-").at(-1)) || null,
       connection_type: clean(existing?.connection_type) || null,
       central_stock: effectiveStock,
-      has_stock_value: stock !== null,
+      has_stock_value: false,
       product_type: effectiveType,
       is_sellable: effectiveType === "component" ? 0 : 1,
       visible_in_catalog: effectiveType === "component" ? 0 : 1,
@@ -576,7 +579,6 @@ export function importProductsFromCsvRows(
       description=@description, material=@material, category=@category, model=@model, product_series=@product_series,
       tube_type_code=@tube_type_code, size=@size, pipe_size=@pipe_size, form_code=@form_code,
       connection_type=@connection_type,
-      central_stock=CASE WHEN @has_stock_value=1 THEN @central_stock ELSE central_stock END,
       product_type=@product_type, is_sellable=@is_sellable, visible_in_catalog=@visible_in_catalog,
       exclude_from_analysis=@exclude_from_analysis, purchase_price_usd=@purchase_price_usd,
       weight_grams=@weight_grams, warehouse_location=@warehouse_location, barcode=@barcode, notes=@notes,
@@ -600,10 +602,6 @@ export function importProductsFromCsvRows(
     INSERT INTO product_bom (id, parent_product_id, component_product_id, quantity_per_unit, component_role)
     VALUES (?, ?, ?, ?, NULL)
   `);
-  const insertStockMovement = db.prepare(`
-    INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type)
-    VALUES (?, ?, 'Merkez Depo', ?, 'Product CSV import', 'ADJUST')
-  `);
   const existingLotLine = tableExists(db, "inbound_lot_lines")
     ? db.prepare("SELECT id FROM inbound_lot_lines WHERE lot_number = ? COLLATE NOCASE AND product_id = ?")
     : null;
@@ -624,14 +622,8 @@ export function importProductsFromCsvRows(
 
   db.transaction(() => {
     for (const product of preparedProducts) {
-      const before = product.existingId ? existingBySku.get(identityKey(product.sku))?.[0] : null;
       if (product.existingId) updateProduct.run({ ...product, has_stock_value: product.has_stock_value ? 1 : 0 });
       else insertProduct.run(product);
-
-      if (product.has_stock_value) {
-        const difference = product.central_stock - Number(before?.central_stock || 0);
-        if (difference !== 0) insertStockMovement.run(crypto.randomUUID(), product.id, difference);
-      }
       if (product.logistics.has_value) {
         upsertLogistics.run(product.id, product.logistics.box_count, product.logistics.units_per_box, product.logistics.box_weight_kg, product.logistics.total_weight_kg);
       }

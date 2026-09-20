@@ -316,6 +316,16 @@ describe("WarehouseService güvenli toplama akışı", () => {
     assert.equal(plan.items[0].image_url, "/api/warehouse/v1/products/product-1/image");
     assert.equal(service.getProductImagePath("product-1"), "/uploads/first.jpg");
   });
+
+  test("V2-07 pick and pack workflow does not decrement physical stock", () => {
+    seed();
+    const before = db.prepare("SELECT central_stock FROM products WHERE id='product-1'").pluck().get();
+    service.startPicking("order-1", alper);
+    service.verifyPick("order-1", "product-1", "SKU-1", alper);
+    service.completePickItem("order-1", "product-1", 12, alper);
+    service.completePicking("order-1", alper);
+    assert.equal(db.prepare("SELECT central_stock FROM products WHERE id='product-1'").pluck().get(), before);
+  });
 });
 
 test("v49 mevcut email kolonu olmayan panel veritabanını güvenle yükseltir", () => {

@@ -90,14 +90,15 @@ test("import persists product master data but ignores warehouse placement column
   assert.equal(component.weight, 0);
   assert.equal(component.weight_grams, 125);
   assert.equal(component.product_type, "component");
-  assert.equal(component.central_stock, 10);
+  assert.equal(component.central_stock, 0);
 
   const assembly = db.prepare("SELECT central_stock FROM products WHERE sku = 'ASM-01'").get() as any;
-  assert.equal(assembly.central_stock, 4);
+  assert.equal(assembly.central_stock, 0);
 
   assert.equal(component.warehouse_location, null);
   assert.equal((db.prepare("SELECT COUNT(*) AS count FROM product_reserve_locations WHERE product_id = ?").get(component.id) as any).count, 0);
   assert.ok(applied.warnings.some((warning) => warning.includes("Depo lokasyonu kolonları")));
+  assert.ok(applied.warnings.some((warning) => warning.includes("Stok kolonları")));
   assert.deepEqual(
     db.prepare("SELECT box_count, units_per_box, box_weight_kg, total_weight_kg FROM product_logistics WHERE product_id = ?").get(component.id),
     { box_count: 2, units_per_box: 5, box_weight_kg: 0.75, total_weight_kg: 1.5 },
@@ -106,7 +107,7 @@ test("import persists product master data but ignores warehouse placement column
   db.close();
 });
 
-test("lotlu ürün importu merkez stoğu ve yalnız gerçek fark kadar stok hareketini günceller", () => {
+test("lotlu ürün importu kabul girdisini hazırlar ama fiziksel stok oluşturmaz", () => {
   const db = database();
   runMigrations(db);
   db.prepare("INSERT INTO products (id, sku, title, name, supplier_code, central_stock, product_type) VALUES ('existing', 'SKU-LOT', 'Ürün', 'Ürün', 'SUP-LOT', 0, 'simple')").run();
@@ -116,11 +117,8 @@ test("lotlu ürün importu merkez stoğu ve yalnız gerçek fark kadar stok hare
   const created = importProductsFromCsvRows(db, [row], headers, { apply: true, actorUsername: "admin" });
   assert.equal(created.applied, true);
   assert.equal(created.lot_lines_created, 1);
-  assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'existing'").get() as any).central_stock, 300);
-  assert.deepEqual(
-    (db.prepare("SELECT change_amount FROM stock_movements WHERE product_id = 'existing' ORDER BY created_at, rowid").all() as any[]).map((movement) => movement.change_amount),
-    [300],
-  );
+  assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'existing'").get() as any).central_stock, 0);
+  assert.equal((db.prepare("SELECT COUNT(*) count FROM stock_movements WHERE product_id = 'existing'").get() as any).count, 0);
   assert.deepEqual(db.prepare("SELECT lot_number, product_id, package_count, units_per_package, total_units FROM inbound_lot_lines").get(), {
     lot_number: "LOT-001", product_id: "existing", package_count: 3, units_per_package: 100, total_units: 300,
   });
@@ -128,16 +126,13 @@ test("lotlu ürün importu merkez stoğu ve yalnız gerçek fark kadar stok hare
   const unchanged = importProductsFromCsvRows(db, [row], headers, { apply: true, actorUsername: "admin" });
   assert.equal(unchanged.applied, true);
   assert.equal(unchanged.lot_lines_updated, 1);
-  assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'existing'").get() as any).central_stock, 300);
-  assert.equal((db.prepare("SELECT COUNT(*) AS count FROM stock_movements WHERE product_id = 'existing'").get() as any).count, 1);
+  assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'existing'").get() as any).central_stock, 0);
+  assert.equal((db.prepare("SELECT COUNT(*) AS count FROM stock_movements WHERE product_id = 'existing'").get() as any).count, 0);
 
   const reduced = importProductsFromCsvRows(db, [{ ...row, "Toplam Adet": "280" }], headers, { apply: true, actorUsername: "admin" });
   assert.equal(reduced.applied, true);
-  assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'existing'").get() as any).central_stock, 280);
-  assert.deepEqual(
-    (db.prepare("SELECT change_amount FROM stock_movements WHERE product_id = 'existing' ORDER BY created_at, rowid").all() as any[]).map((movement) => movement.change_amount),
-    [300, -20],
-  );
+  assert.equal((db.prepare("SELECT central_stock FROM products WHERE id = 'existing'").get() as any).central_stock, 0);
+  assert.equal((db.prepare("SELECT COUNT(*) count FROM stock_movements WHERE product_id = 'existing'").get() as any).count, 0);
   assert.equal((db.prepare("SELECT total_units FROM inbound_lot_lines WHERE lot_number = 'LOT-001' AND product_id = 'existing'").get() as any).total_units, 280);
   db.close();
 });

@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PROCUREMENT_SCHEMA_V67 } from "../db/procurementSchema.js";
 import { PROCUREMENT_REMEDIATION_SCHEMA_V68 } from "../db/procurementRemediationSchema.js";
+import { INVENTORY_SCHEMA_V69 } from "../db/inventorySchema.js";
 
 interface Migration {
   version: number;
@@ -2779,9 +2780,16 @@ const migrations: Migration[] = [
       db.exec(PROCUREMENT_REMEDIATION_SCHEMA_V68);
     },
   },
+  {
+    version: 69,
+    name: "add_authoritative_inventory_reservation_contract",
+    up(db) {
+      db.exec(INVENTORY_SCHEMA_V69);
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 68;
+export const CURRENT_SCHEMA_VERSION = 69;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),
@@ -2796,7 +2804,7 @@ export type MigrationManifestEntry = {
 };
 
 const checksumFor = (migration: Migration): string => createHash("sha256")
-  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}`)
+  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}${migration.version === 69 ? `\0${INVENTORY_SCHEMA_V69}` : ""}`)
   .digest("hex");
 
 export function getMigrationManifest(): MigrationManifestEntry[] {
@@ -2908,6 +2916,11 @@ const V67_PROCUREMENT_TABLES = new Set([
   "purchase_order_lines", "purchase_attachments", "purchase_cost_components",
   "purchase_cost_allocations", "acquisition_lot_cost_snapshots", "purchase_payments",
   "procurement_cash_postings",
+]);
+
+const V69_INVENTORY_TABLES = new Set([
+  "inventory_lots", "inventory_ledger_events", "inventory_lot_location_balances",
+  "inventory_reservations", "inventory_reservation_lines", "inventory_reservation_allocations",
 ]);
 
 type SchemaDefinition = { type: string; name: string; sql: string };
@@ -3041,6 +3054,27 @@ function assertV68ProcurementSchemaDefinitions(actual: Database.Database): void 
   }
 }
 
+function assertV69InventorySchemaDefinitions(actual: Database.Database): void {
+  const reference = new Database(":memory:");
+  try {
+    reference.exec("CREATE TABLE products (id TEXT PRIMARY KEY, central_stock INTEGER); CREATE TABLE acquisition_lot_cost_snapshots (id TEXT PRIMARY KEY);");
+    reference.exec(INVENTORY_SCHEMA_V69);
+    const expected = (reference.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE sql IS NOT NULL").all() as Array<SchemaDefinition & { tbl_name: string }>)
+      .filter((object) => V69_INVENTORY_TABLES.has(object.tbl_name)
+        || object.name === "trg_inventory_central_stock_projection_guard"
+        || object.name === "trg_inventory_central_stock_insert_guard");
+    for (const object of expected) {
+      const found = actual.prepare("SELECT type,name,sql FROM sqlite_master WHERE type=? AND name=? AND sql IS NOT NULL")
+        .get(object.type, object.name) as SchemaDefinition | undefined;
+      if (!found || canonicalSchemaDefinition(found.sql) !== canonicalSchemaDefinition(object.sql)) {
+        throw new Error(`Migration v69 schema effect is missing or incompatible: ${object.type} ${object.name}`);
+      }
+    }
+  } finally {
+    reference.close();
+  }
+}
+
 function assertSchemaEffects(actual: Database.Database, maxVersion: number): void {
   if (maxVersion < SUPPORTED_UPGRADE_STARTS[0]) {
     throw new Error(`Migration checksum history at v${maxVersion} is not a supported verifiable checkpoint`);
@@ -3125,6 +3159,7 @@ function validateAppliedMigrations(db: Database.Database, manifest: MigrationMan
     if (maxVersion >= 66) assertV66CatalogSchemaDefinitions(db);
     if (maxVersion === 67) assertV67ProcurementSchemaDefinitions(db);
     if (maxVersion >= 68) assertV68ProcurementSchemaDefinitions(db);
+    if (maxVersion >= 69) assertV69InventorySchemaDefinitions(db);
   }
   if (!hasChecksumColumn) {
     db.transaction(() => {
@@ -3171,6 +3206,7 @@ export function runMigrations(
       if (migration.version === 66) assertV66CatalogSchemaDefinitions(db);
       if (migration.version === 67) assertV67ProcurementSchemaDefinitions(db);
       if (migration.version === 68) assertV68ProcurementSchemaDefinitions(db);
+      if (migration.version === 69) assertV69InventorySchemaDefinitions(db);
       insertMigration.run(migration.version, migration.name, checksumFor(migration));
     })();
 
