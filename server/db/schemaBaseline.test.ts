@@ -93,7 +93,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 71);
+  assert.equal(manifest.length, 72);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -159,6 +159,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   assert.ok(indexes(db, "acquisition_lot_cost_snapshots").includes("idx_acquisition_lots_product"));
   assert.ok(indexes(db, "cash_transactions").includes("idx_cash_transactions_procurement_payment"));
   assert.ok(indexes(db, "inventory_lots").includes("idx_inventory_lots_product_fifo"));
+  assert.ok(indexes(db, "warehouse_replenishment_tasks").includes("idx_warehouse_replenishment_one_open_pick_lot"));
 
   for (const table of businessTablesThatMustStartEmpty) {
     assert.equal(count(db, table), 0, `${table} must contain no bootstrap business rows`);

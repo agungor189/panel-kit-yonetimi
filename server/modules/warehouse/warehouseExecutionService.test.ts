@@ -107,6 +107,20 @@ const receive = (
     ...extra,
   } as any));
 
+const dispatch = (
+  db: Database.Database,
+  inventory: InventoryService,
+  id: string,
+  productId: string,
+  quantityBaseInt: number,
+) => {
+  inventory.reserveOrder({ reservationId: `reservation-${id}`, orderId: `order-${id}`, lines: [{ productId, quantityBaseInt }], operationId: `reserve-${id}` });
+  inventory.markPicked({ reservationId: `reservation-${id}`, operationId: `pick-${id}` });
+  inventory.markPacked({ reservationId: `reservation-${id}`, operationId: `pack-${id}` });
+  return execute(db, `dispatch-${id}`, "inventory.reservation.dispatch.v1", { reservationId: `reservation-${id}` }, () =>
+    inventory.dispatchReservation({ reservationId: `reservation-${id}`, shipmentId: `shipment-${id}`, dispatchedAt: "2026-09-20T12:00:00.000Z", operationId: `dispatch-${id}` }));
+};
+
 test("topology is DB/config driven for the current 14x4x6x3 shape and future racks retain six positions", () => {
   const { db, warehouse } = setup();
   warehouse.configureTopology(topology(Array.from({ length: 14 }, (_, index) => rack(`R${String(index + 1).padStart(2, "0")}`))));
@@ -335,41 +349,140 @@ test("topology policy edits and rack additions preserve slot identity while occu
   db.close();
 });
 
-test("dispatch consumes the matching picking package and leaves lot, ledger, location, package, and central projection reconciled", () => {
+test("dispatch automatically evaluates persisted watch and prepare thresholds without duplicate open tasks", () => {
   const { db, procurement, warehouse } = setup();
   warehouse.configureTopology(topology([rack("A1")]));
-  const planned = costed(procurement, "p1", "dispatch-reconcile", 100);
-  receive(db, warehouse, planned.id, "dispatch-reconcile", [
-    { id: "dispatch-pick", code: "DISPATCH-PICK", quantityBaseInt: 20, targetQuantityBaseInt: 100 },
-    { id: "dispatch-reserve", code: "DISPATCH-RESERVE", quantityBaseInt: 80 },
+  const watchLot = costed(procurement, "p1", "dispatch-watch", 100);
+  receive(db, warehouse, watchLot.id, "dispatch-watch", [
+    { id: "watch-pick", code: "WATCH-PICK", quantityBaseInt: 21, targetQuantityBaseInt: 100 },
+    { id: "watch-reserve", code: "WATCH-RESERVE", quantityBaseInt: 79 },
   ], 100);
-  for (const id of ["dispatch-pick", "dispatch-reserve"]) warehouse.identifyPackage({ packageId: id, labelIdentity: `LABEL-${id}` });
-  const pick = warehouse.suggestLocation("dispatch-pick");
-  warehouse.placePackage({ packageId: "dispatch-pick", destinationCode: pick.code, scannedDestinationCode: pick.code, operationId: "dispatch-pick-place" });
-  const reserve = warehouse.suggestLocation("dispatch-reserve");
-  warehouse.placePackage({ packageId: "dispatch-reserve", destinationCode: reserve.code, scannedDestinationCode: reserve.code, operationId: "dispatch-reserve-place" });
+  for (const id of ["watch-pick", "watch-reserve"]) warehouse.identifyPackage({ packageId: id, labelIdentity: `LABEL-${id}` });
+  const watchPick = warehouse.suggestLocation("watch-pick");
+  warehouse.placePackage({ packageId: "watch-pick", destinationCode: watchPick.code, scannedDestinationCode: watchPick.code, operationId: "watch-pick-place" });
+  const watchReserve = warehouse.suggestLocation("watch-reserve");
+  warehouse.placePackage({ packageId: "watch-reserve", destinationCode: watchReserve.code, scannedDestinationCode: watchReserve.code, operationId: "watch-reserve-place" });
 
   const inventory = new InventoryService(db);
-  inventory.reserveOrder({ reservationId: "dispatch-reservation", orderId: "dispatch-order", lines: [{ productId: "p1", quantityBaseInt: 10 }], operationId: "dispatch-reserve-op" });
-  inventory.markPicked({ reservationId: "dispatch-reservation", operationId: "dispatch-pick-op" });
-  inventory.markPacked({ reservationId: "dispatch-reservation", operationId: "dispatch-pack-op" });
-  execute(db, "dispatch-op", "inventory.reservation.dispatch.v1", { reservationId: "dispatch-reservation" }, () =>
-    inventory.dispatchReservation({ reservationId: "dispatch-reservation", shipmentId: "dispatch-shipment", dispatchedAt: "2026-09-20T12:00:00.000Z", operationId: "dispatch-op" }));
+  const first = dispatch(db, inventory, "watch", "p1", 1);
+  assert.equal(warehouse.getPackage("watch-pick").remainingQuantityBaseInt, 20);
+  assert.deepEqual(warehouse.listReplenishmentTasks().map(({ state, currentPct, pickPackageId }) => ({ state, currentPct, pickPackageId })), [
+    { state: "LOW_WATCH", currentPct: 20, pickPackageId: "watch-pick" },
+  ]);
+  const replay = execute(db, "dispatch-watch", "inventory.reservation.dispatch.v1", { reservationId: "reservation-watch" }, () => { throw new Error("dispatch replay executed"); });
+  assert.deepEqual(replay, first);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM warehouse_replenishment_tasks WHERE pick_package_id='watch-pick' AND status NOT IN ('COMPLETED','CANCELLED')").pluck().get(), 1);
 
-  assert.equal(warehouse.getPackage("dispatch-pick").remainingQuantityBaseInt, 10);
+  const prepareLot = costed(procurement, "p2", "dispatch-prepare", 100);
+  receive(db, warehouse, prepareLot.id, "dispatch-prepare", [
+    { id: "prepare-pick", code: "PREPARE-PICK", quantityBaseInt: 11, targetQuantityBaseInt: 100 },
+    { id: "prepare-reserve", code: "PREPARE-RESERVE", quantityBaseInt: 89 },
+  ], 100);
+  for (const id of ["prepare-pick", "prepare-reserve"]) warehouse.identifyPackage({ packageId: id, labelIdentity: `LABEL-${id}` });
+  const preparePick = warehouse.suggestLocation("prepare-pick");
+  warehouse.placePackage({ packageId: "prepare-pick", destinationCode: preparePick.code, scannedDestinationCode: preparePick.code, operationId: "prepare-pick-place" });
+  const prepareReserve = warehouse.suggestLocation("prepare-reserve");
+  warehouse.placePackage({ packageId: "prepare-reserve", destinationCode: prepareReserve.code, scannedDestinationCode: prepareReserve.code, operationId: "prepare-reserve-place" });
+  dispatch(db, inventory, "prepare", "p2", 1);
+  assert.equal(warehouse.getPackage("prepare-pick").remainingQuantityBaseInt, 10);
+  const pending = warehouse.listReplenishmentTasks();
+  assert.equal(pending.find(({ pickPackageId }) => pickPackageId === "prepare-pick")?.state, "PREPARE_REPLENISHMENT");
+
   assert.deepEqual(warehouse.getReconciliation("p1"), {
     productId: "p1",
-    lotOnHandBaseInt: 90,
-    ledgerOnHandBaseInt: 90,
-    locationOnHandBaseInt: 90,
-    packageOnHandBaseInt: 90,
-    centralStockProjectionBaseInt: 90,
+    lotOnHandBaseInt: 99,
+    ledgerOnHandBaseInt: 99,
+    locationOnHandBaseInt: 99,
+    packageOnHandBaseInt: 99,
+    centralStockProjectionBaseInt: 99,
     reconciled: true,
   });
-  const replenishment = warehouse.prepareReplenishment({ productId: "p1", operationId: "dispatch-replenishment" });
-  assert.equal(replenishment.state, "PREPARE_REPLENISHMENT");
-  assert.equal(replenishment.currentPct, 10);
-  assert.equal(replenishment.sourcePackageId, "dispatch-reserve");
+  assert.equal(warehouse.getReconciliation("p2").reconciled, true);
+  db.close();
+});
+
+test("critical no-reserve and physical reserve discrepancy states follow canonical same-lot reserve", () => {
+  const { db, procurement, warehouse } = setup();
+  warehouse.configureTopology(topology([rack("A1")]));
+  const inventory = new InventoryService(db);
+
+  const oneCartonLot = costed(procurement, "p1", "one-carton-runtime", 11);
+  const oneCartonReceipt = receive(db, warehouse, oneCartonLot.id, "one-carton-runtime", [
+    { id: "one-carton-pick", code: "ONE-CARTON-PICK", quantityBaseInt: 11, targetQuantityBaseInt: 100 },
+  ], 11);
+  warehouse.identifyPackage({ packageId: "one-carton-pick", labelIdentity: "LABEL-ONE-CARTON-PICK" });
+  const oneCartonSlot = warehouse.suggestLocation("one-carton-pick");
+  warehouse.placePackage({ packageId: "one-carton-pick", destinationCode: oneCartonSlot.code, scannedDestinationCode: oneCartonSlot.code, operationId: "one-carton-place" });
+  dispatch(db, inventory, "one-carton", "p1", 1);
+  const critical = warehouse.listReplenishmentTasks().find(({ pickPackageId }) => pickPackageId === "one-carton-pick");
+  assert.equal(critical?.state, "CRITICAL_NO_RESERVE");
+  assert.equal(db.prepare("SELECT status FROM inventory_lots WHERE id=?").pluck().get(oneCartonReceipt.inventoryLotId), "USABLE");
+  assert.equal(db.prepare("SELECT COUNT(*) FROM warehouse_stock_discrepancies_v2 WHERE inventory_lot_id=?").pluck().get(oneCartonReceipt.inventoryLotId), 0);
+  assert.equal(warehouse.getReconciliation("p1").reconciled, true);
+
+  const missingLot = costed(procurement, "p2", "missing-reserve-runtime", 21);
+  const missingReceipt = receive(db, warehouse, missingLot.id, "missing-reserve-runtime", [
+    { id: "missing-pick", code: "MISSING-PICK", quantityBaseInt: 11, targetQuantityBaseInt: 100 },
+    { id: "missing-reserve", code: "MISSING-RESERVE", quantityBaseInt: 10 },
+  ], 21);
+  for (const id of ["missing-pick", "missing-reserve"]) warehouse.identifyPackage({ packageId: id, labelIdentity: `LABEL-${id}` });
+  const missingPickSlot = warehouse.suggestLocation("missing-pick");
+  warehouse.placePackage({ packageId: "missing-pick", destinationCode: missingPickSlot.code, scannedDestinationCode: missingPickSlot.code, operationId: "missing-pick-place" });
+  const missingReserveSlot = warehouse.suggestLocation("missing-reserve");
+  warehouse.placePackage({ packageId: "missing-reserve", destinationCode: missingReserveSlot.code, scannedDestinationCode: missingReserveSlot.code, operationId: "missing-reserve-place" });
+  db.prepare("UPDATE warehouse_execution_packages SET current_slot_id=NULL,status='LABELED' WHERE id='missing-reserve'").run();
+  dispatch(db, inventory, "missing-reserve", "p2", 1);
+  const discrepancy = warehouse.listReplenishmentTasks().find(({ pickPackageId }) => pickPackageId === "missing-pick");
+  assert.equal(discrepancy?.state, "STOCK_DISCREPANCY");
+  assert.equal(db.prepare("SELECT status FROM inventory_lots WHERE id=?").pluck().get(missingReceipt.inventoryLotId), "STOCK_DISCREPANCY");
+  assert.equal(db.prepare("SELECT COUNT(*) FROM warehouse_stock_discrepancies_v2 WHERE inventory_lot_id=?").pluck().get(missingReceipt.inventoryLotId), 1);
+  assert.equal(warehouse.getReconciliation("p2").reconciled, true);
+  db.close();
+});
+
+test("pending same-lot replenishment is executable and a depleted package releases its reusable slot", () => {
+  const { db, procurement, warehouse } = setup();
+  warehouse.configureTopology(topology([rack("A1")]));
+  const inventory = new InventoryService(db);
+
+  const planned = costed(procurement, "p1", "complete-runtime", 100);
+  receive(db, warehouse, planned.id, "complete-runtime", [
+    { id: "complete-pick", code: "COMPLETE-PICK", quantityBaseInt: 11, targetQuantityBaseInt: 100 },
+    { id: "complete-reserve", code: "COMPLETE-RESERVE", quantityBaseInt: 89 },
+  ], 100);
+  for (const id of ["complete-pick", "complete-reserve"]) warehouse.identifyPackage({ packageId: id, labelIdentity: `LABEL-${id}` });
+  const completePickSlot = warehouse.suggestLocation("complete-pick");
+  warehouse.placePackage({ packageId: "complete-pick", destinationCode: completePickSlot.code, scannedDestinationCode: completePickSlot.code, operationId: "complete-pick-place" });
+  const completeReserveSlot = warehouse.suggestLocation("complete-reserve");
+  warehouse.placePackage({ packageId: "complete-reserve", destinationCode: completeReserveSlot.code, scannedDestinationCode: completeReserveSlot.code, operationId: "complete-reserve-place" });
+  dispatch(db, inventory, "complete-runtime", "p1", 1);
+  const task = warehouse.listReplenishmentTasks().find(({ pickPackageId }) => pickPackageId === "complete-pick")!;
+  assert.equal(task.sourcePackageCode, "COMPLETE-RESERVE");
+  const destination = warehouse.listAvailableLocations("complete-reserve").find((slot) => slot.isFront)!;
+  assert.throws(() => warehouse.completeReplenishment({ taskId: task.id, scannedSourcePackageCode: "WRONG", destinationCode: destination.code, scannedDestinationCode: destination.code, operationId: "complete-wrong" }),
+    (error: unknown) => error instanceof WarehouseExecutionError && error.code === "SOURCE_PACKAGE_SCAN_MISMATCH");
+  const completed = warehouse.completeReplenishment({ taskId: task.id, scannedSourcePackageCode: "COMPLETE-RESERVE", destinationCode: destination.code, scannedDestinationCode: destination.code, operationId: "complete-right" });
+  assert.equal(completed.state, "COMPLETED");
+  assert.equal(warehouse.getPackage("complete-reserve").inventoryLotId, warehouse.getPackage("complete-pick").inventoryLotId);
+  assert.equal(warehouse.getReconciliation("p1").reconciled, true);
+
+  const depletedLot = costed(procurement, "p2", "depleted-runtime", 1);
+  receive(db, warehouse, depletedLot.id, "depleted-runtime", [{ id: "depleted", code: "DEPLETED", quantityBaseInt: 1, targetQuantityBaseInt: 100 }], 1);
+  warehouse.identifyPackage({ packageId: "depleted", labelIdentity: "LABEL-DEPLETED" });
+  const released = warehouse.suggestLocation("depleted");
+  warehouse.placePackage({ packageId: "depleted", destinationCode: released.code, scannedDestinationCode: released.code, operationId: "depleted-place" });
+  dispatch(db, inventory, "depleted-runtime", "p2", 1);
+  assert.equal(warehouse.getPackage("depleted").remainingQuantityBaseInt, 0);
+  assert.equal(warehouse.getPackage("depleted").currentSlotId, null);
+  assert.equal(warehouse.getPositionOccupancy(released.rackCode, released.levelNumber, released.positionNumber).find(({ depthCode }) => depthCode === released.depthCode)?.packageId, null);
+  assert.equal(warehouse.getReconciliation("p2").reconciled, true);
+
+  const reusableLot = costed(procurement, "p3", "reusable-runtime", 1);
+  receive(db, warehouse, reusableLot.id, "reusable-runtime", [{ id: "reusable", code: "REUSABLE", quantityBaseInt: 1 }], 1);
+  warehouse.identifyPackage({ packageId: "reusable", labelIdentity: "LABEL-REUSABLE" });
+  warehouse.placePackage({ packageId: "reusable", destinationCode: released.code, scannedDestinationCode: released.code, operationId: "reusable-place" });
+  assert.equal(warehouse.getPackage("reusable").currentLocationCode, released.code);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM warehouse_package_movements_v2 WHERE package_id='depleted'").pluck().get(), 1, "depleted package history must remain immutable");
   db.close();
 });
 

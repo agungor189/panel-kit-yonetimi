@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { PROCUREMENT_SCHEMA_V67 } from "../db/procurementSchema.js";
 import { PROCUREMENT_REMEDIATION_SCHEMA_V68 } from "../db/procurementRemediationSchema.js";
 import { INVENTORY_SCHEMA_V69 } from "../db/inventorySchema.js";
-import { WAREHOUSE_EXECUTION_SCHEMA_V71 } from "../db/warehouseExecutionSchema.js";
+import { WAREHOUSE_EXECUTION_SCHEMA_V71, WAREHOUSE_REPLENISHMENT_RUNTIME_SCHEMA_V73 } from "../db/warehouseExecutionSchema.js";
 
 interface Migration {
   version: number;
@@ -2812,9 +2812,16 @@ const migrations: Migration[] = [
         ON CONFLICT(id) DO NOTHING`).run();
     },
   },
+  {
+    version: 73,
+    name: "close_event_driven_replenishment_runtime",
+    up(db) {
+      db.exec(WAREHOUSE_REPLENISHMENT_RUNTIME_SCHEMA_V73);
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 72;
+export const CURRENT_SCHEMA_VERSION = 73;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),
@@ -3126,7 +3133,7 @@ function assertV70LegacyInventoryRepresented(db: Database.Database): void {
   }
 }
 
-function assertV71WarehouseSchemaDefinitions(actual: Database.Database): void {
+function assertV71WarehouseSchemaDefinitions(actual: Database.Database, maxVersion = 71): void {
   const reference = new Database(":memory:");
   try {
     reference.exec(`
@@ -3135,6 +3142,7 @@ function assertV71WarehouseSchemaDefinitions(actual: Database.Database): void {
       CREATE TABLE inventory_lots (id TEXT PRIMARY KEY);
     `);
     reference.exec(WAREHOUSE_EXECUTION_SCHEMA_V71);
+    if (maxVersion >= 73) reference.exec(WAREHOUSE_REPLENISHMENT_RUNTIME_SCHEMA_V73);
     const expected = (reference.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE sql IS NOT NULL").all() as Array<SchemaDefinition & { tbl_name: string }>)
       .filter((object) => V71_WAREHOUSE_TABLES.has(object.tbl_name));
     for (const object of expected) {
@@ -3235,7 +3243,7 @@ function validateAppliedMigrations(db: Database.Database, manifest: MigrationMan
     if (maxVersion >= 68) assertV68ProcurementSchemaDefinitions(db);
     if (maxVersion >= 69) assertV69InventorySchemaDefinitions(db);
     if (maxVersion >= 70) assertV70LegacyInventoryRepresented(db);
-    if (maxVersion >= 71) assertV71WarehouseSchemaDefinitions(db);
+    if (maxVersion >= 71) assertV71WarehouseSchemaDefinitions(db, maxVersion);
   }
   if (!hasChecksumColumn) {
     db.transaction(() => {

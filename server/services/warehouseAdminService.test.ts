@@ -359,7 +359,7 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
       ["POST", "/execution/receipts"], ["POST", "/execution/receipts/excess-approvals"],
       ["GET", "/execution/packages/test"], ["GET", "/execution/packages/test/suggestion"],
       ["POST", "/execution/packages/test/identity"], ["POST", "/execution/packages/test/place"],
-      ["POST", "/execution/packages/test/move"], ["POST", "/execution/replenishments/prepare"],
+      ["POST", "/execution/packages/test/move"], ["GET", "/execution/replenishments"], ["POST", "/execution/replenishments/prepare"],
       ["POST", "/execution/replenishments/test/complete"], ["POST", "/execution/discrepancies"],
       ["POST", "/execution/counts"], ["POST", "/execution/counts/test/approve"],
       ["GET", "/execution/products/test/reconciliation"],

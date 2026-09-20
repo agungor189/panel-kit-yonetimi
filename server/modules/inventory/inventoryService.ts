@@ -294,6 +294,7 @@ export class InventoryService {
               locationId: position.location_id,
               quantityBaseInt: take,
               occurredAt: dispatchedAt,
+              operationId,
             });
           } catch (error) {
             if (error instanceof WarehousePackageBalanceError) {

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { canonicalPayloadHash } from "../commands/commandFoundation.js";
 import { InventoryService } from "../inventory/inventoryService.js";
+import { WarehousePackageBalanceError, WarehousePackageBalanceService } from "./warehousePackageBalanceService.js";
 
 type StorageRole = "PICKING" | "RESERVE" | "MIXED" | "QUARANTINE";
 type PackageDisposition = "ACCEPTED" | "DAMAGED";
@@ -613,54 +614,61 @@ export class WarehouseExecutionService {
   prepareReplenishment(input: { productId: string; operationId: string }) {
     const productId = requiredText(input.productId, "productId");
     const operationId = requiredText(input.operationId, "operationId");
-    const settings = this.getSettings();
-    return this.db.transaction(() => {
-      const lot = this.db.prepare(`SELECT id FROM inventory_lots WHERE product_id=? AND on_hand_base_int>0
-        ORDER BY datetime(received_at),received_at,id LIMIT 1`).get(productId) as any;
-      if (!lot) throw new WarehouseExecutionError("STOCK_NOT_FOUND", "No on-hand FIFO lot exists for replenishment.", 404);
-      const pick = this.db.prepare(`SELECT p.*,s.id AS slot_id FROM warehouse_execution_packages p
-        JOIN warehouse_location_slots s ON s.id=p.current_slot_id
-        WHERE p.product_id=? AND p.inventory_lot_id=? AND p.status='PICKING' AND s.is_front=1
-        ORDER BY (p.remaining_quantity_base_int>0) DESC,p.created_at,p.id LIMIT 1`).get(productId, lot.id) as any;
-      if (!pick) throw new WarehouseExecutionError("MANDATORY_PICK_FACE_MISSING", "The FIFO lot has no accessible front pick face.", 409);
-      const currentPct = Math.floor(Number(pick.remaining_quantity_base_int) * 100 / Number(pick.target_quantity_base_int));
-      if (currentPct > settings.watchThresholdPct) return { state: "HEALTHY" as const, productId, lotId: lot.id, currentPct };
-      if (currentPct > settings.prepareThresholdPct) {
-        const taskId = randomUUID();
-        this.db.prepare(`INSERT INTO warehouse_replenishment_tasks
-          (id,operation_id,product_id,inventory_lot_id,pick_package_id,target_slot_id,threshold_pct,current_pct,status)
-          VALUES (?,?,?,?,?,?,?,?, 'LOW_WATCH')`).run(taskId, operationId, productId, lot.id, pick.id, pick.slot_id, settings.watchThresholdPct, currentPct);
-        return { id: taskId, state: "LOW_WATCH" as const, productId, lotId: lot.id, pickPackageId: pick.id, sourcePackageId: null, currentPct };
+    try {
+      return this.db.transaction(() => new WarehousePackageBalanceService(this.db).evaluateProduct(productId, operationId)).immediate();
+    } catch (error) {
+      if (error instanceof WarehousePackageBalanceError) {
+        throw new WarehouseExecutionError(error.code, error.message, error.code === "STOCK_NOT_FOUND" ? 404 : 409);
       }
-      const source = this.db.prepare(`SELECT p.* FROM warehouse_execution_packages p
-        JOIN warehouse_location_slots s ON s.id=p.current_slot_id
-        WHERE p.product_id=? AND p.inventory_lot_id=? AND p.status='RESERVE' AND p.remaining_quantity_base_int>0
-          AND (s.is_front=0 OR s.role='RESERVE') ORDER BY datetime(p.created_at),p.created_at,p.id LIMIT 1`).get(productId, lot.id) as any;
-      const taskId = randomUUID();
-      if (!source) {
-        this.db.prepare(`INSERT INTO warehouse_stock_discrepancies_v2
-          (id,operation_id,product_id,inventory_lot_id,package_id,location_id,reason,status)
-          VALUES (?,?,?,?,?,?,?,'COUNT_REQUIRED')`).run(randomUUID(), operationId, productId, lot.id, null, pick.slot_id, "EXPECTED_SAME_LOT_RESERVE_NOT_FOUND");
-        this.db.prepare("UPDATE inventory_lots SET status='STOCK_DISCREPANCY',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(lot.id);
-        this.db.prepare(`INSERT INTO warehouse_replenishment_tasks
-          (id,operation_id,product_id,inventory_lot_id,pick_package_id,target_slot_id,threshold_pct,current_pct,status)
-          VALUES (?,?,?,?,?,?,?,?, 'STOCK_DISCREPANCY')`).run(taskId, operationId, productId, lot.id, pick.id, pick.slot_id, settings.prepareThresholdPct, currentPct);
-        return { id: taskId, state: "STOCK_DISCREPANCY" as const, productId, lotId: lot.id, pickPackageId: pick.id, sourcePackageId: null, currentPct };
-      }
-      this.db.prepare(`INSERT INTO warehouse_replenishment_tasks
-        (id,operation_id,product_id,inventory_lot_id,pick_package_id,source_package_id,target_slot_id,threshold_pct,current_pct,status)
-        VALUES (?,?,?,?,?,?,?,?,?,'PREPARE_REPLENISHMENT')`).run(taskId, operationId, productId, lot.id, pick.id, source.id, pick.slot_id, settings.prepareThresholdPct, currentPct);
-      return { id: taskId, state: "PREPARE_REPLENISHMENT" as const, productId, lotId: lot.id, pickPackageId: pick.id, sourcePackageId: source.id, currentPct };
-    }).immediate();
+      throw error;
+    }
   }
 
-  completeReplenishment(input: { taskId: string; destinationCode: string; scannedDestinationCode: string; operationId: string; movedAt?: string }) {
+  listReplenishmentTasks() {
+    return (this.db.prepare(`SELECT t.*,p.sku,pick.package_code AS pick_package_code,
+        source.package_code AS source_package_code,target.code AS target_location_code
+      FROM warehouse_replenishment_tasks t
+      JOIN products p ON p.id=t.product_id
+      LEFT JOIN warehouse_execution_packages pick ON pick.id=t.pick_package_id
+      LEFT JOIN warehouse_execution_packages source ON source.id=t.source_package_id
+      LEFT JOIN warehouse_location_slots target ON target.id=t.target_slot_id
+      WHERE t.status IN ('LOW_WATCH','PREPARE_REPLENISHMENT','CRITICAL_NO_RESERVE','STOCK_DISCREPANCY')
+      ORDER BY CASE t.status WHEN 'STOCK_DISCREPANCY' THEN 0 WHEN 'CRITICAL_NO_RESERVE' THEN 1
+        WHEN 'PREPARE_REPLENISHMENT' THEN 2 ELSE 3 END,datetime(t.updated_at),t.id`).all() as any[])
+      .map((row) => ({
+        id: row.id,
+        state: row.status,
+        productId: row.product_id,
+        sku: row.sku,
+        lotId: row.inventory_lot_id,
+        pickPackageId: row.pick_package_id,
+        pickPackageCode: row.pick_package_code ?? null,
+        sourcePackageId: row.source_package_id,
+        sourcePackageCode: row.source_package_code ?? null,
+        targetSlotId: row.target_slot_id,
+        targetLocationCode: row.target_location_code ?? null,
+        thresholdPct: Number(row.threshold_pct),
+        currentPct: Number(row.current_pct),
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }));
+  }
+
+  completeReplenishment(input: { taskId: string; scannedSourcePackageCode: string; destinationCode: string; scannedDestinationCode: string; operationId: string; movedAt?: string }) {
     const taskId = requiredText(input.taskId, "taskId");
     return this.db.transaction(() => {
-      const task = this.db.prepare(`SELECT * FROM warehouse_replenishment_tasks
-        WHERE id=? AND status='PREPARE_REPLENISHMENT'`).get(taskId) as any;
+      const task = this.db.prepare(`SELECT t.*,p.package_code AS source_package_code,p.inventory_lot_id AS source_lot_id
+        FROM warehouse_replenishment_tasks t LEFT JOIN warehouse_execution_packages p ON p.id=t.source_package_id
+        WHERE t.id=? AND t.status='PREPARE_REPLENISHMENT'`).get(taskId) as any;
       if (!task || !task.source_package_id) {
         throw new WarehouseExecutionError("REPLENISHMENT_TASK_NOT_READY", "Replenishment task is not ready for movement.", 409);
+      }
+      const scannedSource = requiredText(input.scannedSourcePackageCode, "scannedSourcePackageCode").toUpperCase();
+      if (scannedSource !== String(task.source_package_code).toUpperCase()) {
+        throw new WarehouseExecutionError("SOURCE_PACKAGE_SCAN_MISMATCH", "Scanned source package does not match the replenishment task.", 409);
+      }
+      if (task.source_lot_id !== task.inventory_lot_id) {
+        throw new WarehouseExecutionError("SAME_LOT_REPLENISHMENT_REQUIRED", "Replenishment source must use the task's canonical lot.", 409);
       }
       const destination = this.listAvailableLocations(task.source_package_id)
         .find((slot) => slot.code === String(input.destinationCode).trim().toUpperCase());

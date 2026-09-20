@@ -268,3 +268,46 @@ export const WAREHOUSE_EXECUTION_SCHEMA_V71 = `
   CREATE TRIGGER trg_warehouse_movement_immutable_delete BEFORE DELETE ON warehouse_package_movements_v2
     BEGIN SELECT RAISE(ABORT, 'warehouse package movements are immutable'); END;
 `;
+
+// Forward-only runtime closure for event-driven replenishment. V71 remains frozen.
+export const WAREHOUSE_REPLENISHMENT_RUNTIME_SCHEMA_V73 = `
+  DROP INDEX idx_warehouse_replenishment_product;
+  ALTER TABLE warehouse_replenishment_tasks RENAME TO warehouse_replenishment_tasks_v71;
+
+  CREATE TABLE warehouse_replenishment_tasks (
+    id                    TEXT PRIMARY KEY,
+    operation_id          TEXT NOT NULL UNIQUE,
+    product_id            TEXT NOT NULL,
+    inventory_lot_id      TEXT NOT NULL,
+    pick_package_id       TEXT,
+    source_package_id     TEXT,
+    target_slot_id        TEXT,
+    threshold_pct         INTEGER NOT NULL,
+    current_pct           INTEGER NOT NULL,
+    status                TEXT NOT NULL CHECK(status IN ('LOW_WATCH','PREPARE_REPLENISHMENT','CRITICAL_NO_RESERVE','STOCK_DISCREPANCY','COMPLETED','CANCELLED')),
+    created_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at          DATETIME,
+    FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT,
+    FOREIGN KEY(inventory_lot_id) REFERENCES inventory_lots(id) ON DELETE RESTRICT,
+    FOREIGN KEY(pick_package_id) REFERENCES warehouse_execution_packages(id) ON DELETE RESTRICT,
+    FOREIGN KEY(source_package_id) REFERENCES warehouse_execution_packages(id) ON DELETE RESTRICT,
+    FOREIGN KEY(target_slot_id) REFERENCES warehouse_location_slots(id) ON DELETE RESTRICT
+  );
+
+  INSERT INTO warehouse_replenishment_tasks
+    (id,operation_id,product_id,inventory_lot_id,pick_package_id,source_package_id,target_slot_id,
+     threshold_pct,current_pct,status,created_at,updated_at,completed_at)
+  SELECT id,operation_id,product_id,inventory_lot_id,pick_package_id,source_package_id,target_slot_id,
+     threshold_pct,current_pct,status,created_at,updated_at,completed_at
+  FROM warehouse_replenishment_tasks_v71;
+
+  DROP TABLE warehouse_replenishment_tasks_v71;
+
+  CREATE INDEX idx_warehouse_replenishment_product
+    ON warehouse_replenishment_tasks(product_id,status,created_at,id);
+  CREATE UNIQUE INDEX idx_warehouse_replenishment_one_open_pick_lot
+    ON warehouse_replenishment_tasks(pick_package_id,inventory_lot_id)
+    WHERE pick_package_id IS NOT NULL
+      AND status IN ('LOW_WATCH','PREPARE_REPLENISHMENT','CRITICAL_NO_RESERVE','STOCK_DISCREPANCY');
+`;

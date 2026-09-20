@@ -369,9 +369,15 @@ export function createWarehouseRouter({
       });
     } catch (error) { return handleServiceError(res, error); }
   });
+  router.get("/execution/replenishments", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:move_stock"), (req, res) => {
+    try {
+      auditRead(req);
+      return res.json({ success: true, contract: "dsdst.warehouse-replenishment-tasks.v1", data: executionService.listReplenishmentTasks() });
+    } catch (error) { return handleServiceError(res, error); }
+  });
   router.post("/execution/replenishments/:id/complete", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:move_stock"), (req, res) => {
     try {
-      const payload = { taskId: req.params.id, destinationCode: req.body?.destinationCode ?? null, scannedDestinationCode: req.body?.scannedDestinationCode ?? null, movedAt: req.body?.movedAt ?? null };
+      const payload = { taskId: req.params.id, scannedSourcePackageCode: req.body?.scannedSourcePackageCode ?? null, destinationCode: req.body?.destinationCode ?? null, scannedDestinationCode: req.body?.scannedDestinationCode ?? null, movedAt: req.body?.movedAt ?? null };
       return executeWarehouseCommand(req, res, "warehouse:move_stock", "warehouse.replenishment.complete.v1", payload, (context) => {
         const data = executionService.completeReplenishment({ ...payload, operationId: operationIdFromRequest(req) } as any);
         context.addOutbox({ topic: "warehouse", eventType: "warehouse.replenishment.completed.v1", aggregateType: "warehouse_replenishment", aggregateId: data.id, payload: { task_id: data.id, lot_id: data.lotId } });
