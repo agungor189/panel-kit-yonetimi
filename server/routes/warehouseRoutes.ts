@@ -496,11 +496,14 @@ export function createWarehouseRouter({
       const input = req.body || {};
       const operationId = operationIdFromRequest(req);
       const printerName = String(input.printer_name ?? "").trim().slice(0, 160) || null;
+      const capability = userHasWarehousePermission(actor(res), "warehouse:print_labels")
+        ? "warehouse:print_labels"
+        : "warehouse:manage_locations";
       const outcome = commandExecutor.execute(commandRequest(
         req,
         res,
         "warehouse.location-label.queue.v1",
-        "warehouse:print_labels|warehouse:manage_locations",
+        capability,
         { location_id: req.params.id, printer_name: printerName },
       ), () => {
         const result = adminService.queueLocationPrint(req.params.id, { ...input, idempotency_key: operationId }, actor(res));

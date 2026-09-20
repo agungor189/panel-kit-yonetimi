@@ -9,6 +9,7 @@ import { initializeDatabase } from "../../db/initialize.js";
 import {
   canonicalPayloadHash,
   CommandExecutor,
+  CommandFoundationError,
   OperationConflictError,
 } from "./commandFoundation.js";
 
@@ -91,6 +92,24 @@ test("same scoped key with a different payload conflicts without a second effect
   assert.equal(db.prepare("SELECT effect_count FROM command_test_effects WHERE id = 'counter'").pluck().get(), 1);
   assert.equal(count(db, "command_operations"), 1);
   assert.equal(count(db, "command_audit_log"), 1);
+  db.close();
+});
+
+test("a command without an explicit allow decision fails before the handler", () => {
+  const { db, executor } = setup();
+  let called = false;
+  const denied = { ...command("op-denied"), authorization: { decision: "DENY", capability: "test:increment" } };
+  assert.throws(
+    () => executor.execute(denied as any, () => {
+      called = true;
+      return { statusCode: 200, body: { ok: true } };
+    }),
+    (error: unknown) => error instanceof CommandFoundationError
+      && error.statusCode === 403
+      && error.code === "AUTHORIZATION_REQUIRED",
+  );
+  assert.equal(called, false);
+  assert.equal(count(db, "command_operations"), 0);
   db.close();
 });
 

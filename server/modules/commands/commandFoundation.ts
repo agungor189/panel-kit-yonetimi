@@ -133,6 +133,11 @@ export class CommandExecutor {
     if (!humanActorId && !serviceActorId) {
       throw new CommandFoundationError(400, "ACTOR_REQUIRED", "A human or service actor is required.");
     }
+    if (request.authorization?.decision !== "ALLOW") {
+      throw new CommandFoundationError(403, "AUTHORIZATION_REQUIRED", "The command requires an explicit allow decision.");
+    }
+    const humanActorName = optionalText(request.actor.human?.name, "actor.human.name", 200);
+    const serviceActorName = optionalText(request.actor.service?.name, "actor.service.name", 200);
     const actorScope = canonicalPayloadHash({ humanActorId, serviceActorId });
     const payloadHash = canonicalPayloadHash(request.payload);
     const correlationId = optionalText(request.correlationId, "correlationId", 200);
@@ -187,8 +192,7 @@ export class CommandExecutor {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ALLOW', ?, ?, ?, ?, ?, ?)
       `).run(
         randomUUID(), operationRecordId, operationId, humanActorId,
-        optionalText(request.actor.human?.name, "actor.human.name", 200),
-        serviceActorId, optionalText(request.actor.service?.name, "actor.service.name", 200),
+        humanActorName, serviceActorId, serviceActorName,
         commandType, payloadHash, capability, result.statusCode, resultHash,
         correlationId, requestId, requestMetadataJson,
       );
