@@ -2787,9 +2787,16 @@ const migrations: Migration[] = [
       db.exec(INVENTORY_SCHEMA_V69);
     },
   },
+  {
+    version: 70,
+    name: "guard_unrepresented_legacy_inventory",
+    up(db) {
+      assertV70LegacyInventoryRepresented(db);
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 69;
+export const CURRENT_SCHEMA_VERSION = 70;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),
@@ -3075,6 +3082,24 @@ function assertV69InventorySchemaDefinitions(actual: Database.Database): void {
   }
 }
 
+function assertV70LegacyInventoryRepresented(db: Database.Database): void {
+  const unrepresented = db.prepare(`
+    SELECT p.id
+    FROM products p
+    WHERE COALESCE(p.central_stock, 0) <> 0
+      AND NOT EXISTS (
+        SELECT 1 FROM inventory_ledger_events e WHERE e.product_id = p.id
+      )
+    ORDER BY p.id
+    LIMIT 1
+  `).get() as { id: string } | undefined;
+  if (unrepresented) {
+    throw new Error(
+      `INVENTORY_MIGRATION_REQUIRED: product ${unrepresented.id} has nonzero legacy central_stock without authoritative inventory ledger representation`,
+    );
+  }
+}
+
 function assertSchemaEffects(actual: Database.Database, maxVersion: number): void {
   if (maxVersion < SUPPORTED_UPGRADE_STARTS[0]) {
     throw new Error(`Migration checksum history at v${maxVersion} is not a supported verifiable checkpoint`);
@@ -3160,6 +3185,7 @@ function validateAppliedMigrations(db: Database.Database, manifest: MigrationMan
     if (maxVersion === 67) assertV67ProcurementSchemaDefinitions(db);
     if (maxVersion >= 68) assertV68ProcurementSchemaDefinitions(db);
     if (maxVersion >= 69) assertV69InventorySchemaDefinitions(db);
+    if (maxVersion >= 70) assertV70LegacyInventoryRepresented(db);
   }
   if (!hasChecksumColumn) {
     db.transaction(() => {
@@ -3207,6 +3233,7 @@ export function runMigrations(
       if (migration.version === 67) assertV67ProcurementSchemaDefinitions(db);
       if (migration.version === 68) assertV68ProcurementSchemaDefinitions(db);
       if (migration.version === 69) assertV69InventorySchemaDefinitions(db);
+      if (migration.version === 70) assertV70LegacyInventoryRepresented(db);
       insertMigration.run(migration.version, migration.name, checksumFor(migration));
     })();
 

@@ -28,7 +28,8 @@ import { createCatalogAdminV1Router } from "./server/routes/catalogAdminV1Routes
 import { createProcurementV1Router } from "./server/routes/procurementV1Routes.js";
 import { createInventoryV1Router } from "./server/routes/inventoryV1Routes.js";
 import { rejectLegacyCatalogMutation } from "./server/modules/catalog/legacyCatalogGuard.js";
-import { CommandExecutor } from "./server/modules/commands/commandFoundation.js";
+import { CommandExecutor, CommandFoundationError } from "./server/modules/commands/commandFoundation.js";
+import { InventoryService, InventoryValidationError } from "./server/modules/inventory/inventoryService.js";
 import { createPanelApiAuth } from "./server/middleware/panelApiAuth.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
 import { restoreUploadEntry } from "./server/utils/restoreUploads.js";
@@ -41,11 +42,7 @@ import {
   validUserRoles,
 } from "./server/modules/auth/index.js";
 import { mountWarehouseModule } from "./server/modules/warehouse/index.js";
-import {
-  centralStockChannel,
-  createProductStockModule,
-  stockQuantity,
-} from "./server/modules/products/stock.js";
+import { createProductStockModule } from "./server/modules/products/stock.js";
 import { createApiKeyHasher } from "./server/modules/integrations/apiKeys.js";
 import {
   DEFAULT_BACKUP_CONFIG,
@@ -142,6 +139,8 @@ const uploadsDir = ensureOwnedUploadRoot(path.join(process.cwd(), "uploads"));
 const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), "dsdst_panel.db");
 let db = openDatabase(DB_PATH);
 initializeDatabase(db);
+const inventoryService = new InventoryService(db);
+const saleCommands = new CommandExecutor(db);
 const {
   getProductBomComponents,
   getProductStockProfile,
@@ -378,20 +377,6 @@ function reserveOrderCode(): string {
 
 function saleDisplayCode(sale: any): string {
   return cleanText(sale?.order_code) || cleanText(sale?.id) || 'Bilinmeyen';
-}
-
-function saleStockMovementReasons(sale: any): string[] {
-  const reasons = new Set<string>();
-  if (sale?.id) reasons.add(`Satış No: ${sale.id}`);
-  if (sale?.order_code) reasons.add(`Satış No: ${sale.order_code}`);
-  return [...reasons];
-}
-
-function saleStockMovementLikePatterns(sale: any): string[] {
-  const patterns = new Set<string>();
-  if (sale?.id) patterns.add(`%Sipariş: ${sale.id}%`);
-  if (sale?.order_code) patterns.add(`%Sipariş: ${sale.order_code}%`);
-  return [...patterns];
 }
 
 function readJsonSetting<T>(key: string, fallback: T): T {
@@ -1419,6 +1404,8 @@ async function startServer() {
   const requireSettingsAdmin = auth.requireCapability("settings:admin");
   const requireMaintenanceAdmin = auth.requireCapability("maintenance:admin");
   const requireFinanceWrite = auth.requireCapability("finance:write");
+  const requireInventoryReserve = auth.requireCapability("inventory:reserve");
+  const requireInventoryRelease = auth.requireCapability("inventory:release");
 
   // --- API ROUTES ---
 
@@ -2816,47 +2803,13 @@ async function startServer() {
 
   // Stock Movement
   app.post("/api/stock/adjust", (req, res) => {
-    const { product_id, platform_name, change_amount, reason } = req.body;
-
-    try {
-      const delta = Math.trunc(Number(change_amount));
-      if (!Number.isFinite(delta) || delta === 0) {
-        return res.status(400).json({ success: false, error: { code: 'INVALID_STOCK_CHANGE', message: 'Stok değişimi 0 olamaz.' } });
-      }
-
-      db.transaction(() => {
-        const beforeState = db.prepare("SELECT id, central_stock FROM products WHERE id = ?").get(product_id) as any;
-        if (!beforeState) throw new Error("Ürün bulunamadı.");
-        const hasBom = (db.prepare("SELECT COUNT(*) as count FROM product_bom WHERE parent_product_id = ?").get(product_id) as any)?.count > 0;
-        if (hasBom) {
-          throw new Error("Bu final ürünün stoğu H parça reçetesinden hesaplanır. Stok düzeltmesini ilgili H komponent ürününde yapın.");
-        }
-
-        const beforeStock = stockQuantity(beforeState.central_stock);
-        const nextStock = beforeStock + delta;
-        if (nextStock < 0) throw new Error(`Yetersiz merkez depo stoğu. Mevcut stok: ${beforeStock} adet.`);
-
-        db.prepare("UPDATE products SET central_stock = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-          .run(nextStock, product_id);
-
-        db.prepare(`
-          INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(uuidv4(), product_id, centralStockChannel(platform_name), delta, reason || 'Manuel merkez depo stok ayarı', 'ADJUST');
-
-        logActivity('UPDATE_STOCK', 'product', product_id, {
-          channel: centralStockChannel(platform_name),
-          change_amount: delta,
-          reason,
-          before: { central_stock: beforeStock },
-          after: { central_stock: nextStock },
-        }, req.user?.id);
-      })();
-
-      res.json({ success: true });
-    } catch (err: any) {
-      res.status(400).json({ success: false, error: { code: 'STOCK_ADJUST_FAILED', message: err.message } });
-    }
+    return res.status(409).json({
+      success: false,
+      error: {
+        code: "STOCK_ADJUSTMENT_REQUIRES_LOT_CORRECTION",
+        message: "Direct stock adjustment is disabled. Use the authorized inventory lot/location correction contract.",
+      },
+    });
   });
 
   app.get("/api/stock/movements/:productId", (req, res) => {
@@ -3688,12 +3641,16 @@ async function startServer() {
 
   const buildSaleStockPlan = (product: any, saleQuantity: number) => {
     const stockProfile = getProductStockProfile(product);
-    const quantity = Math.max(Math.trunc(Number(saleQuantity)) || 0, 0);
+    const quantity = Number(saleQuantity);
+    if (!Number.isSafeInteger(quantity) || quantity <= 0) {
+      throw new InventoryValidationError("INVALID_BASE_QUANTITY", "Sale quantity must be a positive base-unit integer.");
+    }
 
     if (!stockProfile.hasBom) {
+      const availability = inventoryService.getProductAvailability(product.id);
       return {
         hasBom: false,
-        available_stock: stockProfile.available_stock,
+        available_stock: availability.availableBaseInt,
         unit_purchase_cost: stockProfile.unit_purchase_cost,
         unit_weight: stockProfile.unit_weight,
         movements: [{
@@ -3701,128 +3658,47 @@ async function startServer() {
           sku: product.sku,
           title: product.title || product.name,
           quantity_required: quantity,
-          available_stock: stockProfile.available_stock,
+          available_stock: availability.availableBaseInt,
           component_role: null,
-          movement_type: 'OUT',
+          movement_type: 'RESERVATION',
         }],
       };
     }
 
-    return {
-      hasBom: true,
-      available_stock: stockProfile.available_stock,
-      unit_purchase_cost: stockProfile.unit_purchase_cost,
-      unit_weight: stockProfile.unit_weight,
-      movements: stockProfile.components.map((component: any) => ({
+    let availableStock = Number.POSITIVE_INFINITY;
+    const movements = stockProfile.components.map((component: any) => {
+      const quantityPerUnit = Number(component.quantity_per_unit);
+      if (!Number.isSafeInteger(quantityPerUnit) || quantityPerUnit <= 0) {
+        throw new InventoryValidationError(
+          "INVALID_BASE_QUANTITY",
+          `BOM component ${component.component_product_id} must use a positive base-unit integer quantity.`,
+        );
+      }
+      const availability = inventoryService.getProductAvailability(component.component_product_id);
+      availableStock = Math.min(availableStock, Math.floor(availability.availableBaseInt / quantityPerUnit));
+      return {
         product_id: component.component_product_id,
         sku: component.sku,
         title: component.title || component.name,
-        quantity_required: component.quantity_per_unit * quantity,
-        available_stock: stockQuantity(component.central_stock),
+        quantity_required: quantityPerUnit * quantity,
+        available_stock: availability.availableBaseInt,
         component_role: component.component_role,
         final_product_id: product.id,
         final_sku: product.sku,
         final_title: product.title || product.name,
-        movement_type: 'BOM_CONSUMPTION',
-      })),
+        movement_type: 'BOM_RESERVATION',
+      };
+    });
+    return {
+      hasBom: true,
+      available_stock: Number.isFinite(availableStock) ? Math.max(availableStock, 0) : 0,
+      unit_purchase_cost: stockProfile.unit_purchase_cost,
+      unit_weight: stockProfile.unit_weight,
+      movements,
     };
-  };
-
-  const applySaleStockDeduction = (item: any, sale: any) => {
-    for (const movement of item.stock_plan.movements) {
-      const requiredQuantity = Math.trunc(Number(movement.quantity_required));
-      if (!Number.isFinite(requiredQuantity) || requiredQuantity <= 0) continue;
-
-      const stockUpdate = db.prepare(`
-        UPDATE products
-        SET central_stock = COALESCE(central_stock, 0) - ?,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND COALESCE(central_stock, 0) >= ?
-      `).run(requiredQuantity, movement.product_id, requiredQuantity);
-
-      if (stockUpdate.changes === 0) {
-        const currentStock = db.prepare("SELECT COALESCE(central_stock, 0) as central_stock, title, sku FROM products WHERE id = ?")
-          .get(movement.product_id) as any;
-        throw new Error(
-          `Yetersiz komponent/merkez depo stoğu. ${currentStock?.title || movement.title || item.product_name} (${currentStock?.sku || movement.sku || ''}) için mevcut stok: ${currentStock?.central_stock || 0} adet.`
-        );
-      }
-
-      const isBomConsumption = movement.movement_type === 'BOM_CONSUMPTION';
-      const movementReason = isBomConsumption
-        ? `BOM Tüketimi | Final SKU: ${movement.final_sku || item.product_sku || item.product_id} | Component SKU: ${movement.sku || movement.product_id} | Sipariş: ${sale.order_code}`
-        : `Satış No: ${sale.order_code}`;
-
-      db.prepare("INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(
-          uuidv4(),
-          movement.product_id,
-          centralStockChannel(sale.platform),
-          -requiredQuantity,
-          movementReason,
-          isBomConsumption ? 'BOM_CONSUMPTION' : 'OUT'
-        );
-    }
-  };
-
-  const restoreSaleStock = (sale: any, finalStatus: string) => {
-    const originalMovementReasons = saleStockMovementReasons(sale);
-    const originalMovementLikePatterns = saleStockMovementLikePatterns(sale);
-    const restoredByProduct = new Map<string, number>();
-    const placeholders = originalMovementReasons.map(() => "?").join(",");
-    const likeClauses = originalMovementLikePatterns.map(() => "reason LIKE ?").join(" OR ");
-    const reasonClauses = [
-      originalMovementReasons.length > 0 ? `reason IN (${placeholders})` : null,
-      likeClauses ? `(${likeClauses})` : null,
-    ].filter(Boolean).join(" OR ");
-
-    const originalMovements = db.prepare(`
-      SELECT product_id, platform_name, SUM(ABS(change_amount)) as quantity
-      FROM stock_movements
-      WHERE (${reasonClauses}) AND type IN ('OUT', 'BOM_CONSUMPTION') AND change_amount < 0
-      GROUP BY product_id, platform_name
-    `).all(...originalMovementReasons, ...originalMovementLikePatterns) as any[];
-
-    const restoreToCentralStock = (productId: string, saleChannel: string | null | undefined, quantity: number) => {
-      if (!productId || quantity <= 0) return;
-
-      db.prepare("UPDATE products SET central_stock = COALESCE(central_stock, 0) + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-        .run(quantity, productId);
-      db.prepare(`
-        INSERT INTO stock_movements (id, product_id, platform_name, change_amount, reason, type)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(uuidv4(), productId, centralStockChannel(saleChannel), quantity, `${finalStatus} — Satış No: ${saleDisplayCode(sale)}`, 'IN');
-
-      restoredByProduct.set(productId, (restoredByProduct.get(productId) || 0) + quantity);
-    };
-
-    for (const movement of originalMovements) {
-      restoreToCentralStock(movement.product_id, movement.platform_name, Number(movement.quantity) || 0);
-    }
-
-    if (originalMovements.length > 0) return;
-
-    const saleItems = db.prepare("SELECT product_id, SUM(quantity) as quantity FROM sale_items WHERE sale_id = ? GROUP BY product_id").all(sale.id) as any[];
-    for (const item of saleItems) {
-      if (!item.product_id) continue;
-      const soldQty = Number(item.quantity) || 0;
-      const product = db.prepare("SELECT * FROM products WHERE id = ?").get(item.product_id) as any;
-      if (!product) continue;
-      const stockPlan = buildSaleStockPlan(product, soldQty);
-
-      for (const movement of stockPlan.movements) {
-        const restoredQty = restoredByProduct.get(movement.product_id) || 0;
-        const remainingQty = Math.trunc(Number(movement.quantity_required)) - restoredQty;
-        if (remainingQty > 0) {
-          restoreToCentralStock(movement.product_id, sale.platform, remainingQty);
-        }
-      }
-    }
   };
 
   const reverseSaleLedger = (sale: any, finalStatus: string) => {
-    restoreSaleStock(sale, finalStatus);
-
     if (sale.income_transaction_id) {
       db.prepare(`
         UPDATE transactions
@@ -3868,8 +3744,15 @@ async function startServer() {
     );
   };
 
-  const updateSaleRecord = (saleId: string, changes: any, userId?: string) => {
+  const updateSaleRecord = (
+    saleId: string,
+    changes: any,
+    operationId: string,
+    userId?: string,
+  ): { sale: any; inventoryTransition: "NONE" | "RELEASED" | "DISPATCHED_NO_RESTOCK"; reservationId: string } => {
     let updatedSale: any = null;
+    let inventoryTransition: "NONE" | "RELEASED" | "DISPATCHED_NO_RESTOCK" = "NONE";
+    const reservationId = `sale-reservation:${saleId}`;
 
     db.transaction(() => {
       const sale = db.prepare("SELECT * FROM sales WHERE id = ?").get(saleId) as any;
@@ -3902,6 +3785,17 @@ async function startServer() {
 
       const isBecomingFinal = willBeFinal && !wasFinal;
       if (isBecomingFinal) {
+        const reservation = db.prepare("SELECT status FROM inventory_reservations WHERE id=?").get(reservationId) as { status: string } | undefined;
+        if (reservation && ["ACTIVE", "PICKED", "PACKED", "STOCK_DISCREPANCY"].includes(reservation.status)) {
+          inventoryService.releaseReservation({
+            reservationId,
+            reason: `${targetStatus}: sale ${saleDisplayCode(sale)}`,
+            operationId,
+          });
+          inventoryTransition = "RELEASED";
+        } else if (reservation?.status === "DISPATCHED") {
+          inventoryTransition = "DISPATCHED_NO_RESTOCK";
+        }
         reverseSaleLedger(sale, targetStatus);
         logActivity(targetStatus === 'İptal Edildi' ? 'SALE_CANCELLED' : 'SALE_RETURNED', 'sale', saleId,
           { order_code: sale.order_code, external_order_id: targetExternalOrderId, reason: changes.return_reason, previous_status: sale.status }, userId);
@@ -3938,24 +3832,49 @@ async function startServer() {
       updatedSale = db.prepare("SELECT * FROM sales WHERE id = ?").get(saleId);
     })();
 
-    return updatedSale;
+    return { sale: updatedSale, inventoryTransition, reservationId };
   };
 
-  app.patch("/api/sales/:id/status", (req, res) => {
+  const saleOperationId = (req: express.Request) => String(
+    req.headers["x-operation-id"] || req.headers["idempotency-key"] || req.body?.idempotency_key || "",
+  ).trim();
+  const saleActor = (req: express.Request) => ({ human: { id: req.user!.id, name: req.user!.username } });
+  const saleCommandError = (err: any, res: express.Response, fallbackCode: string) => {
+    if (err instanceof CommandFoundationError || err instanceof InventoryValidationError) {
+      return res.status(err.statusCode).json({ success: false, error: { code: err.code, message: err.message } });
+    }
+    return res.status(err.statusCode || 400).json({ success: false, error: { code: err.code || fallbackCode, message: err.message } });
+  };
+  const requireReleaseForFinalSale = (req: express.Request, res: express.Response, next: express.NextFunction) => (
+    isFinalSaleStatus(req.body?.status) ? requireInventoryRelease(req, res, next) : next()
+  );
+
+  app.patch("/api/sales/:id/status", requireReleaseForFinalSale, (req, res) => {
     try {
       const { status } = req.body;
       if (!status) {
         return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Durum zorunludur.' } });
       }
-
-      const updatedSale = updateSaleRecord(req.params.id, {
-        status,
-        return_reason: req.body.return_reason,
-      }, req.user?.id);
-
-      res.json({ success: true, message: "Durum güncellendi", sale: updatedSale });
+      const payload = { saleId: req.params.id, status, return_reason: req.body.return_reason ?? null };
+      const outcome = saleCommands.execute({
+        operationId: saleOperationId(req),
+        commandType: "sales.order.status.update.v1",
+        payload,
+        actor: saleActor(req),
+        authorization: { decision: "ALLOW", capability: isFinalSaleStatus(status) ? "inventory:release" : "sales:write" },
+        correlationId: req.headers["x-correlation-id"]?.toString(),
+        requestId: req.headers["x-request-id"]?.toString(),
+      }, (context) => {
+        const updated = updateSaleRecord(req.params.id, payload, saleOperationId(req), req.user?.id);
+        if (updated.inventoryTransition === "RELEASED") {
+          context.addOutbox({ topic: "inventory", eventType: "inventory.reservation.released.v1", aggregateType: "reservation", aggregateId: updated.reservationId, payload: { reservation_id: updated.reservationId, order_id: req.params.id, reason: status } });
+        }
+        context.addOutbox({ topic: "sales", eventType: "sales.order.status-updated.v1", aggregateType: "sale", aggregateId: req.params.id, payload: { sale_id: req.params.id, status, inventory_transition: updated.inventoryTransition } });
+        return { statusCode: 200, body: { success: true, message: "Durum güncellendi", sale: updated.sale } };
+      });
+      return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as any), idempotent: outcome.replayed });
     } catch (err: any) {
-      res.status(err.statusCode || 400).json({ success: false, error: { code: 'UPDATE_FAILED', message: err.message } });
+      return saleCommandError(err, res, "UPDATE_FAILED");
     }
   });
 
@@ -3990,13 +3909,29 @@ async function startServer() {
     }
   });
 
-  app.put("/api/sales/:id", (req, res) => {
+  app.put("/api/sales/:id", requireReleaseForFinalSale, (req, res) => {
     try {
-      const updatedSale = updateSaleRecord(req.params.id, req.body, req.user?.id);
-      res.json({ success: true, message: "Satış güncellendi.", sale: getSaleWithItems(updatedSale.id) });
+      const payload = { saleId: req.params.id, changes: req.body };
+      const outcome = saleCommands.execute({
+        operationId: saleOperationId(req),
+        commandType: "sales.order.update.v1",
+        payload,
+        actor: saleActor(req),
+        authorization: { decision: "ALLOW", capability: isFinalSaleStatus(req.body?.status) ? "inventory:release" : "sales:write" },
+        correlationId: req.headers["x-correlation-id"]?.toString(),
+        requestId: req.headers["x-request-id"]?.toString(),
+      }, (context) => {
+        const updated = updateSaleRecord(req.params.id, req.body, saleOperationId(req), req.user?.id);
+        if (updated.inventoryTransition === "RELEASED") {
+          context.addOutbox({ topic: "inventory", eventType: "inventory.reservation.released.v1", aggregateType: "reservation", aggregateId: updated.reservationId, payload: { reservation_id: updated.reservationId, order_id: req.params.id, reason: req.body?.status } });
+        }
+        context.addOutbox({ topic: "sales", eventType: "sales.order.updated.v1", aggregateType: "sale", aggregateId: req.params.id, payload: { sale_id: req.params.id, status: updated.sale.status, inventory_transition: updated.inventoryTransition } });
+        return { statusCode: 200, body: { success: true, message: "Satış güncellendi.", sale: getSaleWithItems(updated.sale.id) } };
+      });
+      return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as any), idempotent: outcome.replayed });
     } catch (err: any) {
       AppLogger.error('SALE_UPDATE_ERROR', 'Sale update failed', err);
-      res.status(err.statusCode || 400).json({ success: false, error: { code: 'UPDATE_FAILED', message: err.message } });
+      return saleCommandError(err, res, "UPDATE_FAILED");
     }
   });
 
@@ -4006,25 +3941,31 @@ async function startServer() {
     discount: z.coerce.number().min(0, 'İndirim negatif olamaz').optional().default(0),
     total_amount: z.coerce.number().min(0, 'Genel toplam negatif olamaz'),
     items: z.array(z.object({
-      quantity: z.coerce.number().min(1, 'Satış miktarı 0 dan büyük olmalıdır'),
+      quantity: z.coerce.number().int('Satış miktarı tam sayı olmalıdır').positive('Satış miktarı 0 dan büyük olmalıdır').max(Number.MAX_SAFE_INTEGER),
       price: z.coerce.number().min(0, 'Birim fiyat negatif olamaz'),
-    }).passthrough())
+    }).passthrough()).min(1, 'En az bir satış kalemi zorunludur')
   });
 
-  app.post("/api/sales", (req, res) => {
+  app.post("/api/sales", requireInventoryReserve, (req, res) => {
     try {
-      const validated = saleSchema.parse(req.body);
-      const id = uuidv4();
-      let orderCode = '';
+      saleSchema.parse(req.body);
       const {
         customer_name, customer_phone, customer_address,
         shipping_company, tracking_number, external_order_id, total_weight, total_quantity, total_amount,
         items, platform, commission_rate, shipping_cost, discount, cash_account_id,
         packaging_cost, ad_spend, other_expenses
       } = req.body;
-
-      db.transaction(() => {
-        orderCode = reserveOrderCode();
+      const outcome = saleCommands.execute({
+        operationId: saleOperationId(req),
+        commandType: "sales.order.create.v1",
+        payload: req.body,
+        actor: saleActor(req),
+        authorization: { decision: "ALLOW", capability: "inventory:reserve" },
+        correlationId: req.headers["x-correlation-id"]?.toString(),
+        requestId: req.headers["x-request-id"]?.toString(),
+      }, (context) => {
+        const id = uuidv4();
+        const orderCode = reserveOrderCode();
 
         // Sepette aynı ürün birden fazla satırda varsa, stok hatasını engellemek için adetleri birleştir:
         const mergedItemsMap = new Map();
@@ -4058,12 +3999,40 @@ async function startServer() {
         };
       });
 
-        // 1. Central warehouse stock validation for all items
+        // 1. Canonical available inventory validation for all sale lines.
         for (const item of processedItems) {
           if (item.available_stock < item.quantity) {
-            throw new Error(`Yetersiz merkez depo/komponent stoğu. ${item.product_name} için üretilebilir mevcut stok: ${item.available_stock} adet.`);
+            throw new InventoryValidationError(
+              "INSUFFICIENT_AVAILABLE_STOCK",
+              `Insufficient canonical available inventory for ${item.product_name || item.product_id}. Buildable quantity: ${item.available_stock}.`,
+              409,
+            );
           }
         }
+
+        // A sale may contain multiple final SKUs using the same component. Reserve the
+        // aggregated base quantity once so the atomic inventory check cannot oversell.
+        const reservationByProduct = new Map<string, number>();
+        for (const item of processedItems) {
+          for (const movement of item.stock_plan.movements) {
+            const required = Number(movement.quantity_required);
+            if (!Number.isSafeInteger(required) || required <= 0) {
+              throw new InventoryValidationError("INVALID_BASE_QUANTITY", "Sale stock plan must use positive base-unit integers.");
+            }
+            const aggregated = (reservationByProduct.get(movement.product_id) || 0) + required;
+            if (!Number.isSafeInteger(aggregated)) {
+              throw new InventoryValidationError("INVALID_BASE_QUANTITY", "Aggregated sale stock plan exceeds the safe integer range.");
+            }
+            reservationByProduct.set(movement.product_id, aggregated);
+          }
+        }
+        const reservationId = `sale-reservation:${id}`;
+        const reservation = inventoryService.reserveOrder({
+          reservationId,
+          orderId: id,
+          lines: [...reservationByProduct].map(([productId, quantityBaseInt]) => ({ productId, quantityBaseInt })),
+          operationId: saleOperationId(req),
+        });
 
         const commRate = parseFloat(commission_rate) || 0;
         const discountAmt = parseFloat(discount) || 0;
@@ -4133,7 +4102,7 @@ async function startServer() {
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
 
-        // 3. Process items: Sale Items, central stock deduction, Stock Movements
+        // 3. Process sale items. Physical inventory remains unchanged until dispatch.
         for (const item of processedItems) {
           const lineRevenue = item.price * item.quantity;
           const lineCost = item.purchase_cost * item.quantity;
@@ -4141,8 +4110,6 @@ async function startServer() {
           const itemNetProfit = lineRevenue - lineCost - lineCommission;
 
           insertItem.run(uuidv4(), id, item.product_id, item.product_name, item.quantity, item.weight, item.price, item.purchase_cost, itemNetProfit);
-
-          applySaleStockDeduction(item, { order_code: orderCode, platform: plat });
         }
 
         // 4. Auto-create income transaction so the financial ledger is always consistent.
@@ -4164,15 +4131,18 @@ async function startServer() {
           order_code: orderCode, external_order_id: externalOrderId, customer: customer_name, platform: plat, total: total_amount, net_profit: netProfit,
         }, req.user?.id);
 
-      })();
+        context.addOutbox({ topic: "inventory", eventType: "inventory.order.reserved.v1", aggregateType: "reservation", aggregateId: reservationId, payload: { reservation_id: reservationId, order_id: id, lines: [...reservationByProduct].map(([product_id, quantity_base_int]) => ({ product_id, quantity_base_int })) } });
+        context.addOutbox({ topic: "sales", eventType: "sales.order.created.v1", aggregateType: "sale", aggregateId: id, payload: { sale_id: id, order_code: orderCode, reservation_id: reservation.id } });
+        return { statusCode: 201, body: { success: true, message: "Satış başarıyla kaydedildi.", id, order_code: orderCode, reservation_id: reservationId } };
+      });
 
-      res.json({ success: true, message: "Satış başarıyla kaydedildi.", id, order_code: orderCode });
+      return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as any), idempotent: outcome.replayed });
     } catch (err: any) {
       if (err instanceof z.ZodError) {
          return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: err.issues } });
       }
       AppLogger.error('SALE_ERROR', 'Sale transaction failed', err);
-      res.status(400).json({ success: false, error: { code: 'SALE_FAILED', message: err.message } });
+      return saleCommandError(err, res, "SALE_FAILED");
     }
   });
 

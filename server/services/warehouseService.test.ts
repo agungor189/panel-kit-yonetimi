@@ -435,7 +435,7 @@ test("v60 aktif fiziksel layoutu 4x7 olarak onarır ve eksik lokasyonları iliş
     package_number, total_packages, planned_quantity, remaining_quantity, status, current_location_id
   ) VALUES ('preserved-package', 'PKG-LAYOUT', 'layout-batch', 'layout-line', 'layout-product', 'SUP-LAYOUT',
     1, 1, 4, 4, 'PLACED', 'preserved-location-id')`).run();
-  runMigrations(legacy);
+  runMigrations(legacy, 60);
 
   const repairedLayout = JSON.parse((legacy.prepare("SELECT layout_json FROM warehouse_layouts WHERE id = 'physical-layout'").get() as any).layout_json);
   assert.equal(repairedLayout.objects.filter((object: any) => object.type === "rack").length, 15);
@@ -473,7 +473,7 @@ test("v60 aktif fiziksel layoutu 4x7 olarak onarır ve eksik lokasyonları iliş
     placement_priority: "LAST_RESORT",
   });
 
-  runMigrations(legacy);
+  runMigrations(legacy, 60);
   assert.equal((legacy.prepare("SELECT COUNT(*) AS count FROM warehouse_locations WHERE active = 1").get() as any).count, 420);
   assert.equal((legacy.prepare("SELECT current_location_id FROM warehouse_packages WHERE id = 'preserved-package'").get() as any).current_location_id, "preserved-location-id");
   legacy.close();

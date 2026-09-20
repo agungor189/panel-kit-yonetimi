@@ -81,7 +81,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 68);
+  assert.equal(manifest.length, 69);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -204,6 +204,24 @@ test("migration history fails closed on unknown, renamed or changed entries", ()
 });
 
 for (const start of SUPPORTED_UPGRADE_STARTS) {
+  test(`historical v${start} nonzero legacy stock fails closed without inventing canonical inventory`, () => {
+    const sql = fs.readFileSync(path.join(fixtureDirectory, `panel-v${start}.sql`), "utf8");
+    const db = new Database(":memory:");
+    db.exec(sql);
+    db.prepare("INSERT INTO products (id, title, product_type, central_stock) VALUES (?, ?, ?, ?)")
+      .run(`legacy-stock-v${start}`, `Legacy stock v${start}`, "simple", 7);
+
+    assert.throws(
+      () => runMigrations(db),
+      /INVENTORY_MIGRATION_REQUIRED.*legacy-stock-v\d+/,
+    );
+    assert.equal(db.prepare("SELECT central_stock FROM products WHERE id=?").pluck().get(`legacy-stock-v${start}`), 7);
+    assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_lots").pluck().get(), 0);
+    assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_ledger_events").pluck().get(), 0);
+    assert.equal(db.prepare("SELECT MAX(version) FROM schema_migrations").pluck().get(), 69);
+    db.close();
+  });
+
   test(`historical v${start} SQL fixture is provenance-pinned and upgrades to v${CURRENT_SCHEMA_VERSION}`, () => {
     const sql = fs.readFileSync(path.join(fixtureDirectory, `panel-v${start}.sql`), "utf8");
     assert.match(sql, new RegExp(`^-- source-commit: [a-f0-9]{40}\\n-- schema-version: ${start}\\n`));
