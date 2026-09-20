@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, test } from "node:test";
 import Database from "better-sqlite3";
-import { applySchema } from "../db/schema.js";
-import { runMigrations } from "../migrations/runner.js";
+import { initializeDatabase } from "../db/initialize.js";
 import { receivingCapacityForLocation, WarehouseAdminService } from "./warehouseAdminService.js";
 import { WarehouseService, WarehouseServiceError } from "./warehouseService.js";
 import { startPrintQueueWorker } from "./printQueueWorker.js";
@@ -47,8 +46,7 @@ const createLotSession = (lotNumber = "LOT-SESSION", packageCount = 4, unitsPerP
 beforeEach(() => {
   db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
-  applySchema(db);
-  runMigrations(db);
+  initializeDatabase(db);
   db.prepare("INSERT INTO users (id, username, password_hash, role, is_active) VALUES (?, ?, 'hash', 'admin', 1)").run(actor.id, actor.username);
   db.prepare("INSERT INTO users (id, username, password_hash, role, is_active) VALUES ('warehouse-user-2', 'Ayşe', 'hash', 'user', 1)").run();
   db.prepare("INSERT INTO products (id, title, name, sku, supplier_code, central_stock, product_type, status) VALUES ('product-1', 'Test ürün', 'Test ürün', 'SKU-1', 'SUP-SKU-1', 0, 'simple', 'Active')").run();

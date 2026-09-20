@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { runMigrations } from "../migrations/runner.js";
+import { CURRENT_SCHEMA_VERSION, runMigrations } from "../migrations/runner.js";
 import { generateNormalizedFields } from "../utils/normalizeProductFields.js";
 import { applySchema } from "./schema.js";
 
@@ -17,9 +17,14 @@ export function initializeDatabase(db: Database.Database): void {
     FROM sqlite_master
     WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
   `).get() as { count: number }).count === 0;
-  applySchema(db);
-  runMigrations(db);
-  if (isFresh) clearFreshBootstrapDefaults(db);
+  if (isFresh) {
+    applySchema(db);
+    runMigrations(db, CURRENT_SCHEMA_VERSION, { allowUntrackedSchemaBootstrap: true });
+    clearFreshBootstrapDefaults(db);
+  } else {
+    runMigrations(db);
+    applySchema(db);
+  }
   backfillNormalizedProductFields(db);
 }
 
@@ -29,6 +34,7 @@ function clearFreshBootstrapDefaults(db: Database.Database): void {
     db.prepare("DELETE FROM kit_profiles").run();
     db.prepare("DELETE FROM dashboard_widgets").run();
     db.prepare("DELETE FROM settings").run();
+    db.prepare("DELETE FROM warehouse_rack_metadata").run();
   })();
 }
 

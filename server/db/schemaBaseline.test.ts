@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -92,6 +93,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   assert.equal(count(db, "cash_accounts"), 0, "cash accounts are business configuration, not technical seed data");
   assert.equal(count(db, "dashboard_widgets"), 0, "user-owned dashboard data must not be invented before a user exists");
   assert.equal(count(db, "settings"), 0, "unresolved business policy must remain unconfigured");
+  assert.equal(count(db, "warehouse_rack_metadata"), 0, "fresh bootstrap must not invent warehouse placement policy");
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM users WHERE username='admin'").pluck().get(), 0);
 
   const before = Object.fromEntries([
@@ -100,11 +102,29 @@ test("fresh production schema is exact, versioned and has zero business history"
     "cash_accounts",
     "dashboard_widgets",
     "settings",
+    "warehouse_rack_metadata",
     "schema_migrations",
   ].map((table) => [table, count(db, table)]));
   initializeDatabase(db);
   const after = Object.fromEntries(Object.keys(before).map((table) => [table, count(db, table)]));
   assert.deepEqual(after, before, "repeated bootstrap must not create hidden rows or events");
+  db.close();
+});
+
+test("existing warehouse rack policy remains untouched by repeated initialization", () => {
+  const db = new Database(":memory:");
+  initializeDatabase(db);
+  db.prepare(`
+    INSERT INTO warehouse_rack_metadata (rack_code, status, placement_priority, notes)
+    VALUES ('C2', 'ACTIVE', 'LOW', 'Owner configured policy')
+  `).run();
+
+  initializeDatabase(db);
+
+  assert.deepEqual(
+    db.prepare("SELECT rack_code, status, placement_priority, notes FROM warehouse_rack_metadata WHERE rack_code = 'C2'").get(),
+    { rack_code: "C2", status: "ACTIVE", placement_priority: "LOW", notes: "Owner configured policy" },
+  );
   db.close();
 });
 
@@ -151,6 +171,43 @@ for (const start of SUPPORTED_UPGRADE_STARTS) {
     fresh.close();
     db.close();
   });
+
+  test(`historical v${start} upgrade resumes from a closed v60 checkpoint and converges to v${CURRENT_SCHEMA_VERSION}`, () => {
+    const sql = fs.readFileSync(path.join(fixtureDirectory, `panel-v${start}.sql`), "utf8");
+    const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), `panel-v${start}-resume-`));
+    const databasePath = path.join(temporaryDirectory, "panel.sqlite");
+    let staged: Database.Database | undefined;
+    let direct: Database.Database | undefined;
+    try {
+      staged = new Database(databasePath);
+      staged.exec(sql);
+      staged.prepare("INSERT INTO products (id, title, product_type) VALUES (?, ?, ?)")
+        .run(`staged-v${start}`, `Staged v${start} product`, "assembly");
+      runMigrations(staged, 60);
+      assert.equal(staged.prepare("SELECT MAX(version) FROM schema_migrations").pluck().get(), 60);
+      assert.equal(staged.prepare("SELECT product_type FROM products WHERE id = ?").pluck().get(`staged-v${start}`), "assembly");
+      staged.close();
+      staged = new Database(databasePath);
+      runMigrations(staged);
+
+      direct = new Database(":memory:");
+      direct.exec(sql);
+      direct.prepare("INSERT INTO products (id, title, product_type) VALUES (?, ?, ?)")
+        .run(`staged-v${start}`, `Staged v${start} product`, "assembly");
+      runMigrations(direct);
+
+      assert.equal(staged.prepare("SELECT product_type FROM products WHERE id = ?").pluck().get(`staged-v${start}`), "assembly");
+      assert.deepEqual(schemaShape(staged), schemaShape(direct));
+      assert.deepEqual(
+        staged.prepare("SELECT version, name, checksum FROM schema_migrations ORDER BY version").all(),
+        getMigrationManifest(),
+      );
+    } finally {
+      staged?.close();
+      direct?.close();
+      fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
 }
 
 test("the historical v41 hole is frozen against retroactive migration insertion", () => {
@@ -183,6 +240,33 @@ test("migration history rejects deleted records and claimed schema effects that 
   initializeDatabase(unverifiableNull);
   unverifiableNull.prepare("UPDATE schema_migrations SET checksum = NULL WHERE version = 30").run();
   unverifiableNull.exec("DROP TABLE backup_runs");
-  assert.throws(() => runMigrations(unverifiableNull), /schema effect|checksum history|backup_runs/i);
+  assert.throws(() => runMigrations(unverifiableNull), /NULL checksum|schema effect|checksum history|backup_runs/i);
   unverifiableNull.close();
+});
+
+test("existing Panel schema with completely missing migration history fails without mutation", () => {
+  const db = new Database(":memory:");
+  initializeDatabase(db);
+  db.prepare("INSERT INTO products (id, title, product_type) VALUES ('history-loss-product', 'History loss product', 'assembly')").run();
+  db.exec("DROP TABLE schema_migrations");
+  const schemaBefore = db.prepare("SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
+  const productBefore = db.prepare("SELECT * FROM products WHERE id = 'history-loss-product'").get();
+
+  assert.throws(() => initializeDatabase(db), /migration history.*missing|existing schema.*history/i);
+  assert.equal(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get(), undefined);
+  assert.deepEqual(db.prepare("SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all(), schemaBefore);
+  assert.deepEqual(db.prepare("SELECT * FROM products WHERE id = 'history-loss-product'").get(), productBefore);
+  db.close();
+});
+
+test("an isolated NULL checksum in a checksum-aware Panel history fails without backfill", () => {
+  const db = new Database(":memory:");
+  initializeDatabase(db);
+  db.prepare("UPDATE schema_migrations SET checksum = NULL WHERE version = 30").run();
+  const schemaBefore = db.prepare("SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
+
+  assert.throws(() => runMigrations(db), /NULL checksum|checksum.*null|corrupt.*checksum/i);
+  assert.equal(db.prepare("SELECT checksum FROM schema_migrations WHERE version = 30").pluck().get(), null);
+  assert.deepEqual(db.prepare("SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all(), schemaBefore);
+  db.close();
 });

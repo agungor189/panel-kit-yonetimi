@@ -10,8 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import Papa from "papaparse";
-import { applySchema } from "../server/db/schema.js";
-import { runMigrations } from "../server/migrations/runner.js";
+import { initializeDatabase } from "../server/db/initialize.js";
 import { importProductsFromCsvRows } from "../server/services/productCsvImport.js";
 
 type CsvRecord = Record<string, string>;
@@ -61,8 +60,7 @@ const db = new Database(dbPath, { readonly: !apply });
 db.pragma("foreign_keys = ON");
 db.pragma("busy_timeout = 5000");
 if (apply) {
-  applySchema(db);
-  runMigrations(db);
+  initializeDatabase(db);
 }
 
 try {

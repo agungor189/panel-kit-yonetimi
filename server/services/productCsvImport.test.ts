@@ -3,7 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
-import { applySchema } from "../db/schema.js";
+import { initializeDatabase } from "../db/initialize.js";
 import { runMigrations } from "../migrations/runner.js";
 import { importProductsFromCsvRows, parseCsvNumber } from "./productCsvImport.js";
 import { resolveProductCsvHeaders } from "../../shared/productCsvMapping.js";
@@ -11,7 +11,7 @@ import { resolveProductCsvHeaders } from "../../shared/productCsvMapping.js";
 function database() {
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
-  applySchema(db);
+  initializeDatabase(db);
   return db;
 }
 
