@@ -762,6 +762,92 @@ export function applySchema(db: Database.Database): void {
       applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS command_operations (
+      id                 TEXT PRIMARY KEY,
+      actor_scope        TEXT NOT NULL,
+      operation_id       TEXT NOT NULL,
+      command_type       TEXT NOT NULL,
+      payload_hash       TEXT NOT NULL CHECK(length(payload_hash) = 64),
+      result_status_code INTEGER NOT NULL,
+      result_json        TEXT NOT NULL,
+      result_hash        TEXT NOT NULL CHECK(length(result_hash) = 64),
+      committed_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(actor_scope, command_type, operation_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS command_audit_log (
+      id                     TEXT PRIMARY KEY,
+      operation_record_id    TEXT NOT NULL UNIQUE,
+      operation_id           TEXT NOT NULL,
+      human_actor_id         TEXT,
+      human_actor_name       TEXT,
+      service_actor_id       TEXT,
+      service_actor_name     TEXT,
+      command_type           TEXT NOT NULL,
+      payload_hash           TEXT NOT NULL CHECK(length(payload_hash) = 64),
+      authorization_decision TEXT NOT NULL CHECK(authorization_decision IN ('ALLOW')),
+      capability             TEXT NOT NULL,
+      result_status_code     INTEGER NOT NULL,
+      result_hash            TEXT NOT NULL CHECK(length(result_hash) = 64),
+      correlation_id         TEXT,
+      request_id             TEXT,
+      request_metadata_json  TEXT,
+      created_at             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CHECK(human_actor_id IS NOT NULL OR service_actor_id IS NOT NULL),
+      FOREIGN KEY(operation_record_id) REFERENCES command_operations(id) ON DELETE RESTRICT
+    );
+
+    CREATE TABLE IF NOT EXISTS command_outbox (
+      id                  TEXT PRIMARY KEY,
+      operation_record_id TEXT NOT NULL,
+      event_index         INTEGER NOT NULL CHECK(event_index >= 0),
+      topic               TEXT NOT NULL,
+      event_type          TEXT NOT NULL,
+      aggregate_type      TEXT,
+      aggregate_id        TEXT,
+      payload_json        TEXT NOT NULL,
+      payload_hash        TEXT NOT NULL CHECK(length(payload_hash) = 64),
+      status              TEXT NOT NULL DEFAULT 'PENDING'
+                          CHECK(status IN ('PENDING','PROCESSING','DELIVERED','FAILED','DEAD_LETTER')),
+      available_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      claimed_at          DATETIME,
+      claimed_by          TEXT,
+      attempt_count       INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+      last_error_code     TEXT,
+      delivered_at        DATETIME,
+      created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(operation_record_id, event_index),
+      FOREIGN KEY(operation_record_id) REFERENCES command_operations(id) ON DELETE RESTRICT
+    );
+
+    CREATE TRIGGER IF NOT EXISTS trg_command_operations_immutable_update
+    BEFORE UPDATE ON command_operations BEGIN
+      SELECT RAISE(ABORT, 'command_operations are immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_command_operations_immutable_delete
+    BEFORE DELETE ON command_operations BEGIN
+      SELECT RAISE(ABORT, 'command_operations are immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_command_audit_immutable_update
+    BEFORE UPDATE ON command_audit_log BEGIN
+      SELECT RAISE(ABORT, 'command_audit_log is immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_command_audit_immutable_delete
+    BEFORE DELETE ON command_audit_log BEGIN
+      SELECT RAISE(ABORT, 'command_audit_log is immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_command_outbox_payload_immutable
+    BEFORE UPDATE OF operation_record_id, event_index, topic, event_type,
+      aggregate_type, aggregate_id, payload_json, payload_hash, created_at
+    ON command_outbox BEGIN
+      SELECT RAISE(ABORT, 'command_outbox payload is immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_command_outbox_no_delete
+    BEFORE DELETE ON command_outbox BEGIN
+      SELECT RAISE(ABORT, 'command_outbox rows cannot be deleted');
+    END;
+
     -- Indexes
     CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_unique_name
       ON api_keys(service_name, display_name) WHERE deleted_at IS NULL;
@@ -800,5 +886,11 @@ export function applySchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_cash_transactions_account ON cash_transactions(account_id);
     CREATE INDEX IF NOT EXISTS idx_pricing_history_product  ON pricing_history(product_id);
     CREATE INDEX IF NOT EXISTS idx_dashboard_widgets_user   ON dashboard_widgets(user_id, position);
+    CREATE INDEX IF NOT EXISTS idx_command_operations_lookup
+      ON command_operations(actor_scope, command_type, operation_id);
+    CREATE INDEX IF NOT EXISTS idx_command_audit_operation
+      ON command_audit_log(operation_id, command_type, created_at);
+    CREATE INDEX IF NOT EXISTS idx_command_outbox_dispatch
+      ON command_outbox(status, available_at, created_at);
   `);
 }

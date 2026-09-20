@@ -52,6 +52,9 @@ const businessTablesThatMustStartEmpty = [
   "label_print_jobs",
   "marketplace_orders",
   "marketplace_order_lines",
+  "command_operations",
+  "command_audit_log",
+  "command_outbox",
 ] as const;
 
 test("fresh production schema is exact, versioned and has zero business history", () => {
@@ -60,7 +63,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 61);
+  assert.equal(manifest.length, 62);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -78,6 +81,9 @@ test("fresh production schema is exact, versioned and has zero business history"
     warehouse_packages: ["current_location_id", "id", "planned_quantity", "remaining_quantity", "status"],
     users: ["id", "permissions", "role", "session_epoch"],
     user_sessions: ["expires_at", "id", "revoked_at", "service_principal_id", "session_epoch", "user_id"],
+    command_operations: ["actor_scope", "command_type", "id", "operation_id", "payload_hash", "result_json", "result_status_code"],
+    command_audit_log: ["command_type", "human_actor_id", "operation_id", "payload_hash", "service_actor_id"],
+    command_outbox: ["event_type", "operation_record_id", "payload_hash", "payload_json", "status", "topic"],
     schema_migrations: ["applied_at", "checksum", "name", "version"],
   };
   for (const [table, expected] of Object.entries(requiredColumns)) {
@@ -87,6 +93,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   assert.ok(indexes(db, "products").includes("idx_products_status"));
   assert.ok(indexes(db, "stock_movements").includes("idx_stock_movements_product"));
   assert.ok(indexes(db, "sales").includes("idx_sales_order_code_unique"));
+  assert.ok(indexes(db, "command_outbox").includes("idx_command_outbox_dispatch"));
 
   for (const table of businessTablesThatMustStartEmpty) {
     assert.equal(count(db, table), 0, `${table} must contain no bootstrap business rows`);

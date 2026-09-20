@@ -9,5 +9,9 @@ The Panel remains one Express process and one SQLite database. Modules are extra
 - Phase 5 — `backup`: backup policy defaults and safe configuration bounds.
 - Phase 6 — `finance`: active exchange-rate access behind a database-bound reader.
 - Phase 7 — `marketplaces`: Trendyol environment/configuration routing.
+- Phase 8 — `commands`: canonical payload hashing, actor-scoped idempotency,
+  immutable committed results/audit and transactional outbox insertion. The
+  first route adopters are package move and location-label queue commands;
+  other mutation families migrate in their roadmap-owned phases.
 
 The route registrations that still coordinate multiple domains deliberately stay in `server.ts`; their domain policy and stateful services now have explicit module seams. Future route moves can use these seams without changing URLs, transaction ownership, or the single-process architecture.
