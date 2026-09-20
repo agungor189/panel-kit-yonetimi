@@ -2533,9 +2533,154 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 64,
+    name: "add_versioned_catalog_uom_contract",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS uom_definitions (
+          code TEXT PRIMARY KEY,
+          dimension TEXT NOT NULL CHECK(dimension IN ('count','length','area','mass')),
+          base_quantum TEXT NOT NULL,
+          quantity_scale INTEGER NOT NULL CHECK(quantity_scale > 0),
+          registry_version TEXT NOT NULL,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS uom_conversions (
+          id TEXT PRIMARY KEY,
+          from_uom_code TEXT NOT NULL,
+          to_uom_code TEXT NOT NULL,
+          numerator INTEGER NOT NULL CHECK(numerator > 0),
+          denominator INTEGER NOT NULL CHECK(denominator > 0),
+          version INTEGER NOT NULL CHECK(version > 0),
+          version_ref TEXT NOT NULL UNIQUE,
+          effective_from DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          retired_at DATETIME,
+          UNIQUE(from_uom_code, to_uom_code, version),
+          FOREIGN KEY(from_uom_code) REFERENCES uom_definitions(code) ON DELETE RESTRICT,
+          FOREIGN KEY(to_uom_code) REFERENCES uom_definitions(code) ON DELETE RESTRICT
+        );
+      `);
+      const insertUnit = db.prepare(`INSERT OR IGNORE INTO uom_definitions
+        (code, dimension, base_quantum, quantity_scale, registry_version) VALUES (?, ?, ?, ?, 'uom-registry:v1')`);
+      for (const row of [
+        ["piece", "count", "piece", 1], ["meter", "length", "millimeter", 1000],
+        ["square_meter", "area", "square_millimeter", 1_000_000], ["kg", "mass", "gram", 1000],
+        ["roll", "count", "roll", 1], ["package", "count", "package", 1], ["box", "count", "box", 1],
+        ["millimeter", "length", "millimeter", 1], ["centimeter", "length", "millimeter", 10],
+        ["gram", "mass", "gram", 1],
+      ] as const) insertUnit.run(...row);
+      const insertConversion = db.prepare(`INSERT OR IGNORE INTO uom_conversions
+        (id, from_uom_code, to_uom_code, numerator, denominator, version, version_ref)
+        VALUES (?, ?, ?, ?, ?, 1, ?)`);
+      for (const row of [
+        ["mm-cm-v1", "millimeter", "centimeter", 1, 10, "uom-conversion:millimeter:centimeter:v1"],
+        ["cm-mm-v1", "centimeter", "millimeter", 10, 1, "uom-conversion:centimeter:millimeter:v1"],
+        ["cm-m-v1", "centimeter", "meter", 1, 100, "uom-conversion:centimeter:meter:v1"],
+        ["m-cm-v1", "meter", "centimeter", 100, 1, "uom-conversion:meter:centimeter:v1"],
+        ["mm-m-v1", "millimeter", "meter", 1, 1000, "uom-conversion:millimeter:meter:v1"],
+        ["m-mm-v1", "meter", "millimeter", 1000, 1, "uom-conversion:meter:millimeter:v1"],
+        ["g-kg-v1", "gram", "kg", 1, 1000, "uom-conversion:gram:kg:v1"],
+        ["kg-g-v1", "kg", "gram", 1000, 1, "uom-conversion:kg:gram:v1"],
+      ] as const) insertConversion.run(...row);
+
+      const productColumns = new Set((db.prepare("PRAGMA table_info(products)").all() as Array<{ name: string }>).map(({ name }) => name));
+      const addProductColumn = (name: string, definition: string) => {
+        if (!productColumns.has(name)) db.exec(`ALTER TABLE products ADD COLUMN ${definition}`);
+      };
+      addProductColumn("catalog_type", "catalog_type TEXT NOT NULL DEFAULT 'product' CHECK(catalog_type IN ('product','profile','connector','cap','wheel'))");
+      // SQLite rejects adding a REFERENCES column with a non-NULL default while
+      // foreign keys are enabled. Fresh schemas carry the FK; upgrades retain
+      // the same value contract and are guarded by CatalogService validation.
+      addProductColumn("base_uom_code", "base_uom_code TEXT NOT NULL DEFAULT 'piece'");
+      addProductColumn("catalog_version", "catalog_version INTEGER NOT NULL DEFAULT 0 CHECK(catalog_version >= 0)");
+      addProductColumn("catalog_version_ref", "catalog_version_ref TEXT");
+      addProductColumn("uom_registry_version", "uom_registry_version TEXT NOT NULL DEFAULT 'uom-registry:v1'");
+      addProductColumn("length_mm_int", "length_mm_int INTEGER CHECK(length_mm_int IS NULL OR length_mm_int >= 0)");
+      addProductColumn("width_mm_int", "width_mm_int INTEGER CHECK(width_mm_int IS NULL OR width_mm_int >= 0)");
+      addProductColumn("height_mm_int", "height_mm_int INTEGER CHECK(height_mm_int IS NULL OR height_mm_int >= 0)");
+      addProductColumn("diameter_mm_int", "diameter_mm_int INTEGER CHECK(diameter_mm_int IS NULL OR diameter_mm_int >= 0)");
+      addProductColumn("mass_grams_int", "mass_grams_int INTEGER CHECK(mass_grams_int IS NULL OR mass_grams_int >= 0)");
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS product_profile_attributes (
+          product_id TEXT PRIMARY KEY,
+          material TEXT NOT NULL,
+          form TEXT NOT NULL CHECK(form IN ('square','rectangular','round','channel','angle','flat','other')),
+          width_mm INTEGER CHECK(width_mm IS NULL OR width_mm > 0),
+          height_mm INTEGER CHECK(height_mm IS NULL OR height_mm > 0),
+          diameter_mm INTEGER CHECK(diameter_mm IS NULL OR diameter_mm > 0),
+          wall_thickness_mm INTEGER NOT NULL CHECK(wall_thickness_mm > 0),
+          standard_purchase_lengths_mm_json TEXT NOT NULL,
+          custom_length_allowed INTEGER NOT NULL DEFAULT 0 CHECK(custom_length_allowed IN (0,1)),
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS catalog_product_versions (
+          id TEXT PRIMARY KEY,
+          product_id TEXT NOT NULL,
+          catalog_version INTEGER NOT NULL CHECK(catalog_version > 0),
+          version_ref TEXT NOT NULL UNIQUE,
+          schema_version TEXT NOT NULL,
+          uom_registry_version TEXT NOT NULL,
+          base_uom_code TEXT NOT NULL,
+          snapshot_json TEXT NOT NULL,
+          content_hash TEXT NOT NULL CHECK(length(content_hash) = 64),
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(product_id, catalog_version),
+          FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT,
+          FOREIGN KEY(base_uom_code) REFERENCES uom_definitions(code) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS idx_catalog_product_versions_product ON catalog_product_versions(product_id, catalog_version DESC);
+        CREATE INDEX IF NOT EXISTS idx_products_catalog_contract ON products(catalog_type, catalog_version, status);
+        CREATE TRIGGER IF NOT EXISTS trg_catalog_product_versions_immutable_update
+        BEFORE UPDATE ON catalog_product_versions BEGIN SELECT RAISE(ABORT, 'catalog_product_versions are immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_catalog_product_versions_immutable_delete
+        BEFORE DELETE ON catalog_product_versions BEGIN SELECT RAISE(ABORT, 'catalog_product_versions are immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_uom_definitions_immutable_update
+        BEFORE UPDATE ON uom_definitions BEGIN SELECT RAISE(ABORT, 'uom_definitions are immutable; create a new registry version'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_uom_definitions_immutable_delete
+        BEFORE DELETE ON uom_definitions BEGIN SELECT RAISE(ABORT, 'uom_definitions are immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_uom_conversions_immutable_update
+        BEFORE UPDATE ON uom_conversions BEGIN SELECT RAISE(ABORT, 'uom_conversions are immutable; create a new version'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_uom_conversions_immutable_delete
+        BEFORE DELETE ON uom_conversions BEGIN SELECT RAISE(ABORT, 'uom_conversions are immutable'); END;
+      `);
+
+      const legacyProducts = db.prepare(`SELECT id, sku, title, name, material,
+        length_mm, width_mm, height_mm, weight_grams, status FROM products WHERE catalog_version = 0`).all() as any[];
+      const exactNonNegativeInteger = (value: unknown): number | null => {
+        const numeric = Number(value);
+        return Number.isInteger(numeric) && numeric >= 0 ? numeric : null;
+      };
+      const insertVersion = db.prepare(`INSERT INTO catalog_product_versions
+        (id, product_id, catalog_version, version_ref, schema_version, uom_registry_version, base_uom_code, snapshot_json, content_hash)
+        VALUES (?, ?, 1, ?, 'dsdst.catalog-product.v1', 'uom-registry:v1', 'piece', ?, ?)`);
+      const updateProduct = db.prepare(`UPDATE products SET catalog_type='product', base_uom_code='piece', catalog_version=1,
+        catalog_version_ref=?, uom_registry_version='uom-registry:v1', length_mm_int=?, width_mm_int=?, height_mm_int=?, mass_grams_int=? WHERE id=?`);
+      for (const product of legacyProducts) {
+        const versionRef = `catalog-product:${product.id}:v1`;
+        const snapshot = JSON.stringify({
+          schema_version: "dsdst.catalog-product.v1", id: product.id, sku: product.sku ?? null,
+          title: product.title || product.name || product.id, catalog_type: "product", base_uom_code: "piece",
+          uom_registry_version: "uom-registry:v1",
+          dimensions: {
+            length_mm: exactNonNegativeInteger(product.length_mm), width_mm: exactNonNegativeInteger(product.width_mm),
+            height_mm: exactNonNegativeInteger(product.height_mm), diameter_mm: null,
+          },
+          mass_grams: exactNonNegativeInteger(product.weight_grams), profile: null, status: product.status || "Active",
+        });
+        const contentHash = createHash("sha256").update(snapshot).digest("hex");
+        insertVersion.run(`catalog-version-${product.id}-1`, product.id, versionRef, snapshot, contentHash);
+        updateProduct.run(versionRef, exactNonNegativeInteger(product.length_mm), exactNonNegativeInteger(product.width_mm),
+          exactNonNegativeInteger(product.height_mm), exactNonNegativeInteger(product.weight_grams), product.id);
+      }
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 63;
+export const CURRENT_SCHEMA_VERSION = 64;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),

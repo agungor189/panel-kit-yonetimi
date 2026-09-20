@@ -7,6 +7,7 @@ export const CAPABILITY_REGISTRY = Object.freeze({
   "integrations:admin": { description: "Connector and service-principal administration" },
   "backup:admin": { description: "Backup and restore administration" },
   "catalog:admin": { description: "Destructive catalog administration" },
+  "catalog:write": { description: "Versioned catalog maintenance" },
   "settings:admin": { description: "System settings administration" },
   "maintenance:admin": { description: "Explicit maintenance operations" },
   "finance:write": { description: "Manual expense and cash mutations" },

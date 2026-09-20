@@ -55,6 +55,7 @@ const businessTablesThatMustStartEmpty = [
   "command_operations",
   "command_audit_log",
   "command_outbox",
+  "catalog_product_versions",
 ] as const;
 
 test("fresh production schema is exact, versioned and has zero business history", () => {
@@ -63,7 +64,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 62);
+  assert.equal(manifest.length, 63);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -73,7 +74,11 @@ test("fresh production schema is exact, versioned and has zero business history"
   assert.ok(manifest.every(({ checksum }) => /^[a-f0-9]{64}$/.test(checksum)));
 
   const requiredColumns: Record<string, string[]> = {
-    products: ["central_stock", "id", "product_type", "sku", "title"],
+    products: ["base_uom_code", "catalog_type", "catalog_version", "catalog_version_ref", "central_stock", "id", "mass_grams_int", "product_type", "sku", "title"],
+    product_profile_attributes: ["custom_length_allowed", "form", "material", "product_id", "standard_purchase_lengths_mm_json", "wall_thickness_mm"],
+    catalog_product_versions: ["catalog_version", "content_hash", "product_id", "snapshot_json", "version_ref"],
+    uom_definitions: ["base_quantum", "code", "dimension", "quantity_scale", "registry_version"],
+    uom_conversions: ["denominator", "from_uom_code", "numerator", "to_uom_code", "version_ref"],
     stock_movements: ["change_amount", "id", "product_id", "reason", "type"],
     sales: ["id", "income_transaction_id", "order_code", "status"],
     sale_items: ["id", "product_id", "purchase_cost", "quantity", "sale_id", "unit_price"],

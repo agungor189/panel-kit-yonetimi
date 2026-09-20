@@ -23,6 +23,8 @@ import { createRecurringPaymentsRouter } from "./server/routes/recurringPayments
 import { createDashboardDataRouter } from "./server/routes/dashboardDataRoutes.js";
 import { createKitRouter } from "./server/routes/kitRoutes.js";
 import { createKitCatalogRouter } from "./server/routes/kitCatalogRoutes.js";
+import { createCatalogV1Router } from "./server/routes/catalogV1Routes.js";
+import { createCatalogAdminV1Router } from "./server/routes/catalogAdminV1Routes.js";
 import { createPanelApiAuth } from "./server/middleware/panelApiAuth.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
 import { restoreUploadEntry } from "./server/utils/restoreUploads.js";
@@ -5367,6 +5369,16 @@ async function startServer() {
       authenticate: publicApiAuth("kit-catalog:read"),
       logActivity,
     }),
+  );
+  app.use(
+    "/api/catalog/v1",
+    publicAuthFailedLimiter,
+    publicApiLimiter,
+    createCatalogV1Router({ db, authenticate: publicApiAuth("catalog:read") }),
+  );
+  app.use(
+    "/api/catalog-admin/v1",
+    createCatalogAdminV1Router({ db, authorize: auth.requireCapability("catalog:write") }),
   );
   mountWarehouseModule({
     app,

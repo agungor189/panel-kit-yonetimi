@@ -60,9 +60,131 @@ export function applySchema(db: Database.Database): void {
       normalized_size         TEXT,
       normalized_tube_type    TEXT,
       normalized_pipe_size    TEXT,
+      catalog_type            TEXT    NOT NULL DEFAULT 'product'
+                                      CHECK(catalog_type IN ('product','profile','connector','cap','wheel')),
+      base_uom_code           TEXT    NOT NULL DEFAULT 'piece',
+      catalog_version         INTEGER NOT NULL DEFAULT 0 CHECK(catalog_version >= 0),
+      catalog_version_ref     TEXT,
+      uom_registry_version    TEXT    NOT NULL DEFAULT 'uom-registry:v1',
+      length_mm_int           INTEGER CHECK(length_mm_int IS NULL OR length_mm_int >= 0),
+      width_mm_int            INTEGER CHECK(width_mm_int IS NULL OR width_mm_int >= 0),
+      height_mm_int           INTEGER CHECK(height_mm_int IS NULL OR height_mm_int >= 0),
+      diameter_mm_int         INTEGER CHECK(diameter_mm_int IS NULL OR diameter_mm_int >= 0),
+      mass_grams_int          INTEGER CHECK(mass_grams_int IS NULL OR mass_grams_int >= 0),
       created_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at              DATETIME DEFAULT CURRENT_TIMESTAMP
+      updated_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(base_uom_code) REFERENCES uom_definitions(code) ON DELETE RESTRICT
     );
+
+    CREATE TABLE IF NOT EXISTS uom_definitions (
+      code             TEXT PRIMARY KEY,
+      dimension        TEXT NOT NULL CHECK(dimension IN ('count','length','area','mass')),
+      base_quantum     TEXT NOT NULL,
+      quantity_scale   INTEGER NOT NULL CHECK(quantity_scale > 0),
+      registry_version TEXT NOT NULL,
+      created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS uom_conversions (
+      id             TEXT PRIMARY KEY,
+      from_uom_code  TEXT NOT NULL,
+      to_uom_code    TEXT NOT NULL,
+      numerator      INTEGER NOT NULL CHECK(numerator > 0),
+      denominator    INTEGER NOT NULL CHECK(denominator > 0),
+      version        INTEGER NOT NULL CHECK(version > 0),
+      version_ref    TEXT NOT NULL UNIQUE,
+      effective_from DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      retired_at     DATETIME,
+      UNIQUE(from_uom_code, to_uom_code, version),
+      FOREIGN KEY(from_uom_code) REFERENCES uom_definitions(code) ON DELETE RESTRICT,
+      FOREIGN KEY(to_uom_code) REFERENCES uom_definitions(code) ON DELETE RESTRICT
+    );
+
+    INSERT OR IGNORE INTO uom_definitions
+      (code, dimension, base_quantum, quantity_scale, registry_version)
+    VALUES
+      ('piece', 'count', 'piece', 1, 'uom-registry:v1'),
+      ('meter', 'length', 'millimeter', 1000, 'uom-registry:v1'),
+      ('square_meter', 'area', 'square_millimeter', 1000000, 'uom-registry:v1'),
+      ('kg', 'mass', 'gram', 1000, 'uom-registry:v1'),
+      ('roll', 'count', 'roll', 1, 'uom-registry:v1'),
+      ('package', 'count', 'package', 1, 'uom-registry:v1'),
+      ('box', 'count', 'box', 1, 'uom-registry:v1'),
+      ('millimeter', 'length', 'millimeter', 1, 'uom-registry:v1'),
+      ('centimeter', 'length', 'millimeter', 10, 'uom-registry:v1'),
+      ('gram', 'mass', 'gram', 1, 'uom-registry:v1');
+
+    INSERT OR IGNORE INTO uom_conversions
+      (id, from_uom_code, to_uom_code, numerator, denominator, version, version_ref)
+    VALUES
+      ('mm-cm-v1', 'millimeter', 'centimeter', 1, 10, 1, 'uom-conversion:millimeter:centimeter:v1'),
+      ('cm-mm-v1', 'centimeter', 'millimeter', 10, 1, 1, 'uom-conversion:centimeter:millimeter:v1'),
+      ('cm-m-v1', 'centimeter', 'meter', 1, 100, 1, 'uom-conversion:centimeter:meter:v1'),
+      ('m-cm-v1', 'meter', 'centimeter', 100, 1, 1, 'uom-conversion:meter:centimeter:v1'),
+      ('mm-m-v1', 'millimeter', 'meter', 1, 1000, 1, 'uom-conversion:millimeter:meter:v1'),
+      ('m-mm-v1', 'meter', 'millimeter', 1000, 1, 1, 'uom-conversion:meter:millimeter:v1'),
+      ('g-kg-v1', 'gram', 'kg', 1, 1000, 1, 'uom-conversion:gram:kg:v1'),
+      ('kg-g-v1', 'kg', 'gram', 1000, 1, 1, 'uom-conversion:kg:gram:v1');
+
+    CREATE TABLE IF NOT EXISTS product_profile_attributes (
+      product_id                         TEXT PRIMARY KEY,
+      material                           TEXT NOT NULL,
+      form                               TEXT NOT NULL CHECK(form IN ('square','rectangular','round','channel','angle','flat','other')),
+      width_mm                           INTEGER CHECK(width_mm IS NULL OR width_mm > 0),
+      height_mm                          INTEGER CHECK(height_mm IS NULL OR height_mm > 0),
+      diameter_mm                        INTEGER CHECK(diameter_mm IS NULL OR diameter_mm > 0),
+      wall_thickness_mm                  INTEGER NOT NULL CHECK(wall_thickness_mm > 0),
+      standard_purchase_lengths_mm_json  TEXT NOT NULL,
+      custom_length_allowed              INTEGER NOT NULL DEFAULT 0 CHECK(custom_length_allowed IN (0,1)),
+      created_at                         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at                         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS catalog_product_versions (
+      id                   TEXT PRIMARY KEY,
+      product_id           TEXT NOT NULL,
+      catalog_version      INTEGER NOT NULL CHECK(catalog_version > 0),
+      version_ref          TEXT NOT NULL UNIQUE,
+      schema_version       TEXT NOT NULL,
+      uom_registry_version TEXT NOT NULL,
+      base_uom_code        TEXT NOT NULL,
+      snapshot_json        TEXT NOT NULL,
+      content_hash         TEXT NOT NULL CHECK(length(content_hash) = 64),
+      created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(product_id, catalog_version),
+      FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT,
+      FOREIGN KEY(base_uom_code) REFERENCES uom_definitions(code) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_catalog_product_versions_product
+      ON catalog_product_versions(product_id, catalog_version DESC);
+    CREATE INDEX IF NOT EXISTS idx_products_catalog_contract
+      ON products(catalog_type, catalog_version, status);
+
+    CREATE TRIGGER IF NOT EXISTS trg_catalog_product_versions_immutable_update
+    BEFORE UPDATE ON catalog_product_versions BEGIN
+      SELECT RAISE(ABORT, 'catalog_product_versions are immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_catalog_product_versions_immutable_delete
+    BEFORE DELETE ON catalog_product_versions BEGIN
+      SELECT RAISE(ABORT, 'catalog_product_versions are immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_uom_definitions_immutable_update
+    BEFORE UPDATE ON uom_definitions BEGIN
+      SELECT RAISE(ABORT, 'uom_definitions are immutable; create a new registry version');
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_uom_definitions_immutable_delete
+    BEFORE DELETE ON uom_definitions BEGIN
+      SELECT RAISE(ABORT, 'uom_definitions are immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_uom_conversions_immutable_update
+    BEFORE UPDATE ON uom_conversions BEGIN
+      SELECT RAISE(ABORT, 'uom_conversions are immutable; create a new version');
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_uom_conversions_immutable_delete
+    BEFORE DELETE ON uom_conversions BEGIN
+      SELECT RAISE(ABORT, 'uom_conversions are immutable');
+    END;
 
     CREATE TABLE IF NOT EXISTS product_logistics (
       product_id       TEXT PRIMARY KEY,

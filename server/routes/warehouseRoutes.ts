@@ -4,6 +4,8 @@ import { WarehousePicker, WarehouseService, WarehouseServiceError } from "../ser
 import { normalizeWarehouseLocationCode, WarehouseAdminService, type WarehouseActor } from "../services/warehouseAdminService.js";
 import { resolveStoredUpload } from "../services/uploadSecurity.js";
 import { CommandExecutor, CommandFoundationError } from "../modules/commands/commandFoundation.js";
+import { CatalogService } from "../modules/catalog/catalogService.js";
+import { UOM_DEFINITIONS, UOM_REGISTRY_VERSION } from "../modules/catalog/uom.js";
 
 type WarehouseUser = WarehousePicker & {
   role: string;
@@ -59,6 +61,7 @@ export function createWarehouseRouter({
     claimLeaseSeconds: Number(process.env.WAREHOUSE_CLAIM_LEASE_SECONDS) || undefined,
   });
   const commandExecutor = new CommandExecutor(db);
+  const catalogService = new CatalogService(db);
 
   const authenticate = (requiredPermissions: string | string[]) => (
     req: express.Request,
@@ -245,6 +248,27 @@ export function createWarehouseRouter({
     const source = queryText(value, 40);
     return source && Number.isFinite(new Date(source).getTime()) ? source : undefined;
   };
+
+  router.get("/catalog/products", authenticate("read:products"), requireWarehouseUser, (req, res) => {
+    const requested = typeof req.query.catalog_type === "string" ? req.query.catalog_type : undefined;
+    const type = requested && ["product", "profile", "connector", "cap", "wheel"].includes(requested)
+      ? requested as "product" | "profile" | "connector" | "cap" | "wheel"
+      : undefined;
+    auditRead(req);
+    res.json({ success: true, contract: "dsdst.catalog-product.v1", data: catalogService.listProducts(type) });
+  });
+
+  router.get("/catalog/uoms", authenticate("read:products"), requireWarehouseUser, (req, res) => {
+    auditRead(req);
+    res.json({
+      success: true,
+      contract: "dsdst.catalog-uom.v1",
+      data: {
+        registry_version: UOM_REGISTRY_VERSION,
+        units: UOM_DEFINITIONS.map((unit) => ({ code: unit.code, dimension: unit.dimension, base_quantum: unit.baseQuantum, quantity_scale: unit.quantityScale, registry_version: UOM_REGISTRY_VERSION })),
+      },
+    });
+  });
 
   router.get("/orders", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
     const page = Math.max(1, Math.trunc(Number(req.query.page)) || 1);
