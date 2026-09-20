@@ -2622,6 +2622,57 @@ type ColumnInfo = { name: string; type: string; notnull: number; dflt_value: unk
 
 const quoteIdentifier = (value: string): string => `"${value.replaceAll('"', '""')}"`;
 
+const V63_COMMAND_SCHEMA_OBJECTS = [
+  { type: "table", name: "command_operations" },
+  { type: "table", name: "command_audit_log" },
+  { type: "table", name: "command_outbox" },
+  { type: "index", name: "idx_command_operations_lookup" },
+  { type: "index", name: "idx_command_audit_operation" },
+  { type: "index", name: "idx_command_outbox_dispatch" },
+  { type: "trigger", name: "trg_command_operations_immutable_update" },
+  { type: "trigger", name: "trg_command_operations_immutable_delete" },
+  { type: "trigger", name: "trg_command_audit_immutable_update" },
+  { type: "trigger", name: "trg_command_audit_immutable_delete" },
+  { type: "trigger", name: "trg_command_outbox_payload_immutable" },
+  { type: "trigger", name: "trg_command_outbox_no_delete" },
+] as const;
+
+type SchemaDefinition = { type: string; name: string; sql: string };
+
+const canonicalSchemaDefinition = (sql: string): string => sql
+  .trim()
+  .split(/('(?:''|[^'])*')/g)
+  .map((segment, index) => index % 2 === 1
+    ? segment
+    : segment.replace(/\s+/g, " ").replace(/\s*([(),;])\s*/g, "$1"))
+  .join("");
+
+function assertV63CommandSchemaDefinitions(actual: Database.Database): void {
+  const reference = new Database(":memory:");
+  try {
+    const migration = migrations.find(({ version }) => version === 63);
+    if (!migration) throw new Error("Migration v63 definition is unavailable");
+    migration.up(reference);
+
+    for (const object of V63_COMMAND_SCHEMA_OBJECTS) {
+      const expected = reference.prepare(`
+        SELECT type, name, sql FROM sqlite_master
+        WHERE type = ? AND name = ? AND sql IS NOT NULL
+      `).get(object.type, object.name) as SchemaDefinition | undefined;
+      const found = actual.prepare(`
+        SELECT type, name, sql FROM sqlite_master
+        WHERE type = ? AND name = ? AND sql IS NOT NULL
+      `).get(object.type, object.name) as SchemaDefinition | undefined;
+      if (!expected || !found
+        || canonicalSchemaDefinition(found.sql) !== canonicalSchemaDefinition(expected.sql)) {
+        throw new Error(`Migration v63 schema effect is missing or incompatible: ${object.type} ${object.name}`);
+      }
+    }
+  } finally {
+    reference.close();
+  }
+}
+
 function assertSchemaEffects(actual: Database.Database, maxVersion: number): void {
   if (maxVersion < SUPPORTED_UPGRADE_STARTS[0]) {
     throw new Error(`Migration checksum history at v${maxVersion} is not a supported verifiable checkpoint`);
@@ -2698,7 +2749,11 @@ function validateAppliedMigrations(db: Database.Database, manifest: MigrationMan
     }
     applied.add(row.version);
   }
-  if (rows.length > 0) assertSchemaEffects(db, rows.at(-1)!.version);
+  if (rows.length > 0) {
+    const maxVersion = rows.at(-1)!.version;
+    assertSchemaEffects(db, maxVersion);
+    if (maxVersion >= 63) assertV63CommandSchemaDefinitions(db);
+  }
   if (!hasChecksumColumn) {
     db.transaction(() => {
       db.exec("ALTER TABLE schema_migrations ADD COLUMN checksum TEXT");
@@ -2739,6 +2794,7 @@ export function runMigrations(
 
     db.transaction(() => {
       migration.up(db);
+      if (migration.version === 63) assertV63CommandSchemaDefinitions(db);
       insertMigration.run(migration.version, migration.name, checksumFor(migration));
     })();
 

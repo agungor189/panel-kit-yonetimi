@@ -253,6 +253,87 @@ test("migration history rejects deleted records and claimed schema effects that 
   unverifiableNull.close();
 });
 
+test("v63 fails closed on same-name command objects with weakened definitions", () => {
+  const db = new Database(":memory:");
+  db.exec(fs.readFileSync(path.join(fixtureDirectory, "panel-v53.sql"), "utf8"));
+  runMigrations(db, 62);
+  db.exec(`
+    CREATE TABLE command_operations (
+      id                 TEXT PRIMARY KEY,
+      actor_scope        TEXT NOT NULL,
+      operation_id       TEXT NOT NULL,
+      command_type       TEXT NOT NULL,
+      payload_hash       TEXT NOT NULL,
+      result_status_code INTEGER NOT NULL,
+      result_json        TEXT NOT NULL,
+      result_hash        TEXT NOT NULL,
+      committed_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX idx_command_operations_lookup
+      ON command_operations(actor_scope, command_type, operation_id);
+    CREATE TRIGGER trg_command_operations_immutable_update
+    BEFORE UPDATE ON command_operations BEGIN
+      SELECT 1;
+    END;
+    CREATE TRIGGER trg_command_operations_immutable_delete
+    BEFORE DELETE ON command_operations BEGIN
+      SELECT 1;
+    END;
+  `);
+  const weakDefinitions = db.prepare(`
+    SELECT type, name, sql FROM sqlite_master
+    WHERE name IN (
+      'command_operations',
+      'idx_command_operations_lookup',
+      'trg_command_operations_immutable_update',
+      'trg_command_operations_immutable_delete'
+    )
+    ORDER BY type, name
+  `).all();
+
+  assert.throws(() => runMigrations(db), /v63 schema effect.*table command_operations/i);
+  assert.equal(db.prepare("SELECT MAX(version) FROM schema_migrations").pluck().get(), 62);
+  assert.deepEqual(db.prepare(`
+    SELECT type, name, sql FROM sqlite_master
+    WHERE name IN (
+      'command_operations',
+      'idx_command_operations_lookup',
+      'trg_command_operations_immutable_update',
+      'trg_command_operations_immutable_delete'
+    )
+    ORDER BY type, name
+  `).all(), weakDefinitions, "v63 must not silently repair or overwrite incompatible objects");
+  db.close();
+});
+
+test("v63 verification rejects a same-column index with incompatible uniqueness semantics", () => {
+  const db = new Database(":memory:");
+  initializeDatabase(db);
+  db.exec(`
+    DROP INDEX idx_command_operations_lookup;
+    CREATE UNIQUE INDEX idx_command_operations_lookup
+      ON command_operations(actor_scope, command_type, operation_id);
+  `);
+
+  assert.throws(() => runMigrations(db), /v63 schema effect.*index idx_command_operations_lookup/i);
+  db.close();
+});
+
+test("v63 verification rejects a same-name no-op immutability trigger", () => {
+  const db = new Database(":memory:");
+  initializeDatabase(db);
+  db.exec(`
+    DROP TRIGGER trg_command_operations_immutable_update;
+    CREATE TRIGGER trg_command_operations_immutable_update
+    BEFORE UPDATE ON command_operations BEGIN
+      SELECT 1;
+    END;
+  `);
+
+  assert.throws(() => runMigrations(db), /v63 schema effect.*trigger trg_command_operations_immutable_update/i);
+  db.close();
+});
+
 test("existing Panel schema with completely missing migration history fails without mutation", () => {
   const db = new Database(":memory:");
   initializeDatabase(db);
