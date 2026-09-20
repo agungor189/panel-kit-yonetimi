@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { createHash } from "node:crypto";
 
 interface Migration {
   version: number;
@@ -2389,34 +2390,102 @@ const migrations: Migration[] = [
   },
 ];
 
-export function runMigrations(db: Database.Database): void {
+export const CURRENT_SCHEMA_VERSION = 60;
+export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
+
+export type MigrationManifestEntry = {
+  version: number;
+  name: string;
+  checksum: string;
+};
+
+const checksumFor = (migration: Migration): string => createHash("sha256")
+  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}`)
+  .digest("hex");
+
+export function getMigrationManifest(): MigrationManifestEntry[] {
+  return migrations.map((migration) => ({
+    version: migration.version,
+    name: migration.name,
+    checksum: checksumFor(migration),
+  }));
+}
+
+function validateMigrationDefinitions(): MigrationManifestEntry[] {
+  const manifest = getMigrationManifest();
+  const versions = new Set<number>();
+  let previous = 0;
+  for (const entry of manifest) {
+    if (!Number.isInteger(entry.version) || entry.version <= 0) {
+      throw new Error(`Invalid migration version: ${entry.version}`);
+    }
+    if (versions.has(entry.version)) throw new Error(`Duplicate migration version: ${entry.version}`);
+    if (entry.version <= previous) throw new Error(`Migration order is not strictly increasing at v${entry.version}`);
+    versions.add(entry.version);
+    previous = entry.version;
+  }
+  if (manifest.at(-1)?.version !== CURRENT_SCHEMA_VERSION) {
+    throw new Error(`Migration manifest ends at v${manifest.at(-1)?.version ?? "none"}, expected v${CURRENT_SCHEMA_VERSION}`);
+  }
+  return manifest;
+}
+
+function ensureMigrationTable(db: Database.Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
-      version   INTEGER PRIMARY KEY,
-      name      TEXT    NOT NULL,
+      version    INTEGER PRIMARY KEY,
+      name       TEXT    NOT NULL,
+      checksum   TEXT,
       applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
-
-  const applied = new Set(
-    (db.prepare("SELECT version FROM schema_migrations").all() as { version: number }[]).map(
-      (r) => r.version,
-    ),
+  const columns = new Set(
+    (db.prepare("PRAGMA table_info(schema_migrations)").all() as { name: string }[]).map((column) => column.name),
   );
+  if (!columns.has("checksum")) db.exec("ALTER TABLE schema_migrations ADD COLUMN checksum TEXT");
+}
+
+function validateAppliedMigrations(db: Database.Database, manifest: MigrationManifestEntry[]): Set<number> {
+  const expected = new Map(manifest.map((entry) => [entry.version, entry]));
+  const rows = db.prepare("SELECT version, name, checksum FROM schema_migrations ORDER BY version").all() as Array<{
+    version: number;
+    name: string;
+    checksum: string | null;
+  }>;
+  const applied = new Set<number>();
+  const backfillChecksum = db.prepare("UPDATE schema_migrations SET checksum = ? WHERE version = ? AND checksum IS NULL");
+  for (const row of rows) {
+    const entry = expected.get(row.version);
+    if (!entry) throw new Error(`Database contains unsupported migration version v${row.version}`);
+    if (row.name !== entry.name) {
+      throw new Error(`Migration v${row.version} name mismatch: database=${row.name}, source=${entry.name}`);
+    }
+    if (row.checksum && row.checksum !== entry.checksum) {
+      throw new Error(`Migration v${row.version} checksum mismatch`);
+    }
+    if (!row.checksum) backfillChecksum.run(entry.checksum, row.version);
+    applied.add(row.version);
+  }
+  return applied;
+}
+
+export function runMigrations(db: Database.Database): void {
+  const manifest = validateMigrationDefinitions();
+  ensureMigrationTable(db);
+  const applied = validateAppliedMigrations(db, manifest);
 
   const insertMigration = db.prepare(
-    "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
+    "INSERT INTO schema_migrations (version, name, checksum) VALUES (?, ?, ?)",
   );
 
-  const sorted = [...migrations].sort((a, b) => a.version - b.version);
   let applied_count = 0;
 
-  for (const migration of sorted) {
+  for (const migration of migrations) {
     if (applied.has(migration.version)) continue;
 
     db.transaction(() => {
       migration.up(db);
-      insertMigration.run(migration.version, migration.name);
+      insertMigration.run(migration.version, migration.name, checksumFor(migration));
     })();
 
     console.log(`[Migration] Applied v${migration.version}: ${migration.name}`);

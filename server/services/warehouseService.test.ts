@@ -3,7 +3,7 @@ import { beforeEach, describe, test } from "node:test";
 import Database from "better-sqlite3";
 import { WarehouseService, WarehouseServiceError } from "./warehouseService.js";
 import { applySchema } from "../db/schema.js";
-import { runMigrations } from "../migrations/runner.js";
+import { getMigrationManifest, runMigrations } from "../migrations/runner.js";
 
 const alper = { id: "user-1", username: "Alper" };
 const ayse = { id: "user-2", username: "Ayşe" };
@@ -318,8 +318,10 @@ test("v49 mevcut email kolonu olmayan panel veritabanını güvenle yükseltir",
     INSERT INTO users (id, username, password_hash) VALUES ('legacy-user', 'Alper', 'hash');
   `);
   applySchema(legacy);
-  const insertApplied = legacy.prepare("INSERT INTO schema_migrations (version, name) VALUES (?, ?)");
-  for (let version = 1; version <= 48; version++) insertApplied.run(version, `legacy-${version}`);
+  const insertApplied = legacy.prepare("INSERT INTO schema_migrations (version, name, checksum) VALUES (?, ?, ?)");
+  for (const migration of getMigrationManifest().filter(({ version }) => version <= 48)) {
+    insertApplied.run(migration.version, migration.name, migration.checksum);
+  }
   runMigrations(legacy);
 
   const userColumns = legacy.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;

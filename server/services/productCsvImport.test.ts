@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import Database from "better-sqlite3";
 import { applySchema } from "../db/schema.js";
-import { runMigrations } from "../migrations/runner.js";
+import { getMigrationManifest, runMigrations } from "../migrations/runner.js";
 import { importProductsFromCsvRows, parseCsvNumber } from "./productCsvImport.js";
 import { resolveProductCsvHeaders } from "../../shared/productCsvMapping.js";
 
@@ -202,7 +202,9 @@ test("v50 preserves legacy names and weights while standardizing BOM parents", (
       VALUES ('assembly', 'simple');
   `);
   const markApplied = db.prepare("INSERT INTO schema_migrations (version, name) VALUES (?, ?)");
-  for (let version = 1; version <= 49; version++) markApplied.run(version, `legacy-${version}`);
+  for (const migration of getMigrationManifest().filter(({ version }) => version <= 49)) {
+    markApplied.run(migration.version, migration.name);
+  }
 
   try { runMigrations(db); }
   catch (error) { throw new Error(`Legacy migration failed: ${error instanceof Error ? error.message : String(error)}`); }

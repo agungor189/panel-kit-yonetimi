@@ -741,6 +741,7 @@ export function applySchema(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version    INTEGER PRIMARY KEY,
       name       TEXT    NOT NULL,
+      checksum   TEXT,
       applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 

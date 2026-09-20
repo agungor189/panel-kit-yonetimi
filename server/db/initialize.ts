@@ -13,10 +13,23 @@ export function openDatabase(dbPath: string): Database.Database {
 }
 
 export function initializeDatabase(db: Database.Database): void {
+  const isFresh = (db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM sqlite_master
+    WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+  `).get() as { count: number }).count === 0;
   applySchema(db);
   runMigrations(db);
+  if (isFresh) removeLegacyFreshBootstrapBusinessRows(db);
   backfillNormalizedProductFields(db);
   applySeed(db);
+}
+
+function removeLegacyFreshBootstrapBusinessRows(db: Database.Database): void {
+  db.transaction(() => {
+    db.prepare("DELETE FROM kit_profile_offers").run();
+    db.prepare("DELETE FROM kit_profiles").run();
+  })();
 }
 
 function backfillNormalizedProductFields(db: Database.Database): void {
