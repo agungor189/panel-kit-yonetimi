@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PROCUREMENT_SCHEMA_V67 } from "../db/procurementSchema.js";
+import { PROCUREMENT_REMEDIATION_SCHEMA_V68 } from "../db/procurementRemediationSchema.js";
 
 interface Migration {
   version: number;
@@ -2771,9 +2772,16 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 68,
+    name: "remediate_procurement_cash_currency_and_vat_policy",
+    up(db) {
+      db.exec(PROCUREMENT_REMEDIATION_SCHEMA_V68);
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 67;
+export const CURRENT_SCHEMA_VERSION = 68;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),
@@ -2788,7 +2796,7 @@ export type MigrationManifestEntry = {
 };
 
 const checksumFor = (migration: Migration): string => createHash("sha256")
-  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}`)
+  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}`)
   .digest("hex");
 
 export function getMigrationManifest(): MigrationManifestEntry[] {
@@ -3003,6 +3011,36 @@ function assertV67ProcurementSchemaDefinitions(actual: Database.Database): void 
   }
 }
 
+function assertV68ProcurementSchemaDefinitions(actual: Database.Database): void {
+  const reference = new Database(":memory:");
+  try {
+    reference.exec(`CREATE TABLE cash_transactions (
+      id TEXT PRIMARY KEY, account_id TEXT, type TEXT, amount REAL, currency TEXT,
+      exchange_rate_at_transaction REAL, source_type TEXT, source_id TEXT,
+      description TEXT, transaction_date DATETIME, is_deleted INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );`);
+    reference.exec(PROCUREMENT_SCHEMA_V67);
+    reference.exec(PROCUREMENT_REMEDIATION_SCHEMA_V68);
+    const cashObjects = new Set([
+      "idx_cash_transactions_procurement_payment",
+      "trg_procurement_cash_projection_immutable_update",
+      "trg_procurement_cash_projection_immutable_delete",
+    ]);
+    const expected = (reference.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE sql IS NOT NULL").all() as Array<SchemaDefinition & { tbl_name: string }>)
+      .filter((object) => V67_PROCUREMENT_TABLES.has(object.tbl_name) || cashObjects.has(object.name));
+    for (const object of expected) {
+      const found = actual.prepare("SELECT type,name,sql FROM sqlite_master WHERE type=? AND name=? AND sql IS NOT NULL")
+        .get(object.type, object.name) as SchemaDefinition | undefined;
+      if (!found || canonicalSchemaDefinition(found.sql) !== canonicalSchemaDefinition(object.sql)) {
+        throw new Error(`Migration v68 schema effect is missing or incompatible: ${object.type} ${object.name}`);
+      }
+    }
+  } finally {
+    reference.close();
+  }
+}
+
 function assertSchemaEffects(actual: Database.Database, maxVersion: number): void {
   if (maxVersion < SUPPORTED_UPGRADE_STARTS[0]) {
     throw new Error(`Migration checksum history at v${maxVersion} is not a supported verifiable checkpoint`);
@@ -3085,7 +3123,8 @@ function validateAppliedMigrations(db: Database.Database, manifest: MigrationMan
     if (maxVersion >= 63) assertV63CommandSchemaDefinitions(db);
     if (maxVersion >= 64) assertV64CatalogSchemaDefinitions(db, maxVersion);
     if (maxVersion >= 66) assertV66CatalogSchemaDefinitions(db);
-    if (maxVersion >= 67) assertV67ProcurementSchemaDefinitions(db);
+    if (maxVersion === 67) assertV67ProcurementSchemaDefinitions(db);
+    if (maxVersion >= 68) assertV68ProcurementSchemaDefinitions(db);
   }
   if (!hasChecksumColumn) {
     db.transaction(() => {
@@ -3131,6 +3170,7 @@ export function runMigrations(
       if (migration.version === 64) assertV64CatalogSchemaDefinitions(db);
       if (migration.version === 66) assertV66CatalogSchemaDefinitions(db);
       if (migration.version === 67) assertV67ProcurementSchemaDefinitions(db);
+      if (migration.version === 68) assertV68ProcurementSchemaDefinitions(db);
       insertMigration.run(migration.version, migration.name, checksumFor(migration));
     })();
 

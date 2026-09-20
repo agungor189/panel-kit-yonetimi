@@ -36,7 +36,7 @@ const post = (path: string, operationId: string, body: unknown) => fetch(`${base
 test("procurement API requires operation identity and replays exact mutation results", async () => {
   assert.equal((await post("/fx/usd-try", "fx-40", { rate: "40", source: "MANUAL", changedAt: "2026-09-20T09:00:00.000Z" })).status, 201);
   assert.equal((await post("/suppliers", "supplier-create", { id: "supplier", name: "Supplier", defaultCurrency: "USD" })).status, 201);
-  const body = { id: "purchase", supplierId: "supplier", invoiceNumber: "INV-1", invoiceDate: "2026-09-20", lines: [{ id: "line", productId: "part", quantity: "1", quoteBasis: "piece", supplierUnitPriceMinor: 1000, currency: "USD", vatMode: "EXCLUDED", vatRateBps: 2000 }] };
+  const body = { id: "purchase", supplierId: "supplier", acquisitionCostVatPolicy: "VAT_EXCLUDED_FROM_INVENTORY_COST", invoiceNumber: "INV-1", invoiceDate: "2026-09-20", lines: [{ id: "line", productId: "part", quantity: "1", quoteBasis: "piece", supplierUnitPriceMinor: 1000, currency: "USD", vatMode: "EXCLUDED", vatRateBps: 2000 }] };
   const missing = await fetch(`${baseUrl}/api/procurement/v1/purchases`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   assert.equal(missing.status, 400);
   const first = await (await post("/purchases", "purchase-create", body)).json() as any;
@@ -61,6 +61,7 @@ test("cost finalization and payment are separate idempotent commands and do not 
   assert.equal(replay.idempotent, true);
   assert.equal(db.prepare("SELECT COUNT(*) FROM purchase_payments WHERE purchase_order_id='purchase'").pluck().get(), 1);
   assert.equal(db.prepare("SELECT COUNT(*) FROM procurement_cash_postings WHERE purchase_id='purchase'").pluck().get(), 1);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM cash_transactions WHERE source_type='procurement_purchase_payment' AND source_id='payment'").pluck().get(), 1);
   assert.equal(db.prepare("SELECT central_stock FROM products WHERE id='part'").pluck().get(), stockBefore);
   assert.equal(db.prepare("SELECT COUNT(*) FROM stock_movements").pluck().get(), movementBefore);
 });

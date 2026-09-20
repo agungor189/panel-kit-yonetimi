@@ -40,6 +40,7 @@ const line = (overrides: Partial<PurchaseLineInput> = {}): PurchaseLineInput => 
 const purchase = (id: string, lines: PurchaseLineInput[] = [line()], acquisitionCosts: PurchaseCostInput[] = []): PurchaseInput => ({
   id,
   supplierId: "supplier",
+  acquisitionCostVatPolicy: "VAT_EXCLUDED_FROM_INVENTORY_COST",
   invoiceNumber: `INV-${id}`,
   invoiceDate: "2026-09-20",
   notes: "synthetic purchase",
@@ -154,5 +155,90 @@ test("duplicate command replays the purchase result without a second purchase, l
   assert.equal(db.prepare("SELECT COUNT(*) FROM purchase_orders WHERE id='po-replay'").pluck().get(), 1);
   assert.equal(db.prepare("SELECT COUNT(*) FROM command_audit_log WHERE command_type='procurement.purchase.create.v1'").pluck().get(), 1);
   assert.equal(db.prepare("SELECT COUNT(*) FROM procurement_cash_postings").pluck().get(), 0);
+  db.close();
+});
+
+test("actual purchase payment projects once into the canonical cash ledger and decreases balance exactly once", () => {
+  const { db, procurement, fx } = setup();
+  fx.recordCurrentUsdTry({ rate: "40", source: "MANUAL", changedAt: "2026-09-20T09:00:00.000Z", actorId: "finance-owner" });
+  db.prepare("INSERT INTO cash_accounts (id,name,currency,opening_balance) VALUES ('canonical-usd','Canonical USD','USD',100)").run();
+  procurement.createPurchase(purchase("po-cash"));
+  const commands = new CommandExecutor(db);
+  const payload = { id: "payment-cash", cashAccountId: "canonical-usd", amountMinor: 1_000, currency: "USD", paidAt: "2026-09-20T12:00:00.000Z" };
+  const execute = () => commands.execute({
+    operationId: "pay-po-cash", commandType: "procurement.purchase-payment.record.v1", payload,
+    actor: { human: { id: "buyer" } }, authorization: { decision: "ALLOW", capability: "finance:write" },
+  }, () => ({ statusCode: 201, body: procurement.recordPayment("po-cash", payload) }));
+  assert.equal(execute().replayed, false);
+  assert.equal(execute().replayed, true);
+  const ledger = db.prepare("SELECT type,amount,currency,source_type,source_id FROM cash_transactions WHERE account_id='canonical-usd'").all();
+  assert.deepEqual(ledger, [{ type: "OUT", amount: 10, currency: "USD", source_type: "procurement_purchase_payment", source_id: "payment-cash" }]);
+  const balance = db.prepare(`SELECT a.opening_balance + COALESCE(SUM(CASE WHEN t.type='IN' THEN t.amount WHEN t.type='OUT' THEN -t.amount ELSE 0 END),0)
+    FROM cash_accounts a LEFT JOIN cash_transactions t ON t.account_id=a.id AND t.is_deleted=0 WHERE a.id='canonical-usd' GROUP BY a.id`).pluck().get();
+  assert.equal(balance, 90);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM procurement_cash_postings WHERE payment_id='payment-cash'").pluck().get(), 1);
+  assert.throws(() => db.prepare("UPDATE cash_transactions SET amount=999 WHERE source_id='payment-cash'").run(), /immutable/i);
+  db.close();
+});
+
+test("cash-ledger projection failure atomically rolls back payment provenance and purchase status", () => {
+  const { db, procurement, fx } = setup();
+  fx.recordCurrentUsdTry({ rate: "40", source: "MANUAL", changedAt: "2026-09-20T09:00:00.000Z", actorId: "finance-owner" });
+  db.prepare("INSERT INTO cash_accounts (id,name,currency,opening_balance) VALUES ('atomic-usd','Atomic USD','USD',100)").run();
+  procurement.createPurchase(purchase("po-atomic-cash"));
+  db.prepare(`INSERT INTO cash_transactions (id,account_id,type,amount,currency,source_type,source_id,is_deleted)
+    VALUES ('procurement-payment:payment-atomic','atomic-usd','OUT',1,'USD','test_fixture','collision',0)`).run();
+  assert.throws(() => procurement.recordPayment("po-atomic-cash", {
+    id: "payment-atomic", cashAccountId: "atomic-usd", amountMinor: 1_000, currency: "USD", paidAt: "2026-09-20T12:00:00.000Z",
+  }), /unique/i);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM purchase_payments WHERE id='payment-atomic'").pluck().get(), 0);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM procurement_cash_postings WHERE payment_id='payment-atomic'").pluck().get(), 0);
+  assert.deepEqual(db.prepare("SELECT paid_minor,payment_status FROM purchase_orders WHERE id='po-atomic-cash'").get(), { paid_minor: 0, payment_status: "UNPAID" });
+  db.close();
+});
+
+test("third-party acquisition components retain independent currencies and never increase goods-supplier payable", () => {
+  const { db, procurement, fx } = setup();
+  fx.recordCurrentUsdTry({ rate: "40", source: "MANUAL", changedAt: "2026-09-20T09:00:00.000Z", actorId: "finance-owner" });
+  const created = procurement.createPurchase(purchase("po-mixed-cost", [line({ quantity: "1", supplierUnitPriceMinor: 1_000 })], [
+    { id: "freight-usd", category: "FREIGHT", amountMinor: 100, currency: "USD", vatMode: "EXCLUDED", vatRateBps: 0 },
+    { id: "customs-try", category: "CUSTOMS", amountMinor: 500, currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 0 },
+  ]));
+  assert.equal(created.totalGrossMinor, 1_200);
+  assert.equal(created.outstandingMinor, 1_200);
+  assert.deepEqual(created.acquisitionCosts.map((cost: any) => ({ id: cost.id, currency: cost.currency, fx: cost.fx, net: cost.amounts.baseTry.netMinor })), [
+    { id: "customs-try", currency: "TRY", fx: { observationId: null, numerator: 1, denominator: 1, source: "BASE_CURRENCY", observedAt: created.acquisitionCosts[0].fx.observedAt, direction: "TRY_TO_TRY" }, net: 500 },
+    { id: "freight-usd", currency: "USD", fx: { observationId: created.acquisitionCosts[1].fx.observationId, numerator: 40, denominator: 1, source: "MANUAL", observedAt: "2026-09-20T09:00:00.000Z", direction: "USD_TO_TRY" }, net: 4_000 },
+  ]);
+  db.close();
+});
+
+test("purchase VAT policy is explicit, immutable, and controls whether VAT enters historical lot cost", () => {
+  const { db, procurement } = setup();
+  const missingPolicy: any = purchase("po-vat-policy-missing", [line({ currency: "TRY" })]);
+  delete missingPolicy.acquisitionCostVatPolicy;
+  assert.throws(() => procurement.createPurchase(missingPolicy as PurchaseInput), /explicitly include or exclude VAT/i);
+  const excluded = purchase("po-vat-policy-ex", [line({ quantity: "1", supplierUnitPriceMinor: 10_000, currency: "TRY" })], [
+    { id: "freight-ex", category: "FREIGHT", amountMinor: 1_000, currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 2_000 },
+  ]);
+  excluded.acquisitionCostVatPolicy = "VAT_EXCLUDED_FROM_INVENTORY_COST";
+  procurement.createPurchase(excluded);
+  const excludedLot = procurement.finalizeAcquisitionCosts("po-vat-policy-ex", { allocations: [{ componentId: "freight-ex", mode: "ACCEPT_SUGGESTION" }] });
+
+  const included = purchase("po-vat-policy-in", [line({ id: "line-in", quantity: "1", supplierUnitPriceMinor: 12_000, currency: "TRY", vatMode: "INCLUDED" })], [
+    { id: "freight-in", category: "FREIGHT", amountMinor: 1_200, currency: "TRY", vatMode: "INCLUDED", vatRateBps: 2_000 },
+  ]);
+  included.acquisitionCostVatPolicy = "VAT_INCLUDED_IN_INVENTORY_COST";
+  procurement.createPurchase(included);
+  const includedLot = procurement.finalizeAcquisitionCosts("po-vat-policy-in", { allocations: [{ componentId: "freight-in", mode: "ACCEPT_SUGGESTION" }] });
+
+  assert.equal(excludedLot.vatPolicy, "VAT_EXCLUDED_FROM_INVENTORY_COST");
+  assert.equal(excludedLot.lots[0].vatPolicy, "VAT_EXCLUDED_FROM_INVENTORY_COST");
+  assert.equal(excludedLot.lots[0].landedCostTryMinor, 11_000);
+  assert.equal(excludedLot.lots[0].vatTryMinor, 2_200);
+  assert.equal(includedLot.lots[0].landedCostTryMinor, 13_200);
+  assert.equal(includedLot.lots[0].vatTryMinor, 2_200);
+  assert.throws(() => db.prepare("UPDATE purchase_orders SET acquisition_cost_vat_policy='VAT_INCLUDED_IN_INVENTORY_COST' WHERE id='po-vat-policy-ex'").run(), /immutable/i);
+  assert.equal(procurement.getPurchase("po-vat-policy-ex")!.lots[0].landedCostTryMinor, 11_000);
   db.close();
 });
