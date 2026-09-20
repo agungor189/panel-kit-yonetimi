@@ -73,6 +73,12 @@ const businessTablesThatMustStartEmpty = [
   "inventory_reservations",
   "inventory_reservation_lines",
   "inventory_reservation_allocations",
+  "sale_financial_snapshots",
+  "sale_financial_lines",
+  "sale_financial_line_components",
+  "sale_financial_expense_facts",
+  "sale_financial_cogs_finalizations",
+  "sale_financial_cogs_allocations",
   "warehouse_topologies",
   "warehouse_rack_configs",
   "warehouse_level_configs",
@@ -93,7 +99,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 72);
+  assert.equal(manifest.length, 73);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -134,6 +140,12 @@ test("fresh production schema is exact, versioned and has zero business history"
     inventory_reservations: ["dispatch_operation_id", "id", "order_id", "reserve_operation_id", "shipment_id", "status"],
     inventory_reservation_lines: ["base_uom_code_snapshot", "product_id", "quantity_base_int", "reservation_id"],
     inventory_reservation_allocations: ["fifo_sequence", "lot_id", "product_id", "quantity_base_int", "reservation_id"],
+    sale_financial_snapshots: ["commission_amount_minor", "commission_calculation_basis", "currency", "discount_minor", "fx_rate_denominator", "fx_rate_numerator", "gross_amount_minor", "net_revenue_minor", "sale_id", "snapshot_version", "vat_amount_minor"],
+    sale_financial_lines: ["catalog_version_ref_snapshot", "discount_allocation_minor", "gross_amount_minor", "net_revenue_minor", "product_id", "quantity_base_int", "sale_line_id", "vat_amount_minor", "vat_rate_bps"],
+    sale_financial_line_components: ["component_catalog_version_ref", "component_product_id", "financial_line_id", "quantity_base_int"],
+    sale_financial_expense_facts: ["amount_base_try_minor", "amount_minor", "category", "fact_version", "financial_snapshot_id", "operation_id", "provenance_json", "state"],
+    sale_financial_cogs_finalizations: ["dispatch_operation_id", "financial_snapshot_id", "reservation_id", "shipment_id", "total_cogs_base_try_minor"],
+    sale_financial_cogs_allocations: ["acquisition_cost_snapshot_id", "cost_base_try_minor", "dispatch_operation_id", "financial_line_id", "inventory_lot_id", "quantity_base_int", "sale_line_id"],
     warehouse_topologies: ["code_template", "config_hash", "config_json", "id", "name"],
     warehouse_rack_configs: ["allow_mixed_lot", "allow_mixed_sku", "depth_count", "level_count", "placement_priority", "position_count", "rack_code", "role", "topology_id"],
     warehouse_level_configs: ["heavy_penalty", "level_number", "rack_code", "role", "topology_id"],

@@ -30,6 +30,7 @@ import { createInventoryV1Router } from "./server/routes/inventoryV1Routes.js";
 import { rejectLegacyCatalogMutation } from "./server/modules/catalog/legacyCatalogGuard.js";
 import { CommandExecutor, CommandFoundationError } from "./server/modules/commands/commandFoundation.js";
 import { InventoryService, InventoryValidationError } from "./server/modules/inventory/inventoryService.js";
+import { SalesFinancialService, SalesFinancialValidationError } from "./server/modules/sales/salesFinancialService.js";
 import { createPanelApiAuth } from "./server/middleware/panelApiAuth.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
 import { restoreUploadEntry } from "./server/utils/restoreUploads.js";
@@ -141,6 +142,7 @@ let db = openDatabase(DB_PATH);
 initializeDatabase(db);
 const inventoryService = new InventoryService(db);
 const saleCommands = new CommandExecutor(db);
+const salesFinancials = new SalesFinancialService(db);
 const {
   getProductBomComponents,
   getProductStockProfile,
@@ -3774,6 +3776,10 @@ async function startServer() {
       }
 
       const targetPlatform = cleanText(changes.platform ?? sale.platform) || defaultSaleChannel();
+      const financialChannel = db.prepare("SELECT source_channel FROM sale_financial_snapshots WHERE sale_id=?").get(saleId) as { source_channel: string } | undefined;
+      if (financialChannel && targetPlatform !== financialChannel.source_channel) {
+        throw new SalesFinancialValidationError("SALE_CHANNEL_IMMUTABLE", "The sale channel is frozen by the V2-09 financial snapshot.", 409);
+      }
       const targetExternalOrderId = changes.external_order_id !== undefined
         ? cleanText(changes.external_order_id)
         : cleanText(sale.external_order_id);
@@ -3840,7 +3846,7 @@ async function startServer() {
   ).trim();
   const saleActor = (req: express.Request) => ({ human: { id: req.user!.id, name: req.user!.username } });
   const saleCommandError = (err: any, res: express.Response, fallbackCode: string) => {
-    if (err instanceof CommandFoundationError || err instanceof InventoryValidationError) {
+    if (err instanceof CommandFoundationError || err instanceof InventoryValidationError || err instanceof SalesFinancialValidationError) {
       return res.status(err.statusCode).json({ success: false, error: { code: err.code, message: err.message } });
     }
     return res.status(err.statusCode || 400).json({ success: false, error: { code: err.code || fallbackCode, message: err.message } });
@@ -3882,6 +3888,7 @@ async function startServer() {
     const sale = db.prepare("SELECT * FROM sales WHERE id = ?").get(saleId) as any;
     if (!sale) return null;
     sale.items = db.prepare("SELECT * FROM sale_items WHERE sale_id = ?").all(sale.id);
+    sale.financial = salesFinancials.getSaleFinancial(sale.id);
     return sale;
   };
 
@@ -3890,6 +3897,7 @@ async function startServer() {
       const sales = db.prepare("SELECT * FROM sales ORDER BY created_at DESC").all();
       sales.forEach((s: any) => {
         s.items = db.prepare("SELECT * FROM sale_items WHERE sale_id = ?").all(s.id);
+        s.financial = salesFinancials.getSaleFinancial(s.id);
       });
       res.json(sales);
     } catch (err: any) {
@@ -3906,6 +3914,46 @@ async function startServer() {
       res.json(sale);
     } catch (err: any) {
       res.status(500).json({ success: false, error: { code: 'SALE_FETCH_FAILED', message: err.message } });
+    }
+  });
+
+  app.get("/api/sales/:id/financial", (req, res) => {
+    try {
+      const financial = salesFinancials.getSaleFinancial(req.params.id);
+      if (!financial) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Satış bulunamadı.' } });
+      return res.json({ success: true, contract: 'dsdst.sale-financial.v1', data: financial });
+    } catch (err: any) {
+      return saleCommandError(err, res, "SALE_FINANCIAL_FETCH_FAILED");
+    }
+  });
+
+  app.post("/api/sales/:id/financial-expenses", (req, res) => {
+    try {
+      const payload = {
+        saleId: req.params.id,
+        category: req.body?.category ?? null,
+        state: req.body?.state ?? null,
+        amountMinor: req.body?.amountMinor ?? null,
+        currency: req.body?.currency ?? null,
+        provenance: req.body?.provenance ?? null,
+        recordedAt: req.body?.recordedAt ?? null,
+      };
+      const outcome = saleCommands.execute({
+        operationId: saleOperationId(req),
+        commandType: "sales.expense.record.v1",
+        payload,
+        actor: saleActor(req),
+        authorization: { decision: "ALLOW", capability: "sales:write" },
+        correlationId: req.headers["x-correlation-id"]?.toString(),
+        requestId: req.headers["x-request-id"]?.toString(),
+      }, (context) => {
+        const financial = salesFinancials.recordExpenseFact({ ...payload, operationId: saleOperationId(req), actor: { id: req.user!.id, name: req.user!.username } } as any);
+        context.addOutbox({ topic: "sales-finance", eventType: "sales.expense-fact.recorded.v1", aggregateType: "sale", aggregateId: req.params.id, payload: { sale_id: req.params.id, category: payload.category, state: payload.state, financial_state: financial.state } });
+        return { statusCode: 201, body: { success: true, contract: "dsdst.sale-financial.v1", data: financial } };
+      });
+      return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as any), idempotent: outcome.replayed });
+    } catch (err: any) {
+      return saleCommandError(err, res, "SALE_EXPENSE_FAILED");
     }
   });
 
@@ -3937,24 +3985,34 @@ async function startServer() {
 
   const saleSchema = z.object({
     customer_name: z.string().min(1, 'Müşteri adı boş olamaz').optional(),
-    commission_rate: z.coerce.number().min(0, 'Komisyon negatif olamaz').max(100, 'Komisyon maksimum %100 olabilir').optional().default(0),
-    discount: z.coerce.number().min(0, 'İndirim negatif olamaz').optional().default(0),
-    total_amount: z.coerce.number().min(0, 'Genel toplam negatif olamaz'),
+    platform: z.string().trim().min(1, 'Satış kanalı zorunludur'),
+    commission_rate: z.coerce.number().min(0, 'Komisyon negatif olamaz').max(100, 'Komisyon maksimum %100 olabilir'),
+    commission_terms: z.record(z.string(), z.unknown()),
+    commission_calculation_basis: z.enum(['GROSS_BEFORE_DISCOUNT', 'GROSS_AFTER_DISCOUNT']),
+    currency: z.string().regex(/^[A-Z]{3}$/),
+    discount_minor: z.number().int().nonnegative(),
+    expenses: z.object({
+      shipping: z.object({ state: z.enum(['KNOWN', 'UNKNOWN']), amountMinor: z.number().int().nonnegative().optional(), currency: z.string().regex(/^[A-Z]{3}$/).optional(), provenance: z.unknown().optional() }),
+      packaging: z.object({ state: z.enum(['KNOWN', 'UNKNOWN']), amountMinor: z.number().int().nonnegative().optional(), currency: z.string().regex(/^[A-Z]{3}$/).optional(), provenance: z.unknown().optional() }),
+      advertising: z.object({ state: z.enum(['KNOWN', 'UNKNOWN']), amountMinor: z.number().int().nonnegative().optional(), currency: z.string().regex(/^[A-Z]{3}$/).optional(), provenance: z.unknown().optional() }),
+      other: z.object({ state: z.enum(['KNOWN', 'UNKNOWN']), amountMinor: z.number().int().nonnegative().optional(), currency: z.string().regex(/^[A-Z]{3}$/).optional(), provenance: z.unknown().optional() }),
+    }),
     items: z.array(z.object({
       quantity: z.coerce.number().int('Satış miktarı tam sayı olmalıdır').positive('Satış miktarı 0 dan büyük olmalıdır').max(Number.MAX_SAFE_INTEGER),
-      price: z.coerce.number().min(0, 'Birim fiyat negatif olamaz'),
+      unit_gross_minor: z.number().int().nonnegative(),
+      vat_rate_bps: z.number().int().min(0).max(10000),
     }).passthrough()).min(1, 'En az bir satış kalemi zorunludur')
-  });
+  }).passthrough();
 
   app.post("/api/sales", requireInventoryReserve, (req, res) => {
     try {
-      saleSchema.parse(req.body);
+      const parsedSale = saleSchema.parse(req.body);
       const {
         customer_name, customer_phone, customer_address,
-        shipping_company, tracking_number, external_order_id, total_weight, total_quantity, total_amount,
-        items, platform, commission_rate, shipping_cost, discount, cash_account_id,
-        packaging_cost, ad_spend, other_expenses
-      } = req.body;
+        shipping_company, tracking_number, external_order_id, total_weight, total_quantity,
+        items, platform, commission_rate, commission_terms, commission_calculation_basis,
+        currency, discount_minor, expenses, cash_account_id,
+      } = { ...req.body, ...parsedSale };
       const outcome = saleCommands.execute({
         operationId: saleOperationId(req),
         commandType: "sales.order.create.v1",
@@ -3972,6 +4030,9 @@ async function startServer() {
         for (const item of items) {
           if (mergedItemsMap.has(item.product_id)) {
              const existing = mergedItemsMap.get(item.product_id);
+             if (Number(existing.unit_gross_minor) !== Number(item.unit_gross_minor) || Number(existing.vat_rate_bps) !== Number(item.vat_rate_bps)) {
+               throw new SalesFinancialValidationError("SALE_LINE_TERMS_CONFLICT", "Duplicate product lines must have identical VAT and gross-price terms.", 409);
+             }
              existing.quantity += Number(item.quantity);
           } else {
              mergedItemsMap.set(item.product_id, { ...item, quantity: Number(item.quantity) });
@@ -3979,7 +4040,6 @@ async function startServer() {
         }
         const mergedItems = Array.from(mergedItemsMap.values());
 
-        let totalPurchaseCost = 0;
         const processedItems = mergedItems.map((item: any) => {
           const product = db.prepare("SELECT * FROM products WHERE id = ?").get(item.product_id) as any;
           if (!product) throw new Error(`Ürün bulunamadı: ${item.product_name || item.product_id}`);
@@ -3987,11 +4047,10 @@ async function startServer() {
             throw new Error(`${product.title || product.name || product.sku} satış ürünü değil. Depo komponentleri doğrudan satılamaz.`);
           }
           const stockPlan = buildSaleStockPlan(product, item.quantity);
-          totalPurchaseCost += (stockPlan.unit_purchase_cost * item.quantity);
           return {
             ...item,
-            purchase_cost: stockPlan.unit_purchase_cost,
-            price: item.price || 0,
+            unit_gross_minor: Number(item.unit_gross_minor),
+            vat_rate_bps: Number(item.vat_rate_bps),
             available_stock: stockPlan.available_stock,
             weight: item.weight || stockPlan.unit_weight,
           stock_plan: stockPlan,
@@ -4034,18 +4093,15 @@ async function startServer() {
           operationId: saleOperationId(req),
         });
 
-        const commRate = parseFloat(commission_rate) || 0;
-        const discountAmt = parseFloat(discount) || 0;
-        const shipCost = parseFloat(shipping_cost) || 0;
-        const packCost = parseFloat(packaging_cost) || 0;
-        const adCost = parseFloat(ad_spend) || 0;
-        const otherCost = parseFloat(other_expenses) || 0;
+        let commRate = Number(commission_rate);
+        const saleCurrency = String(currency).toUpperCase();
+        const grossBeforeDiscountMinorBig = processedItems.reduce((sum: bigint, item: any) => sum + (BigInt(item.unit_gross_minor) * BigInt(item.quantity)), 0n);
+        const grossBeforeDiscountMinor = Number(grossBeforeDiscountMinorBig);
+        if (!Number.isSafeInteger(grossBeforeDiscountMinor)) throw new SalesFinancialValidationError("MONEY_OVERFLOW", "Sale gross exceeds safe integer precision.");
+        const grossMinor = grossBeforeDiscountMinor - Number(discount_minor);
 
-        let netTotal = total_amount - discountAmt;
-        let grossProfit = netTotal - totalPurchaseCost;
-        let netProfit = grossProfit - shipCost - packCost - adCost - otherCost - (total_amount * commRate / 100);
-
-        // Cash Logic
+        // Preserve the existing receivable path as a compatibility projection. It is
+        // not the V2-09 settlement/reconciliation authority (deferred to V2-10/V2-12).
         let finalCashAccountId = cash_account_id;
         const plat = cleanText(platform) || defaultSaleChannel();
         const externalOrderId = cleanText(external_order_id);
@@ -4053,6 +4109,18 @@ async function startServer() {
           throw new Error(`${plat} satışları için platform sipariş numarası zorunludur.`);
         }
         ensureUniqueExternalOrderId(plat, externalOrderId);
+
+        const configuredCommissionRates = readJsonSetting<Record<string, unknown>>('commission_rates', {});
+        if (Object.prototype.hasOwnProperty.call(configuredCommissionRates, plat)) {
+          const configuredRate = Number(configuredCommissionRates[plat]);
+          if (!Number.isFinite(configuredRate) || configuredRate < 0 || configuredRate > 100) {
+            throw new SalesFinancialValidationError("COMMISSION_POLICY_INVALID", `Configured commission rate for ${plat} is invalid.`, 409);
+          }
+          if (configuredRate !== commRate) {
+            throw new SalesFinancialValidationError("COMMISSION_POLICY_MISMATCH", `Commission rate must match the current approved ${plat} setting.`, 409);
+          }
+          commRate = configuredRate;
+        }
 
         const isPlatform = isPendingSaleChannel(plat);
 
@@ -4063,9 +4131,8 @@ async function startServer() {
            if (foundAcc) {
               finalCashAccountId = foundAcc.id;
            } else {
-              // fallback
               const pAccId = uuidv4();
-              db.prepare("INSERT INTO cash_accounts (id, name, currency, type) VALUES (?, ?, ?, ?)").run(pAccId, platAccountName, 'TRY', 'platform');
+              db.prepare("INSERT INTO cash_accounts (id, name, currency, type) VALUES (?, ?, ?, ?)").run(pAccId, platAccountName, saleCurrency, 'platform');
               finalCashAccountId = pAccId;
            }
         }
@@ -4076,26 +4143,22 @@ async function startServer() {
 
         const account = db.prepare("SELECT currency FROM cash_accounts WHERE id = ?").get(finalCashAccountId) as any;
         if (!account) throw new Error("Seçili kasa hesabı bulunamadı.");
-
-        let finalAmountToCash = netTotal;
-        if (isPlatform) {
-           finalAmountToCash = netTotal - shipCost - packCost - adCost - otherCost - (total_amount * commRate / 100);
+        if (String(account.currency).toUpperCase() !== saleCurrency) {
+          throw new SalesFinancialValidationError("SALE_ACCOUNT_CURRENCY_MISMATCH", "Sale cash account currency must match the sale currency.", 409);
         }
-
-        db.prepare(`
-           INSERT INTO cash_transactions (id, account_id, type, amount, currency, exchange_rate_at_transaction, source_type, source_id, description)
-           VALUES (?, ?, 'IN', ?, ?, 1, 'sale', ?, ?)
-        `).run(uuidv4(), finalCashAccountId, finalAmountToCash, account.currency, id, `Satış ${orderCode}: ${customer_name} (${plat})`);
-
-
-        const activeRate = getActiveExchangeRate();
-        if (!activeRate || activeRate <= 0) throw new Error("Güncel döviz kuru bulunamadı. Lütfen ayarlardan kuru yenileyin.");
 
         // 2. Create Sale
         db.prepare(`
           INSERT INTO sales (id, order_code, external_order_id, customer_name, customer_phone, customer_address, shipping_company, tracking_number, total_weight, total_quantity, total_amount, platform, commission_rate, shipping_cost, discount, packaging_cost, ad_spend, other_expenses, net_total, gross_profit, net_profit, cash_account_id, exchange_rate_at_transaction)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(id, orderCode, externalOrderId, customer_name, customer_phone, customer_address, shipping_company, tracking_number, total_weight, total_quantity, total_amount, plat, commRate, shipCost, discountAmt, packCost, adCost, otherCost, netTotal, grossProfit, netProfit, finalCashAccountId, activeRate);
+        `).run(id, orderCode, externalOrderId, customer_name, customer_phone, customer_address, shipping_company, tracking_number,
+          total_weight, total_quantity, grossBeforeDiscountMinor / 100, plat, commRate,
+          expenses?.shipping?.state === 'KNOWN' ? Number(expenses.shipping.amountMinor) / 100 : null,
+          Number(discount_minor) / 100,
+          expenses?.packaging?.state === 'KNOWN' ? Number(expenses.packaging.amountMinor) / 100 : null,
+          expenses?.advertising?.state === 'KNOWN' ? Number(expenses.advertising.amountMinor) / 100 : null,
+          expenses?.other?.state === 'KNOWN' ? Number(expenses.other.amountMinor) / 100 : null,
+          grossMinor / 100, null, null, finalCashAccountId, 1);
 
         const insertItem = db.prepare(`
           INSERT INTO sale_items (id, sale_id, product_id, product_name, quantity, weight, unit_price, purchase_cost, net_profit)
@@ -4103,23 +4166,40 @@ async function startServer() {
         `);
 
         // 3. Process sale items. Physical inventory remains unchanged until dispatch.
+        const financialLines: Array<{ saleLineId: string; productId: string; quantity: number; unitGrossMinor: number; vatRateBps: number }> = [];
         for (const item of processedItems) {
-          const lineRevenue = item.price * item.quantity;
-          const lineCost = item.purchase_cost * item.quantity;
-          const lineCommission = lineRevenue * commRate / 100;
-          const itemNetProfit = lineRevenue - lineCost - lineCommission;
-
-          insertItem.run(uuidv4(), id, item.product_id, item.product_name, item.quantity, item.weight, item.price, item.purchase_cost, itemNetProfit);
+          const saleLineId = uuidv4();
+          insertItem.run(saleLineId, id, item.product_id, item.product_name, item.quantity, item.weight, item.unit_gross_minor / 100, null, null);
+          financialLines.push({ saleLineId, productId: item.product_id, quantity: item.quantity, unitGrossMinor: item.unit_gross_minor, vatRateBps: item.vat_rate_bps });
         }
+
+        const financial = salesFinancials.createOrderSnapshot({
+          saleId: id,
+          currency: saleCurrency,
+          sourceChannel: plat,
+          discountMinor: Number(discount_minor),
+          commissionRatePercent: String(commRate),
+          commissionCalculationBasis: commission_calculation_basis,
+          commissionTerms: { ...commission_terms, channel: plat, policySource: Object.prototype.hasOwnProperty.call(configuredCommissionRates, plat) ? 'PANEL_CHANNEL_SETTINGS' : 'AUTHORIZED_SALE_INPUT' },
+          expenses,
+          lines: financialLines,
+          operationId: saleOperationId(req),
+          actor: { id: req.user!.id, name: req.user!.username },
+        });
+        const compatibilityRate = financial.fx.numerator / financial.fx.denominator;
+        db.prepare("UPDATE sales SET exchange_rate_at_transaction=? WHERE id=?").run(compatibilityRate, id);
+        db.prepare(`INSERT INTO cash_transactions (id,account_id,type,amount,currency,exchange_rate_at_transaction,source_type,source_id,description)
+          VALUES (?,?,'IN',?,?,?,'sale',?,?)`).run(uuidv4(), finalCashAccountId, financial.totals.grossMinor / 100,
+          saleCurrency, compatibilityRate, id, `Satış ${orderCode}: ${customer_name} (${plat})`);
 
         // 4. Auto-create income transaction so the financial ledger is always consistent.
         const incTxnId = uuidv4();
         db.prepare(`
           INSERT INTO transactions (id, date, type, category, platform, amount, amount_try, currency,
             exchange_rate_at_transaction, note, reference_number, cash_account_id, created_at)
-          VALUES (?, CURRENT_TIMESTAMP, 'Income', 'Satış', ?, ?, ?, 'TRY', ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          VALUES (?, CURRENT_TIMESTAMP, 'Income', 'Satış', ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         `).run(
-          incTxnId, plat, netTotal, netTotal, activeRate,
+          incTxnId, plat, financial.totals.grossMinor / 100, financial.totals.grossTryMinor / 100, saleCurrency, compatibilityRate,
           `${customer_name || 'Müşteri'} — ${plat} satışı`,
           orderCode, finalCashAccountId
         );
@@ -4128,12 +4208,14 @@ async function startServer() {
         db.prepare("UPDATE sales SET income_transaction_id = ? WHERE id = ?").run(incTxnId, id);
 
         logActivity('SALE_CREATED', 'sale', id, {
-          order_code: orderCode, external_order_id: externalOrderId, customer: customer_name, platform: plat, total: total_amount, net_profit: netProfit,
+          order_code: orderCode, external_order_id: externalOrderId, customer: customer_name, platform: plat,
+          financial_snapshot_id: financial.snapshot.id, financial_state: financial.state,
         }, req.user?.id);
 
         context.addOutbox({ topic: "inventory", eventType: "inventory.order.reserved.v1", aggregateType: "reservation", aggregateId: reservationId, payload: { reservation_id: reservationId, order_id: id, lines: [...reservationByProduct].map(([product_id, quantity_base_int]) => ({ product_id, quantity_base_int })) } });
         context.addOutbox({ topic: "sales", eventType: "sales.order.created.v1", aggregateType: "sale", aggregateId: id, payload: { sale_id: id, order_code: orderCode, reservation_id: reservation.id } });
-        return { statusCode: 201, body: { success: true, message: "Satış başarıyla kaydedildi.", id, order_code: orderCode, reservation_id: reservationId } };
+        context.addOutbox({ topic: "sales-finance", eventType: "sales.financial-snapshot.created.v1", aggregateType: "sale", aggregateId: id, payload: { sale_id: id, snapshot_id: financial.snapshot.id, state: financial.state } });
+        return { statusCode: 201, body: { success: true, message: "Satış başarıyla kaydedildi.", id, order_code: orderCode, reservation_id: reservationId, financial_state: financial.state } };
       });
 
       return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as any), idempotent: outcome.replayed });
@@ -5795,6 +5877,7 @@ async function startServer() {
         const updateSale = db.prepare("UPDATE sales SET net_total=?, gross_profit=?, net_profit=?, packaging_cost=?, ad_spend=?, other_expenses=? WHERE id=?");
 
         for (const s of salesObj) {
+           if (db.prepare("SELECT 1 FROM sale_financial_snapshots WHERE sale_id=?").get(s.id)) continue;
            const items = db.prepare("SELECT * FROM sale_items WHERE sale_id=?").all(s.id) as any[];
            let totalPurchaseCost = 0;
            for (const item of items) {

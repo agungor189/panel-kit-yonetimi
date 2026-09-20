@@ -51,6 +51,7 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
   db.prepare("INSERT INTO product_bom (id,parent_product_id,component_product_id,quantity_per_unit,component_role) VALUES (?,?,?,?,?)")
     .run("bom-b", "kit-b", "component", 3, "BODY");
   db.prepare("INSERT INTO cash_accounts (id,name,currency,type) VALUES ('cash','Cash','TRY','cash')").run();
+  db.prepare("INSERT INTO settings (key,value) VALUES ('commission_rates',?)").run(JSON.stringify({ "Satış Sistemi": 10 }));
   db.prepare(`INSERT INTO users (id,username,password_hash,role,permissions,must_change_password,is_active)
     VALUES ('admin','admin',?,'admin','{}',0,1)`).run(bcrypt.hashSync("password-1", 4));
   new ExchangeRateService(db).recordCurrentUsdTry({
@@ -121,10 +122,13 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
     }) as typeof fetch;
     browserClientInstalled = true;
     const saleBody = {
-      customer_name: "Inventory customer", total_amount: 100, total_quantity: 2, cash_account_id: "cash", platform: "Satış Sistemi",
+      customer_name: "Inventory customer", total_quantity: 2, cash_account_id: "cash", platform: "Satış Sistemi",
+      currency: "TRY", discount_minor: 0, commission_rate: 10,
+      commission_calculation_basis: "GROSS_BEFORE_DISCOUNT", commission_terms: { source: "test" },
+      expenses: Object.fromEntries(["shipping", "packaging", "advertising", "other"].map((category) => [category, { state: "KNOWN", amountMinor: 0, currency: "TRY", provenance: { source: "test", category } }])),
       items: [
-        { product_id: "kit-a", product_name: "Kit A", quantity: 1, price: 50 },
-        { product_id: "kit-b", product_name: "Kit B", quantity: 1, price: 50 },
+        { product_id: "kit-a", product_name: "Kit A", quantity: 1, unit_gross_minor: 5_000, vat_rate_bps: 2_000 },
+        { product_id: "kit-b", product_name: "Kit B", quantity: 1, unit_gross_minor: 5_000, vat_rate_bps: 2_000 },
       ],
     };
 
@@ -149,7 +153,7 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
     const updated = await api.put(`/sales/${saleId}`, updatePayload, { operationId: updateOperation.idFor(updatePayload) }) as any;
     assert.equal(updated.sale.customer_name, "Updated inventory customer");
 
-    const shortage = await request("/api/sales", "sale-shortage", { ...saleBody, items: [{ product_id: "kit-a", product_name: "Kit A", quantity: 3, price: 50 }] });
+    const shortage = await request("/api/sales", "sale-shortage", { ...saleBody, items: [{ product_id: "kit-a", product_name: "Kit A", quantity: 3, unit_gross_minor: 5_000, vat_rate_bps: 2_000 }] });
     assert.equal(shortage.status, 409);
     assert.equal((await shortage.json() as any).error.code, "INSUFFICIENT_AVAILABLE_STOCK");
     assert.equal(inspect.prepare("SELECT COUNT(*) FROM sales").pluck().get(), 1);
@@ -161,7 +165,7 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
     assert.equal(cancelled.sale.status, "İptal Edildi");
     assert.deepEqual(inspect.prepare("SELECT on_hand_base_int AS onHand,reserved_base_int AS reserved FROM inventory_lots WHERE product_id='component'").get(), { onHand: 10, reserved: 0 });
 
-    const dispatchedSale = await request("/api/sales", "sale-create-2", { ...saleBody, items: [{ product_id: "kit-a", product_name: "Kit A", quantity: 1, price: 100 }] });
+    const dispatchedSale = await request("/api/sales", "sale-create-2", { ...saleBody, items: [{ product_id: "kit-a", product_name: "Kit A", quantity: 1, unit_gross_minor: 10_000, vat_rate_bps: 2_000 }] });
     assert.equal(dispatchedSale.status, 201, await dispatchedSale.clone().text());
     const dispatchedSaleId = (await dispatchedSale.json() as any).id as string;
     const dispatchedReservation = `sale-reservation:${dispatchedSaleId}`;
@@ -169,7 +173,26 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
       const response = await request(`/api/inventory/v1/reservations/${dispatchedReservation}/${step}`, `sale-2-${step}`, body);
       assert.equal(response.status, 200, `${step}: ${await response.text()}`);
     }
+    const dispatchReplay = await request(`/api/inventory/v1/reservations/${dispatchedReservation}/dispatch`, "sale-2-dispatch", { shipmentId: "shipment-1", dispatchedAt: "2026-09-20T12:00:00.000Z" });
+    assert.equal(dispatchReplay.status, 200, await dispatchReplay.clone().text());
+    assert.equal((await dispatchReplay.json() as any).idempotent, true);
     assert.deepEqual(inspect.prepare("SELECT on_hand_base_int AS onHand,reserved_base_int AS reserved FROM inventory_lots WHERE product_id='component'").get(), { onHand: 8, reserved: 0 });
+    assert.deepEqual(inspect.prepare("SELECT quantity_base_int AS quantity,cost_base_try_minor AS cost FROM sale_financial_cogs_allocations WHERE financial_snapshot_id=(SELECT id FROM sale_financial_snapshots WHERE sale_id=?)").all(dispatchedSaleId), [{ quantity: 2, cost: 200 }]);
+    assert.equal(inspect.prepare("SELECT total_cogs_base_try_minor FROM sale_financial_cogs_finalizations WHERE financial_snapshot_id=(SELECT id FROM sale_financial_snapshots WHERE sale_id=?)").pluck().get(dispatchedSaleId), 200);
+    const frozenCommission = inspect.prepare("SELECT commission_rate_numerator AS numerator,commission_rate_denominator AS denominator FROM sale_financial_snapshots WHERE sale_id=?").get(dispatchedSaleId);
+    assert.deepEqual(frozenCommission, { numerator: 1, denominator: 10 });
+    const settingsWriter = new Database(databasePath);
+    settingsWriter.prepare("UPDATE settings SET value=? WHERE key='commission_rates'").run(JSON.stringify({ "Satış Sistemi": 99 }));
+    settingsWriter.close();
+    assert.deepEqual(inspect.prepare("SELECT commission_rate_numerator AS numerator,commission_rate_denominator AS denominator FROM sale_financial_snapshots WHERE sale_id=?").get(dispatchedSaleId), frozenCommission);
+
+    const expensePayload = { category: "shipping", state: "KNOWN", amountMinor: 25, currency: "TRY", provenance: { source: "carrier-invoice", id: "SHIP-1" } };
+    const expense = await request(`/api/sales/${dispatchedSaleId}/financial-expenses`, "sale-2-shipping", expensePayload);
+    assert.equal(expense.status, 201, await expense.clone().text());
+    const expenseReplay = await request(`/api/sales/${dispatchedSaleId}/financial-expenses`, "sale-2-shipping", expensePayload);
+    assert.equal(expenseReplay.status, 201, await expenseReplay.clone().text());
+    assert.equal((await expenseReplay.json() as any).idempotent, true);
+    assert.equal(inspect.prepare("SELECT COUNT(*) FROM sale_financial_expense_facts WHERE financial_snapshot_id=(SELECT id FROM sale_financial_snapshots WHERE sale_id=?) AND category='SHIPPING'").pluck().get(dispatchedSaleId), 2);
 
     const returned = await request(`/api/sales/${dispatchedSaleId}/status`, "sale-return-2", { status: "İade Edildi" }, "PATCH");
     assert.equal(returned.status, 200, await returned.text());
@@ -181,7 +204,9 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
     assert.equal((await legacyAdjust.json() as any).error.code, "STOCK_ADJUSTMENT_REQUIRES_LOT_CORRECTION");
     assert.equal(inspect.prepare("SELECT central_stock FROM products WHERE id='component'").pluck().get(), 8);
     assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_audit_log WHERE operation_id IN (?,?,?,'sale-create-2','sale-return-2')").pluck().get(createOperationId, updateOperation.idFor(updatePayload), cancellationOperation.idFor(cancellationPayload)), 5);
-    assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_outbox WHERE operation_record_id IN (SELECT id FROM command_operations WHERE operation_id IN (?,?,?,'sale-create-2','sale-return-2'))").pluck().get(createOperationId, updateOperation.idFor(updatePayload), cancellationOperation.idFor(cancellationPayload)), 8);
+    assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_outbox WHERE operation_record_id IN (SELECT id FROM command_operations WHERE operation_id IN (?,?,?,'sale-create-2','sale-return-2'))").pluck().get(createOperationId, updateOperation.idFor(updatePayload), cancellationOperation.idFor(cancellationPayload)), 10);
+    assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_audit_log WHERE operation_id IN ('sale-2-dispatch','sale-2-shipping')").pluck().get(), 2);
+    assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_outbox WHERE operation_record_id IN (SELECT id FROM command_operations WHERE operation_id IN ('sale-2-dispatch','sale-2-shipping'))").pluck().get(), 3);
     inspect.close();
   } finally {
     if (browserClientInstalled) globalThis.fetch = nativeFetch;

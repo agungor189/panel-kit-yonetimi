@@ -126,6 +126,14 @@ const escapeCsvCell = (value: unknown) => {
   return `"${text.replace(/"/g, '""')}"`;
 };
 
+const finalContributionMajor = (sale: any): number | null => sale?.financial?.state === 'FINAL'
+  ? Number(sale.financial.totals.netContributionTryMinor) / 100
+  : null;
+
+const financialGrossMajor = (sale: any): number | null => sale?.financial?.snapshot
+  ? Number(sale.financial.totals.grossMinor) / 100
+  : null;
+
 export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?: number; onSaleClick?: (sale: any) => void }) {
   const { FormatAmount } = useCurrency();
   const [sales, setSales] = useState<any[]>([]);
@@ -296,8 +304,8 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
       sale.status || 'Hazırlanıyor',
       sale.total_quantity || 0,
       sale.total_weight || 0,
-      sale.net_total || sale.total_amount || 0,
-      sale.net_profit || 0,
+      financialGrossMajor(sale) ?? 'Bilinmiyor',
+      finalContributionMajor(sale) ?? 'Bilinmiyor',
       getSaleDate(sale).toLocaleString('tr-TR'),
       (sale.items || []).map((item: any) => `${item.product_name} x${item.quantity}`).join(' | '),
     ]);
@@ -569,10 +577,10 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
                     <td className="px-4 py-5 text-right align-top">
                       <div className="text-xs font-black uppercase tracking-wider text-slate-500">Net Toplam</div>
                       <div className="mt-1 text-lg font-black text-primary">
-                        <FormatAmount amount={Number(sale.net_total || sale.total_amount || 0)} exchangeRateAtTransaction={sale.exchange_rate_at_transaction} />
+                        {financialGrossMajor(sale) === null ? 'Bilinmiyor' : <FormatAmount amount={financialGrossMajor(sale)!} exchangeRateAtTransaction={sale.exchange_rate_at_transaction} />}
                       </div>
-                      <div className={cn('mt-2 text-xs font-black', isProblem || Number(sale.net_profit || 0) < 0 ? 'text-red-600' : 'text-emerald-600')}>
-                        Kar: <FormatAmount amount={Number(sale.net_profit || 0)} exchangeRateAtTransaction={sale.exchange_rate_at_transaction} />
+                      <div className={cn('mt-2 text-xs font-black', isProblem || (finalContributionMajor(sale) !== null && finalContributionMajor(sale)! < 0) ? 'text-red-600' : 'text-emerald-600')}>
+                        Net katkı: {finalContributionMajor(sale) === null ? 'Bilinmiyor' : <FormatAmount amount={finalContributionMajor(sale)!} exchangeRateAtTransaction={sale.exchange_rate_at_transaction} />}
                       </div>
                     </td>
                     <td className="px-4 py-5 align-top">

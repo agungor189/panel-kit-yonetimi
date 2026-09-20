@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { PROCUREMENT_SCHEMA_V67 } from "../db/procurementSchema.js";
 import { PROCUREMENT_REMEDIATION_SCHEMA_V68 } from "../db/procurementRemediationSchema.js";
 import { INVENTORY_SCHEMA_V69 } from "../db/inventorySchema.js";
+import { SALES_FINANCIAL_SCHEMA_V74 } from "../db/salesFinancialSchema.js";
 import { WAREHOUSE_EXECUTION_SCHEMA_V71, WAREHOUSE_REPLENISHMENT_RUNTIME_SCHEMA_V73 } from "../db/warehouseExecutionSchema.js";
 
 interface Migration {
@@ -2819,9 +2820,16 @@ const migrations: Migration[] = [
       db.exec(WAREHOUSE_REPLENISHMENT_RUNTIME_SCHEMA_V73);
     },
   },
+  {
+    version: 74,
+    name: "add_immutable_sale_financial_snapshots",
+    up(db) {
+      db.exec(SALES_FINANCIAL_SCHEMA_V74);
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 73;
+export const CURRENT_SCHEMA_VERSION = 74;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),
@@ -2836,7 +2844,7 @@ export type MigrationManifestEntry = {
 };
 
 const checksumFor = (migration: Migration): string => createHash("sha256")
-  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}${migration.version === 69 ? `\0${INVENTORY_SCHEMA_V69}` : ""}${migration.version === 71 ? `\0${WAREHOUSE_EXECUTION_SCHEMA_V71}` : ""}`)
+  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}${migration.version === 69 ? `\0${INVENTORY_SCHEMA_V69}` : ""}${migration.version === 71 ? `\0${WAREHOUSE_EXECUTION_SCHEMA_V71}` : ""}${migration.version === 74 ? `\0${SALES_FINANCIAL_SCHEMA_V74}` : ""}`)
   .digest("hex");
 
 export function getMigrationManifest(): MigrationManifestEntry[] {

@@ -17,8 +17,12 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
     external_order_id: '',
     platform: 'Satış Sistemi',
     commission_rate: 0,
-    shipping_cost: 0,
-    discount: 0,
+    vat_rate_percent: '',
+    shipping_cost: '',
+    packaging_cost: '',
+    advertising_cost: '',
+    other_expenses: '',
+    discount: '0',
     cash_account_id: ''
   });
 
@@ -238,6 +242,17 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
     sufficient: item.current_stock >= item.required,
   }));
   const hasBomShortage = bomConsumptionPreview.some((item: any) => !item.sufficient);
+  const majorToMinor = (value: string | number, field: string) => {
+    const source = String(value).trim().replace(',', '.');
+    const match = /^(0|[1-9]\d*)(?:\.(\d{1,2}))?$/.exec(source);
+    if (!match) throw new Error(`${field} en fazla iki ondalık basamaklı geçerli bir tutar olmalıdır.`);
+    const result = Number(match[1]) * 100 + Number((match[2] || '').padEnd(2, '0'));
+    if (!Number.isSafeInteger(result)) throw new Error(`${field} güvenli para sınırını aşıyor.`);
+    return result;
+  };
+  const expenseFact = (value: string, label: string) => value.trim() === ''
+    ? { state: 'UNKNOWN' as const }
+    : { state: 'KNOWN' as const, amountMinor: majorToMinor(value, label), currency: 'TRY', provenance: { source: 'PANEL_SALE_ENTRY' } };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -245,6 +260,7 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
     if (requiresPlatformOrderNumber(formData.platform) && !formData.external_order_id.trim()) {
       return alert(`${formData.platform} için platform sipariş numarası zorunludur.`);
     }
+    if (!formData.vat_rate_percent.trim()) return alert('KDV oranı zorunludur; geçmiş satış için tahmin edilemez.');
     
     // Additional validation check just in case
     for (const item of selectedItems) {
@@ -257,16 +273,34 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
       return alert(`BOM komponent stoğu yetersiz: ${bomShortage.component_sku} için gerekli ${bomShortage.required}, mevcut ${bomShortage.current_stock}.`);
     }
     
+    let vatRateBps: number;
+    try {
+      const vatPercent = majorToMinor(formData.vat_rate_percent, 'KDV oranı');
+      if (vatPercent > 10_000) throw new Error('KDV oranı %100 değerini aşamaz.');
+      vatRateBps = vatPercent;
+    } catch (error: any) {
+      return alert(error.message);
+    }
     const salePayload = {
       ...formData,
+      currency: 'TRY',
       external_order_id: formData.external_order_id.trim(),
       total_quantity: totalQuantity,
       total_weight: totalWeight,
-      total_amount: totalAmount,
+      discount_minor: majorToMinor(formData.discount, 'İndirim'),
+      commission_calculation_basis: 'GROSS_BEFORE_DISCOUNT',
+      commission_terms: { source: 'PANEL_CHANNEL_SETTINGS', channel: formData.platform, configuredRatePercent: String(formData.commission_rate) },
+      expenses: {
+        shipping: expenseFact(formData.shipping_cost, 'Kargo gideri'),
+        packaging: expenseFact(formData.packaging_cost, 'Paketleme gideri'),
+        advertising: expenseFact(formData.advertising_cost, 'Reklam gideri'),
+        other: expenseFact(formData.other_expenses, 'Diğer gider'),
+      },
       items: selectedItems.map(item => ({
         ...item,
         weight: item.weight_per_unit * item.quantity,
-        price: parseFloat(item.sale_price)
+        unit_gross_minor: majorToMinor(item.sale_price, `${item.product_name} birim fiyatı`),
+        vat_rate_bps: vatRateBps,
       }))
     };
     const operationId = createSaleOperation.current.idFor(salePayload);
@@ -441,24 +475,46 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
                 />
               </div>
               <div>
-                <label className="block text-xs font-semibold text-gray-500 mb-1">Kargo Maliyeti (₺)</label>
-                <input 
-                  type="number" 
-                  step="0.1"
-                  min="0"
-                  value={formData.shipping_cost}
-                  onChange={e => setFormData({...formData, shipping_cost: parseFloat(e.target.value) || 0})}
+                <label className="block text-xs font-semibold text-gray-500 mb-1">KDV Oranı (%)</label>
+                <input
+                  required
+                  type="text"
+                  inputMode="decimal"
+                  value={formData.vat_rate_percent}
+                  onChange={e => setFormData({...formData, vat_rate_percent: e.target.value})}
+                  placeholder="Örn. 20"
                   className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-semibold outline-none focus:ring-2 focus:border-primary"
                 />
               </div>
               <div>
+                <label className="block text-xs font-semibold text-gray-500 mb-1">Kargo Maliyeti (boş = Bilinmiyor)</label>
+                <input 
+                  type="text"
+                  inputMode="decimal"
+                  value={formData.shipping_cost}
+                  onChange={e => setFormData({...formData, shipping_cost: e.target.value})}
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-semibold outline-none focus:ring-2 focus:border-primary"
+                />
+              </div>
+              {[
+                ['packaging_cost', 'Paketleme (boş = Bilinmiyor)'],
+                ['advertising_cost', 'Reklam (boş = Bilinmiyor)'],
+                ['other_expenses', 'Diğer Gider (boş = Bilinmiyor)'],
+              ].map(([field, label]) => (
+                <div key={field}>
+                  <label className="block text-xs font-semibold text-gray-500 mb-1">{label}</label>
+                  <input type="text" inputMode="decimal" value={(formData as any)[field]}
+                    onChange={e => setFormData({...formData, [field]: e.target.value})}
+                    className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-semibold outline-none focus:ring-2 focus:border-primary" />
+                </div>
+              ))}
+              <div>
                 <label className="block text-xs font-semibold text-gray-500 mb-1">İndirim Tutarı (₺)</label>
                 <input 
-                  type="number" 
-                  step="0.1"
-                  min="0"
+                  type="text"
+                  inputMode="decimal"
                   value={formData.discount}
-                  onChange={e => setFormData({...formData, discount: parseFloat(e.target.value) || 0})}
+                  onChange={e => setFormData({...formData, discount: e.target.value})}
                   className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-semibold outline-none focus:ring-2 focus:border-primary"
                 />
               </div>

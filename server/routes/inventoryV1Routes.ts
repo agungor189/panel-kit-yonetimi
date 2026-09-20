@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import express, { type RequestHandler } from "express";
 import { CommandExecutor, CommandFoundationError } from "../modules/commands/commandFoundation.js";
 import { InventoryService, InventoryValidationError } from "../modules/inventory/inventoryService.js";
+import { SalesFinancialService, SalesFinancialValidationError } from "../modules/sales/salesFinancialService.js";
 
 type Dependencies = {
   db: Database.Database;
@@ -17,7 +18,7 @@ type Dependencies = {
 const operationId = (req: express.Request) => String(req.headers["x-operation-id"] || req.headers["idempotency-key"] || "").trim();
 
 const sendError = (error: unknown, res: express.Response) => {
-  if (error instanceof CommandFoundationError || error instanceof InventoryValidationError) {
+  if (error instanceof CommandFoundationError || error instanceof InventoryValidationError || error instanceof SalesFinancialValidationError) {
     return res.status(error.statusCode).json({ success: false, error: { code: error.code, message: error.message } });
   }
   if (String((error as { code?: unknown })?.code || "").includes("SQLITE_CONSTRAINT")) {
@@ -29,6 +30,7 @@ const sendError = (error: unknown, res: express.Response) => {
 export function createInventoryV1Router(dependencies: Dependencies) {
   const router = express.Router();
   const inventory = new InventoryService(dependencies.db);
+  const salesFinancials = new SalesFinancialService(dependencies.db);
   const commands = new CommandExecutor(dependencies.db);
   const execute = (req: express.Request, capability: string, commandType: string, payload: unknown, handler: Parameters<CommandExecutor["execute"]>[1]) => commands.execute({
     operationId: operationId(req),
@@ -117,8 +119,17 @@ export function createInventoryV1Router(dependencies: Dependencies) {
       const payload = { reservationId: req.params.id, shipmentId: req.body?.shipmentId ?? null, dispatchedAt: req.body?.dispatchedAt ?? null };
       const outcome = execute(req, "shipping:dispatch", "inventory.reservation.dispatch.v1", payload, (context) => {
         const data = inventory.dispatchReservation({ ...payload, operationId: operationId(req) });
+        const financial = salesFinancials.finalizeDispatch({
+          reservationId: req.params.id,
+          operationId: operationId(req),
+          actor: { id: req.user!.id, name: req.user!.username },
+          finalizedAt: req.body?.dispatchedAt,
+        });
         context.addOutbox({ topic: "inventory", eventType: "inventory.shipment.dispatched.v1", aggregateType: "reservation", aggregateId: data.id, payload: { reservation_id: data.id, shipment_id: data.shipmentId } });
-        return { statusCode: 200, body: { success: true, contract: "dsdst.inventory-dispatch.v1", data } };
+        if (financial && financial.state !== "LEGACY_UNSNAPSHOTTED") {
+          context.addOutbox({ topic: "sales-finance", eventType: "sales.cogs.finalized.v1", aggregateType: "sale", aggregateId: financial.saleId, payload: { sale_id: financial.saleId, reservation_id: data.id, cogs_base_try_minor: financial.totals.actualCogsTryMinor } });
+        }
+        return { statusCode: 200, body: { success: true, contract: "dsdst.inventory-dispatch.v1", data: { ...data, financialState: financial?.state ?? null } } };
       });
       return send(res, outcome);
     } catch (error) { return sendError(error, res); }

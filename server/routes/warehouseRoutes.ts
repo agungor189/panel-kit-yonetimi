@@ -7,6 +7,7 @@ import { CommandExecutor, CommandFoundationError } from "../modules/commands/com
 import { CatalogService } from "../modules/catalog/catalogService.js";
 import { UOM_DEFINITIONS, UOM_REGISTRY_VERSION } from "../modules/catalog/uom.js";
 import { InventoryService, InventoryValidationError } from "../modules/inventory/inventoryService.js";
+import { SalesFinancialService, SalesFinancialValidationError } from "../modules/sales/salesFinancialService.js";
 import { WarehouseExecutionError, WarehouseExecutionService, type WarehouseTopologyInput } from "../modules/warehouse/warehouseExecutionService.js";
 
 type WarehouseUser = WarehousePicker & {
@@ -65,6 +66,7 @@ export function createWarehouseRouter({
   const commandExecutor = new CommandExecutor(db);
   const catalogService = new CatalogService(db);
   const inventoryService = new InventoryService(db);
+  const salesFinancials = new SalesFinancialService(db);
   const executionService = new WarehouseExecutionService(db);
 
   const authenticate = (requiredPermissions: string | string[]) => (
@@ -212,6 +214,9 @@ export function createWarehouseRouter({
       return errorResponse(res, error.statusCode, error.code, error.message);
     }
     if (error instanceof InventoryValidationError) {
+      return errorResponse(res, error.statusCode, error.code, error.message);
+    }
+    if (error instanceof SalesFinancialValidationError) {
       return errorResponse(res, error.statusCode, error.code, error.message);
     }
     if (error instanceof WarehouseExecutionError) {
@@ -498,8 +503,17 @@ export function createWarehouseRouter({
         const payload = { reservationId: req.params.id, shipmentId: req.body?.shipmentId ?? null, dispatchedAt: req.body?.dispatchedAt ?? null };
         const outcome = commandExecutor.execute(commandRequest(req, res, "inventory.reservation.dispatch.v1", "shipping:dispatch", payload), (context) => {
           const data = inventoryService.dispatchReservation({ ...payload, operationId: operationIdFromRequest(req) } as any);
+          const financial = salesFinancials.finalizeDispatch({
+            reservationId: req.params.id,
+            operationId: operationIdFromRequest(req),
+            actor: { id: actor(res).id, name: actor(res).username },
+            finalizedAt: req.body?.dispatchedAt,
+          });
           context.addOutbox({ topic: "inventory", eventType: "inventory.shipment.dispatched.v1", aggregateType: "reservation", aggregateId: data.id, payload: { reservation_id: data.id, shipment_id: data.shipmentId } });
-          return { statusCode: 200, body: { success: true, contract: "dsdst.inventory-dispatch.v1", data } };
+          if (financial && financial.state !== "LEGACY_UNSNAPSHOTTED") {
+            context.addOutbox({ topic: "sales-finance", eventType: "sales.cogs.finalized.v1", aggregateType: "sale", aggregateId: financial.saleId, payload: { sale_id: financial.saleId, reservation_id: data.id, cogs_base_try_minor: financial.totals.actualCogsTryMinor } });
+          }
+          return { statusCode: 200, body: { success: true, contract: "dsdst.inventory-dispatch.v1", data: { ...data, financialState: financial?.state ?? null } } };
         });
         return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
       } catch (error) { return handleServiceError(res, error); }

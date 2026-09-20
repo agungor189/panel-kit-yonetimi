@@ -3,6 +3,7 @@ import { X, Save, Edit3, MapPin, Truck, Hash, User, Package, CheckCircle, AlertC
 import { useCurrency } from '../../CurrencyContext';
 import { api, createRetryOperation } from '../../lib/api';
 import { useAuth } from '../../App';
+import { SaleFinancialBreakdown } from './SaleFinancialBreakdown';
 
 type SaleDetailFormData = {
   customer_name: string;
@@ -77,8 +78,6 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
     const base = buildFormData(currentSale);
     return Object.keys(base).some((key) => base[key as keyof SaleDetailFormData] !== formData[key as keyof SaleDetailFormData]);
   }, [currentSale, formData]);
-
-  const netProfitIsNegative = finalStatuses.includes(currentSale?.status) || Number(currentSale?.net_profit || 0) < 0;
 
   const updateForm = (field: keyof SaleDetailFormData, value: string) => {
     setSaved(false);
@@ -344,34 +343,7 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
             </div>
           </div>
 
-          <div className="grid grid-cols-2 lg:grid-cols-6 gap-4 p-6 bg-gray-50 border border-gray-200 rounded-2xl">
-             <div>
-                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Alt Toplam</div>
-                <div className="mt-1 font-bold text-gray-800"><FormatAmount amount={currentSale.total_amount} exchangeRateAtTransaction={currentSale.exchange_rate_at_transaction} /></div>
-             </div>
-             <div>
-                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">İndirim</div>
-                <div className="mt-1 font-bold text-red-500">- <FormatAmount amount={currentSale.discount || 0} exchangeRateAtTransaction={currentSale.exchange_rate_at_transaction} /></div>
-             </div>
-             <div>
-                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Toplam Ağırlık</div>
-                <div className="mt-1 font-bold text-orange-500">{currentSale.total_weight ? `${currentSale.total_weight.toFixed(2)} kg` : '-'}</div>
-             </div>
-             <div>
-                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Kargo / Gider</div>
-                <div className="mt-1 font-bold text-orange-500">- <FormatAmount amount={(currentSale.shipping_cost || 0) + (currentSale.packaging_cost || 0) + (currentSale.other_expenses || 0) + (currentSale.ad_spend || 0)} exchangeRateAtTransaction={currentSale.exchange_rate_at_transaction} /></div>
-             </div>
-             <div>
-                <div className={`text-[10px] font-bold uppercase tracking-wider ${netProfitIsNegative ? 'text-red-500' : 'text-emerald-600'}`}>Net Kâr</div>
-                <div className={`mt-1 text-lg font-black ${netProfitIsNegative ? 'text-red-600' : 'text-emerald-600'}`}>
-                  <FormatAmount amount={currentSale.net_profit || 0} exchangeRateAtTransaction={currentSale.exchange_rate_at_transaction} />
-                </div>
-             </div>
-             <div>
-                <div className="text-[10px] font-bold text-primary uppercase tracking-wider">Net Toplam</div>
-                <div className="mt-1 text-xl font-black text-primary"><FormatAmount amount={currentSale.net_total || 0} exchangeRateAtTransaction={currentSale.exchange_rate_at_transaction} /></div>
-             </div>
-          </div>
+          <SaleFinancialBreakdown financial={currentSale.financial} />
         </div>
       </div>
     </div>

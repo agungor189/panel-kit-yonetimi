@@ -37,6 +37,7 @@ export const createRetryOperation = (prefix: string) => {
 
 const requiresSalesOperationId = (method: "POST" | "PUT" | "PATCH", endpoint: string) => (
   (method === "POST" && endpoint === "/sales")
+  || (method === "POST" && /^\/sales\/[^/]+\/financial-expenses$/.test(endpoint))
   || ((method === "PUT" || method === "PATCH") && /^\/sales\/[^/]+(?:\/status)?$/.test(endpoint))
 );
 
