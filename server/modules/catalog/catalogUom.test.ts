@@ -18,10 +18,15 @@ test("mm/cm/m conversions round-trip exactly and reject sub-millimeter precision
   assert.throws(() => lengthToMillimeters("1.0005", "meter"), /integer millimeter/i);
 });
 
-test("controlled UOM quantities use integer base quanta and piece rejects fractions", () => {
+test("controlled UOM quantities enforce discrete counts and forbid cross-dimension PIECE conversion", () => {
   assert.equal(normalizeBaseQuantity("1.234", "meter").baseQuantity, 1234);
   assert.equal(normalizeBaseQuantity("0.001", "kg").baseQuantity, 1);
-  assert.throws(() => normalizeBaseQuantity("1.5", "piece"), /integer base quantity/i);
+  for (const code of ["piece", "roll", "package", "box"] as const) {
+    assert.throws(() => normalizeBaseQuantity("1.5", code), /integer base quantity/i);
+  }
+  for (const code of ["kg", "roll", "package", "box"] as const) {
+    assert.throws(() => convertExact("1", code, "piece"), /not convertible/i);
+  }
   assert.throws(() => normalizeBaseQuantity("0.0005", "kg"), /integer base quantity/i);
   assert.throws(() => normalizeBaseQuantity("1", "unknown" as never), /unsupported UOM/i);
 });
@@ -125,5 +130,33 @@ test("complementary products accept controlled base UOMs and base UOM identity i
   const piece = catalog.getProduct("comp-piece")!;
   assert.throws(() => catalog.updateProduct(piece.id, piece.catalog_version, { ...piece, base_uom_code: "box" }), /Base UOM identity is immutable/i);
   assert.equal(db.prepare("SELECT COUNT(*) FROM catalog_product_versions WHERE product_id=?").pluck().get(piece.id), 1);
+  db.close();
+});
+
+test("continuous-cut complementary products require only typed behavior and a continuous base UOM", () => {
+  const db = new Database(":memory:");
+  initializeDatabase(db);
+  const catalog = new CatalogService(db);
+
+  const fabric = catalog.createProduct({
+    id: "continuous-fabric",
+    sku: "FABRIC-BLACK",
+    title: "Black shade fabric",
+    catalog_type: "complementary",
+    base_uom_code: "square_meter",
+    material_behavior: "continuous_cut",
+  });
+  assert.equal(fabric.material_behavior, "continuous_cut");
+  assert.equal(fabric.base_uom.code, "square_meter");
+  assert.deepEqual(fabric.dimensions, { length_mm: null, width_mm: null, height_mm: null, diameter_mm: null });
+  assert.equal(JSON.parse(db.prepare("SELECT snapshot_json FROM catalog_product_versions WHERE product_id=?").pluck().get(fabric.id) as string).material_behavior, "continuous_cut");
+
+  assert.throws(() => catalog.createProduct({
+    sku: "CUT-PIECE",
+    title: "Invalid discrete cut item",
+    catalog_type: "complementary",
+    base_uom_code: "piece",
+    material_behavior: "continuous_cut",
+  }), /continuous.*meter|square_meter/i);
   db.close();
 });

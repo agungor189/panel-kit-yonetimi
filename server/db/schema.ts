@@ -72,6 +72,7 @@ export function applySchema(db: Database.Database): void {
       height_mm_int           INTEGER CHECK(height_mm_int IS NULL OR height_mm_int >= 0),
       diameter_mm_int         INTEGER CHECK(diameter_mm_int IS NULL OR diameter_mm_int >= 0),
       mass_grams_int          INTEGER CHECK(mass_grams_int IS NULL OR mass_grams_int >= 0),
+      material_behavior       TEXT    CHECK(material_behavior IS NULL OR material_behavior = 'continuous_cut'),
       created_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(base_uom_code) REFERENCES uom_definitions(code) ON DELETE RESTRICT
@@ -189,6 +190,16 @@ export function applySchema(db: Database.Database): void {
     CREATE TRIGGER IF NOT EXISTS trg_uom_conversions_immutable_delete
     BEFORE DELETE ON uom_conversions BEGIN
       SELECT RAISE(ABORT, 'uom_conversions are immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_products_base_uom_valid_insert
+    BEFORE INSERT ON products
+    WHEN NOT EXISTS (SELECT 1 FROM uom_definitions WHERE code=NEW.base_uom_code) BEGIN
+      SELECT RAISE(ABORT, 'products.base_uom_code must reference uom_definitions');
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_products_base_uom_valid_update
+    BEFORE UPDATE OF base_uom_code ON products
+    WHEN NOT EXISTS (SELECT 1 FROM uom_definitions WHERE code=NEW.base_uom_code) BEGIN
+      SELECT RAISE(ABORT, 'products.base_uom_code must reference uom_definitions');
     END;
 
     CREATE TABLE IF NOT EXISTS product_logistics (

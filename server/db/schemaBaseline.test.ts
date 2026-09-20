@@ -64,7 +64,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 64);
+  assert.equal(manifest.length, 65);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -74,7 +74,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   assert.ok(manifest.every(({ checksum }) => /^[a-f0-9]{64}$/.test(checksum)));
 
   const requiredColumns: Record<string, string[]> = {
-    products: ["base_uom_code", "catalog_class", "catalog_type", "catalog_version", "catalog_version_ref", "central_stock", "id", "mass_grams_int", "product_type", "sku", "title"],
+    products: ["base_uom_code", "catalog_class", "catalog_type", "catalog_version", "catalog_version_ref", "central_stock", "id", "mass_grams_int", "material_behavior", "product_type", "sku", "title"],
     product_profile_attributes: ["custom_length_allowed", "form", "material", "product_id", "standard_purchase_lengths_mm_json", "wall_thickness_micrometers", "wall_thickness_mm"],
     catalog_product_versions: ["catalog_version", "content_hash", "product_id", "snapshot_json", "version_ref"],
     uom_definitions: ["base_quantum", "code", "dimension", "quantity_scale", "registry_version"],
@@ -109,6 +109,11 @@ test("fresh production schema is exact, versioned and has zero business history"
   assert.equal(count(db, "settings"), 0, "unresolved business policy must remain unconfigured");
   assert.equal(count(db, "warehouse_rack_metadata"), 0, "fresh bootstrap must not invent warehouse placement policy");
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM users WHERE username='admin'").pluck().get(), 0);
+
+  assert.throws(
+    () => db.prepare("INSERT INTO products (id,title,product_type,base_uom_code) VALUES ('invalid-uom','Invalid UOM','simple','free-text')").run(),
+    /base_uom|foreign key|uom/i,
+  );
 
   const before = Object.fromEntries([
     ...businessTablesThatMustStartEmpty,
@@ -172,6 +177,15 @@ for (const start of SUPPORTED_UPGRADE_STARTS) {
       .run(`fixture-v${start}`, `Historical v${start} product`, "simple");
     runMigrations(db);
     assert.equal(count(db, "products"), 1);
+    assert.throws(
+      () => db.prepare("UPDATE products SET base_uom_code='free-text' WHERE id=?").run(`fixture-v${start}`),
+      /base_uom|foreign key|uom/i,
+    );
+    assert.throws(
+      () => db.prepare("INSERT INTO products (id,title,product_type,base_uom_code) VALUES (?,?,?,'free-text')")
+        .run(`invalid-uom-v${start}`, "Invalid upgraded UOM", "simple"),
+      /base_uom|foreign key|uom/i,
+    );
     assert.deepEqual(
       db.prepare("SELECT version, name, checksum FROM schema_migrations ORDER BY version").all(),
       getMigrationManifest(),

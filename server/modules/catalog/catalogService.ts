@@ -4,6 +4,7 @@ import { getUomDefinition, UOM_REGISTRY_VERSION, type UomCode } from "./uom.js";
 
 export type CatalogType = "product" | "profile" | "connector" | "cap" | "wheel" | "complementary";
 export type ProfileForm = "square" | "rectangular" | "round" | "channel" | "angle" | "flat" | "other";
+export type MaterialBehavior = "continuous_cut";
 
 export type ProfileAttributesInput = {
   material: string;
@@ -29,6 +30,7 @@ export type CatalogProductInput = {
   base_uom?: { code?: UomCode };
   dimensions?: { length_mm?: number | null; width_mm?: number | null; height_mm?: number | null; diameter_mm?: number | null };
   mass_grams?: number | null;
+  material_behavior?: MaterialBehavior | null;
   profile?: ProfileAttributesInput | null;
   status?: string;
 };
@@ -44,6 +46,7 @@ export type CatalogProduct = {
   uom_registry_version: typeof UOM_REGISTRY_VERSION;
   dimensions: { length_mm: number | null; width_mm: number | null; height_mm: number | null; diameter_mm: number | null };
   mass_grams: number | null;
+  material_behavior: MaterialBehavior | null;
   profile: ProfileAttributesInput | null;
   status: string;
   image?: string | null;
@@ -151,6 +154,14 @@ const normalizedInput = (input: CatalogProductInput) => {
   if (["connector", "cap", "wheel"].includes(input.catalog_type) && baseUomCode !== "piece") {
     throw new CatalogValidationError(`${input.catalog_type} base UOM must be piece.`);
   }
+  const materialBehavior = input.material_behavior ?? null;
+  if (materialBehavior !== null && materialBehavior !== "continuous_cut") {
+    throw new CatalogValidationError("material_behavior is unsupported.");
+  }
+  if (materialBehavior === "continuous_cut"
+    && (input.catalog_type !== "complementary" || !["meter", "square_meter"].includes(baseUomCode))) {
+    throw new CatalogValidationError("Continuous-cut material requires a complementary product with meter or square_meter base UOM.");
+  }
   const profile = normalizeProfile(input.profile);
   if (input.catalog_type === "profile" && !profile) throw new CatalogValidationError("Profile attributes are required.");
   if (input.catalog_type !== "profile" && profile) throw new CatalogValidationError("Profile attributes apply only to profile catalog items.");
@@ -166,6 +177,7 @@ const normalizedInput = (input: CatalogProductInput) => {
       diameter_mm: integerOrNull(input.dimensions?.diameter_mm, "dimensions.diameter_mm"),
     },
     massGrams: integerOrNull(input.mass_grams, "mass_grams"),
+    materialBehavior,
     profile,
     status: input.status ? requiredText(input.status, "status", 30) : "Active",
   };
@@ -178,7 +190,7 @@ const productSelect = `
     CASE WHEN p.catalog_class='complementary' THEN 'complementary' ELSE p.catalog_type END AS catalog_type,
     p.catalog_class, p.base_uom_code, p.catalog_version,
     p.catalog_version_ref, p.uom_registry_version, p.length_mm_int, p.width_mm_int,
-    p.height_mm_int, p.diameter_mm_int, p.mass_grams_int, p.status,
+    p.height_mm_int, p.diameter_mm_int, p.mass_grams_int, p.material_behavior, p.status,
     u.base_quantum, u.quantity_scale,
     a.material AS profile_material, a.form AS profile_form,
     a.width_micrometers AS profile_width_micrometers,
@@ -213,15 +225,15 @@ export class CatalogService {
       this.db.prepare(`INSERT INTO products (
         id, name, title, sku, status, material, weight_grams, catalog_type, catalog_class, base_uom_code,
         catalog_version, uom_registry_version, length_mm_int, width_mm_int, height_mm_int,
-        diameter_mm_int, mass_grams_int
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`)
+        diameter_mm_int, mass_grams_int, material_behavior
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`)
         .run(id, normalized.title, normalized.title, normalized.sku, normalized.status,
           normalized.profile?.material || null, normalized.massGrams ?? 0,
           normalized.catalogType === "complementary" ? "product" : normalized.catalogType,
           normalized.catalogType === "complementary" ? "complementary" : null,
           normalized.baseUomCode, UOM_REGISTRY_VERSION, normalized.dimensions.length_mm,
           normalized.dimensions.width_mm, normalized.dimensions.height_mm, normalized.dimensions.diameter_mm,
-          normalized.massGrams);
+          normalized.massGrams, normalized.materialBehavior);
       this.writeProfile(id, normalized.profile);
       return this.captureVersion(id, 1);
     }).immediate();
@@ -239,13 +251,13 @@ export class CatalogService {
       }
       this.db.prepare(`UPDATE products SET title=?, name=?, sku=?, status=?, material=?, weight_grams=?, catalog_type=?, catalog_class=?,
         base_uom_code=?, uom_registry_version=?, length_mm_int=?, width_mm_int=?, height_mm_int=?, diameter_mm_int=?,
-        mass_grams_int=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND catalog_version=?`)
+        mass_grams_int=?, material_behavior=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND catalog_version=?`)
         .run(normalized.title, normalized.title, normalized.sku, normalized.status, normalized.profile?.material || null,
           normalized.massGrams ?? 0, normalized.catalogType === "complementary" ? "product" : normalized.catalogType,
           normalized.catalogType === "complementary" ? "complementary" : null,
           normalized.baseUomCode, UOM_REGISTRY_VERSION,
           normalized.dimensions.length_mm, normalized.dimensions.width_mm, normalized.dimensions.height_mm,
-          normalized.dimensions.diameter_mm, normalized.massGrams, id, expectedVersion);
+          normalized.dimensions.diameter_mm, normalized.massGrams, normalized.materialBehavior, id, expectedVersion);
       this.writeProfile(id, normalized.profile);
       return this.captureVersion(id, expectedVersion + 1);
     }).immediate();
@@ -343,6 +355,7 @@ export class CatalogService {
         diameter_mm: row.diameter_mm_int ?? null,
       },
       mass_grams: row.mass_grams_int ?? null,
+      material_behavior: row.material_behavior ?? null,
       profile,
       status: row.status || "Active",
       image: row.image || null,

@@ -2722,9 +2722,31 @@ const migrations: Migration[] = [
       db.exec("DROP TABLE product_profile_attributes_v64");
     },
   },
+  {
+    version: 66,
+    name: "guard_catalog_uom_and_material_behavior",
+    up(db) {
+      const productColumns = new Set((db.prepare("PRAGMA table_info(products)").all() as Array<{ name: string }>).map(({ name }) => name));
+      if (!productColumns.has("material_behavior")) {
+        db.exec("ALTER TABLE products ADD COLUMN material_behavior TEXT CHECK(material_behavior IS NULL OR material_behavior = 'continuous_cut')");
+      }
+      db.exec(`
+        CREATE TRIGGER IF NOT EXISTS trg_products_base_uom_valid_insert
+        BEFORE INSERT ON products
+        WHEN NOT EXISTS (SELECT 1 FROM uom_definitions WHERE code=NEW.base_uom_code) BEGIN
+          SELECT RAISE(ABORT, 'products.base_uom_code must reference uom_definitions');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_products_base_uom_valid_update
+        BEFORE UPDATE OF base_uom_code ON products
+        WHEN NOT EXISTS (SELECT 1 FROM uom_definitions WHERE code=NEW.base_uom_code) BEGIN
+          SELECT RAISE(ABORT, 'products.base_uom_code must reference uom_definitions');
+        END;
+      `);
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 65;
+export const CURRENT_SCHEMA_VERSION = 66;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),
@@ -2841,6 +2863,11 @@ const V64_CATALOG_SCHEMA_OBJECTS = [
   { type: "trigger", name: "trg_uom_conversions_immutable_delete" },
 ] as const;
 
+const V66_CATALOG_SCHEMA_OBJECTS = [
+  { type: "trigger", name: "trg_products_base_uom_valid_insert" },
+  { type: "trigger", name: "trg_products_base_uom_valid_update" },
+] as const;
+
 type SchemaDefinition = { type: string; name: string; sql: string };
 
 const canonicalSchemaDefinition = (sql: string): string => sql
@@ -2895,6 +2922,28 @@ function assertV64CatalogSchemaDefinitions(actual: Database.Database, maxVersion
         .get(object.type, object.name) as SchemaDefinition | undefined;
       if (!expected || !found || canonicalSchemaDefinition(found.sql) !== canonicalSchemaDefinition(expected.sql)) {
         throw new Error(`Migration v64 schema effect is missing or incompatible: ${object.type} ${object.name}`);
+      }
+    }
+  } finally {
+    reference.close();
+  }
+}
+
+function assertV66CatalogSchemaDefinitions(actual: Database.Database): void {
+  const reference = new Database(":memory:");
+  try {
+    reference.exec(fs.readFileSync(path.join(fixtureDirectory, "panel-v53.sql"), "utf8"));
+    for (const migration of migrations) {
+      if (migration.version <= 53 || migration.version > 66) continue;
+      reference.transaction(() => migration.up(reference))();
+    }
+    for (const object of V66_CATALOG_SCHEMA_OBJECTS) {
+      const expected = reference.prepare("SELECT type,name,sql FROM sqlite_master WHERE type=? AND name=? AND sql IS NOT NULL")
+        .get(object.type, object.name) as SchemaDefinition | undefined;
+      const found = actual.prepare("SELECT type,name,sql FROM sqlite_master WHERE type=? AND name=? AND sql IS NOT NULL")
+        .get(object.type, object.name) as SchemaDefinition | undefined;
+      if (!expected || !found || canonicalSchemaDefinition(found.sql) !== canonicalSchemaDefinition(expected.sql)) {
+        throw new Error(`Migration v66 schema effect is missing or incompatible: ${object.type} ${object.name}`);
       }
     }
   } finally {
@@ -2983,6 +3032,7 @@ function validateAppliedMigrations(db: Database.Database, manifest: MigrationMan
     assertSchemaEffects(db, maxVersion);
     if (maxVersion >= 63) assertV63CommandSchemaDefinitions(db);
     if (maxVersion >= 64) assertV64CatalogSchemaDefinitions(db, maxVersion);
+    if (maxVersion >= 66) assertV66CatalogSchemaDefinitions(db);
   }
   if (!hasChecksumColumn) {
     db.transaction(() => {
@@ -3026,6 +3076,7 @@ export function runMigrations(
       migration.up(db);
       if (migration.version === 63) assertV63CommandSchemaDefinitions(db);
       if (migration.version === 64) assertV64CatalogSchemaDefinitions(db);
+      if (migration.version === 66) assertV66CatalogSchemaDefinitions(db);
       insertMigration.run(migration.version, migration.name, checksumFor(migration));
     })();
 

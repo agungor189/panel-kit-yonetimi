@@ -26,6 +26,12 @@ identity. Standard profile purchase lengths are 1000, 2000, 3000 and 6000 mm;
 each profile declares which are valid and whether a positive integer custom
 length is allowed.
 
+Continuous-cut complementary products use typed
+`material_behavior=continuous_cut` metadata with `meter` or `square_meter` as
+their base UOM. Product-level roll width or roll length is not required by this
+catalog contract; physical roll and remnant state belongs to later inventory
+work.
+
 ## API boundaries
 
 - `/api/catalog/v1/*` is service-authenticated and read-only.
@@ -47,6 +53,9 @@ existing product IDs/SKUs a version-1 `piece` catalog snapshot. It does not
 create stock, cash, price, procurement or historical transaction rows.
 Migration 65 adds the complementary classification and exact micrometre
 authority for profile cross-sections without changing integer length semantics.
+Migration 66 adds continuous-cut behavior metadata and DB-level insert/update
+guards that reject any product base UOM absent from the controlled registry on
+fresh and supported upgraded databases.
 
 Rollback is application rollback: keep the additive tables/columns and run the
 previous application image against its supported schema. Do not delete catalog
