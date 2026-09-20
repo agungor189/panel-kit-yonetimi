@@ -51,7 +51,8 @@ test("profile catalog versions typed attributes and validates standard/custom le
   assert.equal(created.catalog_version, 1);
   assert.match(created.catalog_version_ref, /^catalog-product:profile-30:v1$/);
   assert.equal(created.base_uom.code, "meter");
-  assert.equal(created.profile?.width_mm, 30);
+  assert.equal(created.profile?.width_mm, "30");
+  assert.equal(created.profile?.width_micrometers, 30_000);
   assert.equal(catalog.validateProfilePurchaseLength("profile-30", 3000).kind, "standard");
   assert.throws(() => catalog.validateProfilePurchaseLength("profile-30", 2500), /custom length is not allowed/i);
 
@@ -69,7 +70,7 @@ test("profile catalog versions typed attributes and validates standard/custom le
   db.close();
 });
 
-test("profile type and precision rules fail closed", () => {
+test("profile cross-sections use fixed micrometer precision while lengths remain integer mm", () => {
   const db = new Database(":memory:");
   initializeDatabase(db);
   const catalog = new CatalogService(db);
@@ -77,16 +78,24 @@ test("profile type and precision rules fail closed", () => {
     sku: "BAD-PROFILE",
     title: "Bad profile",
     catalog_type: "profile",
-    base_uom_code: "piece",
+    base_uom_code: "meter",
     profile: {
       material: "ALUMINUM",
       form: "round",
-      diameter_mm: 30.5 as never,
-      wall_thickness_mm: 2,
+      diameter_mm: "33.7001",
+      wall_thickness_mm: "1.5",
       standard_purchase_lengths_mm: [6000],
       custom_length_allowed: false,
     },
-  }), CatalogValidationError);
+  }), /at most 3 decimal places/i);
+  const precise = catalog.createProduct({
+    id: "precise-profile", sku: "PRECISE", title: "Precise profile", catalog_type: "profile", base_uom_code: "meter",
+    profile: { material: "STEEL", form: "round", diameter_mm: "33.7", wall_thickness_mm: "1.5", standard_purchase_lengths_mm: [6000], custom_length_allowed: false },
+  });
+  assert.equal(precise.profile?.diameter_mm, "33.7");
+  assert.equal(precise.profile?.diameter_micrometers, 33_700);
+  assert.equal(precise.profile?.wall_thickness_micrometers, 1_500);
+  assert.throws(() => catalog.validateProfilePurchaseLength("precise-profile", 1500.5), /integer millimeter/i);
   assert.throws(() => catalog.createProduct({
     sku: "BAD-LENGTH",
     title: "Bad standard length",
@@ -101,5 +110,20 @@ test("profile type and precision rules fail closed", () => {
       custom_length_allowed: false,
     },
   }), /standard purchase length/i);
+  db.close();
+});
+
+test("complementary products accept controlled base UOMs and base UOM identity is immutable", () => {
+  const db = new Database(":memory:");
+  initializeDatabase(db);
+  const catalog = new CatalogService(db);
+  for (const code of ["piece", "meter", "square_meter", "kg", "roll", "package", "box"] as const) {
+    const created = catalog.createProduct({ id: `comp-${code}`, sku: `COMP-${code}`, title: code, catalog_type: "complementary", base_uom_code: code });
+    assert.equal(created.catalog_type, "complementary");
+    assert.equal(created.base_uom.code, code);
+  }
+  const piece = catalog.getProduct("comp-piece")!;
+  assert.throws(() => catalog.updateProduct(piece.id, piece.catalog_version, { ...piece, base_uom_code: "box" }), /Base UOM identity is immutable/i);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM catalog_product_versions WHERE product_id=?").pluck().get(piece.id), 1);
   db.close();
 });

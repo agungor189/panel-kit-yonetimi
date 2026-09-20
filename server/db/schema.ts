@@ -62,6 +62,7 @@ export function applySchema(db: Database.Database): void {
       normalized_pipe_size    TEXT,
       catalog_type            TEXT    NOT NULL DEFAULT 'product'
                                       CHECK(catalog_type IN ('product','profile','connector','cap','wheel')),
+      catalog_class           TEXT    CHECK(catalog_class IS NULL OR catalog_class = 'complementary'),
       base_uom_code           TEXT    NOT NULL DEFAULT 'piece',
       catalog_version         INTEGER NOT NULL DEFAULT 0 CHECK(catalog_version >= 0),
       catalog_version_ref     TEXT,
@@ -134,6 +135,10 @@ export function applySchema(db: Database.Database): void {
       height_mm                          INTEGER CHECK(height_mm IS NULL OR height_mm > 0),
       diameter_mm                        INTEGER CHECK(diameter_mm IS NULL OR diameter_mm > 0),
       wall_thickness_mm                  INTEGER NOT NULL CHECK(wall_thickness_mm > 0),
+      width_micrometers                  INTEGER CHECK(width_micrometers IS NULL OR width_micrometers > 0),
+      height_micrometers                 INTEGER CHECK(height_micrometers IS NULL OR height_micrometers > 0),
+      diameter_micrometers               INTEGER CHECK(diameter_micrometers IS NULL OR diameter_micrometers > 0),
+      wall_thickness_micrometers         INTEGER NOT NULL CHECK(wall_thickness_micrometers > 0),
       standard_purchase_lengths_mm_json  TEXT NOT NULL,
       custom_length_allowed              INTEGER NOT NULL DEFAULT 0 CHECK(custom_length_allowed IN (0,1)),
       created_at                         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

@@ -64,7 +64,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 63);
+  assert.equal(manifest.length, 64);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -74,8 +74,8 @@ test("fresh production schema is exact, versioned and has zero business history"
   assert.ok(manifest.every(({ checksum }) => /^[a-f0-9]{64}$/.test(checksum)));
 
   const requiredColumns: Record<string, string[]> = {
-    products: ["base_uom_code", "catalog_type", "catalog_version", "catalog_version_ref", "central_stock", "id", "mass_grams_int", "product_type", "sku", "title"],
-    product_profile_attributes: ["custom_length_allowed", "form", "material", "product_id", "standard_purchase_lengths_mm_json", "wall_thickness_mm"],
+    products: ["base_uom_code", "catalog_class", "catalog_type", "catalog_version", "catalog_version_ref", "central_stock", "id", "mass_grams_int", "product_type", "sku", "title"],
+    product_profile_attributes: ["custom_length_allowed", "form", "material", "product_id", "standard_purchase_lengths_mm_json", "wall_thickness_micrometers", "wall_thickness_mm"],
     catalog_product_versions: ["catalog_version", "content_hash", "product_id", "snapshot_json", "version_ref"],
     uom_definitions: ["base_quantum", "code", "dimension", "quantity_scale", "registry_version"],
     uom_conversions: ["denominator", "from_uom_code", "numerator", "to_uom_code", "version_ref"],
@@ -337,6 +337,26 @@ test("v63 verification rejects a same-name no-op immutability trigger", () => {
 
   assert.throws(() => runMigrations(db), /v63 schema effect.*trigger trg_command_operations_immutable_update/i);
   db.close();
+});
+
+test("v64 verification rejects weakened same-name catalog tables, indexes and triggers", () => {
+  const weakTable = new Database(":memory:");
+  initializeDatabase(weakTable);
+  weakTable.exec("DROP TABLE uom_conversions; CREATE TABLE uom_conversions (id TEXT PRIMARY KEY)");
+  assert.throws(() => runMigrations(weakTable), /schema effect.*uom_conversions/i);
+  weakTable.close();
+
+  const weakIndex = new Database(":memory:");
+  initializeDatabase(weakIndex);
+  weakIndex.exec("DROP INDEX idx_products_catalog_contract; CREATE UNIQUE INDEX idx_products_catalog_contract ON products(catalog_type,catalog_version,status)");
+  assert.throws(() => runMigrations(weakIndex), /schema effect.*idx_products_catalog_contract/i);
+  weakIndex.close();
+
+  const weakTrigger = new Database(":memory:");
+  initializeDatabase(weakTrigger);
+  weakTrigger.exec("DROP TRIGGER trg_uom_conversions_immutable_update; CREATE TRIGGER trg_uom_conversions_immutable_update BEFORE UPDATE ON uom_conversions BEGIN SELECT 1; END");
+  assert.throws(() => runMigrations(weakTrigger), /schema effect.*trg_uom_conversions_immutable_update/i);
+  weakTrigger.close();
 });
 
 test("existing Panel schema with completely missing migration history fails without mutation", () => {

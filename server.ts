@@ -25,6 +25,7 @@ import { createKitRouter } from "./server/routes/kitRoutes.js";
 import { createKitCatalogRouter } from "./server/routes/kitCatalogRoutes.js";
 import { createCatalogV1Router } from "./server/routes/catalogV1Routes.js";
 import { createCatalogAdminV1Router } from "./server/routes/catalogAdminV1Routes.js";
+import { rejectLegacyCatalogMutation } from "./server/modules/catalog/legacyCatalogGuard.js";
 import { createPanelApiAuth } from "./server/middleware/panelApiAuth.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
 import { restoreUploadEntry } from "./server/utils/restoreUploads.js";
@@ -2282,6 +2283,8 @@ async function startServer() {
     if (haystack.includes("cast iron") || haystack.includes("demir döküm")) return "OYA";
     return null;
   };
+
+  app.use("/api/products", rejectLegacyCatalogMutation);
 
   app.post("/api/products/import", (req, res) => {
     try {

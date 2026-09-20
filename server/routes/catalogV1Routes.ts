@@ -33,7 +33,7 @@ export function createCatalogV1Router({ db, authenticate }: Dependencies) {
 
   router.get("/products", (req, res) => {
     const requested = typeof req.query.catalog_type === "string" ? req.query.catalog_type : undefined;
-    const type = requested && ["product", "profile", "connector", "cap", "wheel"].includes(requested)
+    const type = requested && ["product", "profile", "connector", "cap", "wheel", "complementary"].includes(requested)
       ? requested as CatalogType
       : undefined;
     res.json({ success: true, contract: "dsdst.catalog-product.v1", data: catalog.listProducts(type) });

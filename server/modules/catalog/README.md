@@ -10,7 +10,9 @@ typed profile attributes and their immutable version references.
 - Public UOM contract: `dsdst.catalog-uom.v1`
 - Base UOMs: `piece`, `meter`, `square_meter`, `kg`, `roll`, `package`, `box`
 - Display/conversion units: `millimeter`, `centimeter`, `gram`
-- Dimensions and profile lengths: non-negative integer millimetres
+- Bar, cut and purchase lengths: non-negative integer millimetres
+- Profile cross-sections: canonical integer micrometres, exposed as exact
+  decimal-millimetre strings (maximum three decimal places)
 - Mass: non-negative integer grams
 - Quantities: decimal strings converted by integer rational arithmetic to the
   declared base quantum; sub-quantum values fail closed
@@ -18,7 +20,9 @@ typed profile attributes and their immutable version references.
   registry/conversion reference returned by the UOM contract
 
 Profiles use `meter` as their base UOM. Connectors, caps and wheels use
-`piece`. Standard profile purchase lengths are 1000, 2000, 3000 and 6000 mm;
+`piece`; complementary products may use any controlled base UOM. A product's
+base UOM is immutable after creation; a different UOM requires a new product
+identity. Standard profile purchase lengths are 1000, 2000, 3000 and 6000 mm;
 each profile declares which are valid and whether a positive integer custom
 length is allowed.
 
@@ -41,6 +45,8 @@ Migration 64 is additive. It creates the UOM registry, rational conversions,
 typed profile attributes and immutable catalog-version records, then assigns
 existing product IDs/SKUs a version-1 `piece` catalog snapshot. It does not
 create stock, cash, price, procurement or historical transaction rows.
+Migration 65 adds the complementary classification and exact micrometre
+authority for profile cross-sections without changing integer length semantics.
 
 Rollback is application rollback: keep the additive tables/columns and run the
 previous application image against its supported schema. Do not delete catalog

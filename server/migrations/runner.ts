@@ -2678,9 +2678,53 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 65,
+    name: "separate_catalog_cross_section_precision",
+    up(db) {
+      const productColumns = new Set((db.prepare("PRAGMA table_info(products)").all() as Array<{ name: string }>).map(({ name }) => name));
+      if (!productColumns.has("catalog_class")) {
+        db.exec("ALTER TABLE products ADD COLUMN catalog_class TEXT CHECK(catalog_class IS NULL OR catalog_class = 'complementary')");
+      }
+      const profileColumns = new Set((db.prepare("PRAGMA table_info(product_profile_attributes)").all() as Array<{ name: string }>).map(({ name }) => name));
+      const existingMicrometers = profileColumns.has("wall_thickness_micrometers");
+      db.exec("ALTER TABLE product_profile_attributes RENAME TO product_profile_attributes_v64");
+      db.exec(`CREATE TABLE product_profile_attributes (
+        product_id TEXT PRIMARY KEY,
+        material TEXT NOT NULL,
+        form TEXT NOT NULL CHECK(form IN ('square','rectangular','round','channel','angle','flat','other')),
+        width_mm INTEGER CHECK(width_mm IS NULL OR width_mm > 0),
+        height_mm INTEGER CHECK(height_mm IS NULL OR height_mm > 0),
+        diameter_mm INTEGER CHECK(diameter_mm IS NULL OR diameter_mm > 0),
+        wall_thickness_mm INTEGER NOT NULL CHECK(wall_thickness_mm > 0),
+        width_micrometers INTEGER CHECK(width_micrometers IS NULL OR width_micrometers > 0),
+        height_micrometers INTEGER CHECK(height_micrometers IS NULL OR height_micrometers > 0),
+        diameter_micrometers INTEGER CHECK(diameter_micrometers IS NULL OR diameter_micrometers > 0),
+        wall_thickness_micrometers INTEGER NOT NULL CHECK(wall_thickness_micrometers > 0),
+        standard_purchase_lengths_mm_json TEXT NOT NULL,
+        custom_length_allowed INTEGER NOT NULL DEFAULT 0 CHECK(custom_length_allowed IN (0,1)),
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
+      )`);
+      const source = (column: string, fallback: string) => existingMicrometers && profileColumns.has(column) ? column : fallback;
+      db.exec(`INSERT INTO product_profile_attributes (
+        product_id,material,form,width_mm,height_mm,diameter_mm,wall_thickness_mm,
+        width_micrometers,height_micrometers,diameter_micrometers,wall_thickness_micrometers,
+        standard_purchase_lengths_mm_json,custom_length_allowed,created_at,updated_at
+      ) SELECT product_id,material,form,width_mm,height_mm,diameter_mm,wall_thickness_mm,
+        ${source("width_micrometers", "CASE WHEN width_mm IS NULL THEN NULL ELSE CAST(width_mm * 1000 AS INTEGER) END")},
+        ${source("height_micrometers", "CASE WHEN height_mm IS NULL THEN NULL ELSE CAST(height_mm * 1000 AS INTEGER) END")},
+        ${source("diameter_micrometers", "CASE WHEN diameter_mm IS NULL THEN NULL ELSE CAST(diameter_mm * 1000 AS INTEGER) END")},
+        ${source("wall_thickness_micrometers", "CAST(wall_thickness_mm * 1000 AS INTEGER)")},
+        standard_purchase_lengths_mm_json,custom_length_allowed,created_at,updated_at
+        FROM product_profile_attributes_v64`);
+      db.exec("DROP TABLE product_profile_attributes_v64");
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 64;
+export const CURRENT_SCHEMA_VERSION = 65;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),
@@ -2782,6 +2826,21 @@ const V63_COMMAND_SCHEMA_OBJECTS = [
   { type: "trigger", name: "trg_command_outbox_no_delete" },
 ] as const;
 
+const V64_CATALOG_SCHEMA_OBJECTS = [
+  { type: "table", name: "uom_definitions" },
+  { type: "table", name: "uom_conversions" },
+  { type: "table", name: "product_profile_attributes" },
+  { type: "table", name: "catalog_product_versions" },
+  { type: "index", name: "idx_catalog_product_versions_product" },
+  { type: "index", name: "idx_products_catalog_contract" },
+  { type: "trigger", name: "trg_catalog_product_versions_immutable_update" },
+  { type: "trigger", name: "trg_catalog_product_versions_immutable_delete" },
+  { type: "trigger", name: "trg_uom_definitions_immutable_update" },
+  { type: "trigger", name: "trg_uom_definitions_immutable_delete" },
+  { type: "trigger", name: "trg_uom_conversions_immutable_update" },
+  { type: "trigger", name: "trg_uom_conversions_immutable_delete" },
+] as const;
+
 type SchemaDefinition = { type: string; name: string; sql: string };
 
 const canonicalSchemaDefinition = (sql: string): string => sql
@@ -2811,6 +2870,31 @@ function assertV63CommandSchemaDefinitions(actual: Database.Database): void {
       if (!expected || !found
         || canonicalSchemaDefinition(found.sql) !== canonicalSchemaDefinition(expected.sql)) {
         throw new Error(`Migration v63 schema effect is missing or incompatible: ${object.type} ${object.name}`);
+      }
+    }
+  } finally {
+    reference.close();
+  }
+}
+
+function assertV64CatalogSchemaDefinitions(actual: Database.Database, maxVersion = 64): void {
+  const reference = new Database(":memory:");
+  try {
+    const hasV65Shape = (actual.prepare("PRAGMA table_info(product_profile_attributes)").all() as Array<{ name: string }>)
+      .some(({ name }) => name === "wall_thickness_micrometers");
+    const effectiveMaxVersion = hasV65Shape ? Math.max(maxVersion, 65) : maxVersion;
+    reference.exec(fs.readFileSync(path.join(fixtureDirectory, "panel-v53.sql"), "utf8"));
+    for (const migration of migrations) {
+      if (migration.version <= 53 || migration.version > effectiveMaxVersion) continue;
+      reference.transaction(() => migration.up(reference))();
+    }
+    for (const object of V64_CATALOG_SCHEMA_OBJECTS) {
+      const expected = reference.prepare("SELECT type,name,sql FROM sqlite_master WHERE type=? AND name=? AND sql IS NOT NULL")
+        .get(object.type, object.name) as SchemaDefinition | undefined;
+      const found = actual.prepare("SELECT type,name,sql FROM sqlite_master WHERE type=? AND name=? AND sql IS NOT NULL")
+        .get(object.type, object.name) as SchemaDefinition | undefined;
+      if (!expected || !found || canonicalSchemaDefinition(found.sql) !== canonicalSchemaDefinition(expected.sql)) {
+        throw new Error(`Migration v64 schema effect is missing or incompatible: ${object.type} ${object.name}`);
       }
     }
   } finally {
@@ -2898,6 +2982,7 @@ function validateAppliedMigrations(db: Database.Database, manifest: MigrationMan
     const maxVersion = rows.at(-1)!.version;
     assertSchemaEffects(db, maxVersion);
     if (maxVersion >= 63) assertV63CommandSchemaDefinitions(db);
+    if (maxVersion >= 64) assertV64CatalogSchemaDefinitions(db, maxVersion);
   }
   if (!hasChecksumColumn) {
     db.transaction(() => {
@@ -2940,6 +3025,7 @@ export function runMigrations(
     db.transaction(() => {
       migration.up(db);
       if (migration.version === 63) assertV63CommandSchemaDefinitions(db);
+      if (migration.version === 64) assertV64CatalogSchemaDefinitions(db);
       insertMigration.run(migration.version, migration.name, checksumFor(migration));
     })();
 

@@ -2,16 +2,20 @@ import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { getUomDefinition, UOM_REGISTRY_VERSION, type UomCode } from "./uom.js";
 
-export type CatalogType = "product" | "profile" | "connector" | "cap" | "wheel";
+export type CatalogType = "product" | "profile" | "connector" | "cap" | "wheel" | "complementary";
 export type ProfileForm = "square" | "rectangular" | "round" | "channel" | "angle" | "flat" | "other";
 
 export type ProfileAttributesInput = {
   material: string;
   form: ProfileForm;
-  width_mm?: number | null;
-  height_mm?: number | null;
-  diameter_mm?: number | null;
-  wall_thickness_mm: number;
+  width_mm?: string | number | null;
+  height_mm?: string | number | null;
+  diameter_mm?: string | number | null;
+  wall_thickness_mm: string | number;
+  width_micrometers?: number | null;
+  height_micrometers?: number | null;
+  diameter_micrometers?: number | null;
+  wall_thickness_micrometers?: number;
   standard_purchase_lengths_mm: number[];
   custom_length_allowed: boolean;
 };
@@ -67,7 +71,7 @@ export class CatalogValidationError extends Error {
 }
 
 const STANDARD_PROFILE_LENGTHS = new Set([1000, 2000, 3000, 6000]);
-const catalogTypes = new Set<CatalogType>(["product", "profile", "connector", "cap", "wheel"]);
+const catalogTypes = new Set<CatalogType>(["product", "profile", "connector", "cap", "wheel", "complementary"]);
 const profileForms = new Set<ProfileForm>(["square", "rectangular", "round", "channel", "angle", "flat", "other"]);
 
 const requiredText = (value: unknown, field: string, max = 250): string => {
@@ -85,14 +89,28 @@ const integerOrNull = (value: unknown, field: string, positive = false): number 
   return Number(value);
 };
 
+const decimalMillimeters = (value: unknown, field: string): { millimeters: string; micrometers: number } | null => {
+  if (value === undefined || value === null) return null;
+  const text = typeof value === "number" ? String(value) : typeof value === "string" ? value.trim() : "";
+  const match = /^(\d+)(?:\.(\d{1,3}))?$/.exec(text);
+  if (!match) throw new CatalogValidationError(`${field} must be a positive decimal millimeter value with at most 3 decimal places.`);
+  const micrometers = Number(match[1]) * 1000 + Number((match[2] || "").padEnd(3, "0"));
+  if (!Number.isSafeInteger(micrometers) || micrometers <= 0) {
+    throw new CatalogValidationError(`${field} must be a positive fixed-precision millimeter value.`);
+  }
+  const fraction = String(micrometers % 1000).padStart(3, "0").replace(/0+$/, "");
+  return { micrometers, millimeters: fraction ? `${Math.floor(micrometers / 1000)}.${fraction}` : String(Math.floor(micrometers / 1000)) };
+};
+
 const normalizeProfile = (value: ProfileAttributesInput | null | undefined): ProfileAttributesInput | null => {
   if (!value) return null;
   const material = requiredText(value.material, "profile.material", 100).toUpperCase();
   if (!profileForms.has(value.form)) throw new CatalogValidationError("profile.form is unsupported.");
-  const width = integerOrNull(value.width_mm, "profile.width_mm", true);
-  const height = integerOrNull(value.height_mm, "profile.height_mm", true);
-  const diameter = integerOrNull(value.diameter_mm, "profile.diameter_mm", true);
-  const wall = integerOrNull(value.wall_thickness_mm, "profile.wall_thickness_mm", true)!;
+  const width = decimalMillimeters(value.width_mm, "profile.width_mm");
+  const height = decimalMillimeters(value.height_mm, "profile.height_mm");
+  const diameter = decimalMillimeters(value.diameter_mm, "profile.diameter_mm");
+  const wall = decimalMillimeters(value.wall_thickness_mm, "profile.wall_thickness_mm");
+  if (!wall) throw new CatalogValidationError("profile.wall_thickness_mm is required.");
   if (value.form === "round" && (!diameter || width || height)) {
     throw new CatalogValidationError("Round profiles require diameter_mm and forbid width_mm/height_mm.");
   }
@@ -109,10 +127,14 @@ const normalizeProfile = (value: ProfileAttributesInput | null | undefined): Pro
   return {
     material,
     form: value.form,
-    width_mm: width,
-    height_mm: height,
-    diameter_mm: diameter,
-    wall_thickness_mm: wall,
+    width_mm: width?.millimeters ?? null,
+    height_mm: height?.millimeters ?? null,
+    diameter_mm: diameter?.millimeters ?? null,
+    wall_thickness_mm: wall.millimeters,
+    width_micrometers: width?.micrometers ?? null,
+    height_micrometers: height?.micrometers ?? null,
+    diameter_micrometers: diameter?.micrometers ?? null,
+    wall_thickness_micrometers: wall.micrometers,
     standard_purchase_lengths_mm: lengths,
     custom_length_allowed: value.custom_length_allowed === true,
   };
@@ -153,13 +175,16 @@ const productSelect = `
   SELECT p.id, p.sku, p.title, p.name_tr, p.name_en, p.supplier_code, p.material,
     p.form_code, p.tube_type_code, p.size_code, p.size, p.pipe_size, p.model,
     p.normalized_material, p.normalized_size, p.normalized_tube_type, p.normalized_pipe_size,
-    p.catalog_type, p.base_uom_code, p.catalog_version,
+    CASE WHEN p.catalog_class='complementary' THEN 'complementary' ELSE p.catalog_type END AS catalog_type,
+    p.catalog_class, p.base_uom_code, p.catalog_version,
     p.catalog_version_ref, p.uom_registry_version, p.length_mm_int, p.width_mm_int,
     p.height_mm_int, p.diameter_mm_int, p.mass_grams_int, p.status,
     u.base_quantum, u.quantity_scale,
-    a.material AS profile_material, a.form AS profile_form, a.width_mm AS profile_width_mm,
-    a.height_mm AS profile_height_mm, a.diameter_mm AS profile_diameter_mm,
-    a.wall_thickness_mm, a.standard_purchase_lengths_mm_json, a.custom_length_allowed,
+    a.material AS profile_material, a.form AS profile_form,
+    a.width_micrometers AS profile_width_micrometers,
+    a.height_micrometers AS profile_height_micrometers,
+    a.diameter_micrometers AS profile_diameter_micrometers,
+    a.wall_thickness_micrometers, a.standard_purchase_lengths_mm_json, a.custom_length_allowed,
     (SELECT path FROM product_images WHERE product_id=p.id ORDER BY sort_order,id LIMIT 1) AS image
   FROM products p
   JOIN uom_definitions u ON u.code=p.base_uom_code
@@ -171,7 +196,7 @@ export class CatalogService {
 
   listProducts(type?: CatalogType): CatalogProduct[] {
     const rows = type
-      ? this.db.prepare(`${productSelect} WHERE p.catalog_version > 0 AND p.sku IS NOT NULL AND p.catalog_type=? ORDER BY p.sku`).all(type)
+      ? this.db.prepare(`${productSelect} WHERE p.catalog_version > 0 AND p.sku IS NOT NULL AND ${type === "complementary" ? "p.catalog_class='complementary'" : "p.catalog_type=? AND p.catalog_class IS NULL"} ORDER BY p.sku`).all(...(type === "complementary" ? [] : [type]))
       : this.db.prepare(`${productSelect} WHERE p.catalog_version > 0 AND p.sku IS NOT NULL ORDER BY p.sku`).all();
     return (rows as any[]).map((row) => this.mapRow(row));
   }
@@ -186,12 +211,14 @@ export class CatalogService {
     const id = input.id ? requiredText(input.id, "id", 200) : randomUUID();
     return this.db.transaction(() => {
       this.db.prepare(`INSERT INTO products (
-        id, name, title, sku, status, material, weight_grams, catalog_type, base_uom_code,
+        id, name, title, sku, status, material, weight_grams, catalog_type, catalog_class, base_uom_code,
         catalog_version, uom_registry_version, length_mm_int, width_mm_int, height_mm_int,
         diameter_mm_int, mass_grams_int
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`)
         .run(id, normalized.title, normalized.title, normalized.sku, normalized.status,
-          normalized.profile?.material || null, normalized.massGrams ?? 0, normalized.catalogType,
+          normalized.profile?.material || null, normalized.massGrams ?? 0,
+          normalized.catalogType === "complementary" ? "product" : normalized.catalogType,
+          normalized.catalogType === "complementary" ? "complementary" : null,
           normalized.baseUomCode, UOM_REGISTRY_VERSION, normalized.dimensions.length_mm,
           normalized.dimensions.width_mm, normalized.dimensions.height_mm, normalized.dimensions.diameter_mm,
           normalized.massGrams);
@@ -204,14 +231,19 @@ export class CatalogService {
     if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) throw new CatalogValidationError("expected catalog version is invalid.");
     const normalized = normalizedInput(input);
     return this.db.transaction(() => {
-      const current = this.db.prepare("SELECT catalog_version FROM products WHERE id=?").get(id) as { catalog_version: number } | undefined;
+      const current = this.db.prepare("SELECT catalog_version, base_uom_code FROM products WHERE id=?").get(id) as { catalog_version: number; base_uom_code: UomCode } | undefined;
       if (!current) throw new CatalogValidationError("Catalog product was not found.");
       if (current.catalog_version !== expectedVersion) throw new CatalogValidationError("Catalog version conflict.");
-      this.db.prepare(`UPDATE products SET title=?, name=?, sku=?, status=?, material=?, weight_grams=?, catalog_type=?,
+      if (current.base_uom_code !== normalized.baseUomCode) {
+        throw new CatalogValidationError("Base UOM identity is immutable after product creation; create a new SKU/product identity.");
+      }
+      this.db.prepare(`UPDATE products SET title=?, name=?, sku=?, status=?, material=?, weight_grams=?, catalog_type=?, catalog_class=?,
         base_uom_code=?, uom_registry_version=?, length_mm_int=?, width_mm_int=?, height_mm_int=?, diameter_mm_int=?,
         mass_grams_int=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND catalog_version=?`)
         .run(normalized.title, normalized.title, normalized.sku, normalized.status, normalized.profile?.material || null,
-          normalized.massGrams ?? 0, normalized.catalogType, normalized.baseUomCode, UOM_REGISTRY_VERSION,
+          normalized.massGrams ?? 0, normalized.catalogType === "complementary" ? "product" : normalized.catalogType,
+          normalized.catalogType === "complementary" ? "complementary" : null,
+          normalized.baseUomCode, UOM_REGISTRY_VERSION,
           normalized.dimensions.length_mm, normalized.dimensions.width_mm, normalized.dimensions.height_mm,
           normalized.dimensions.diameter_mm, normalized.massGrams, id, expectedVersion);
       this.writeProfile(id, normalized.profile);
@@ -237,15 +269,21 @@ export class CatalogService {
     }
     this.db.prepare(`INSERT INTO product_profile_attributes (
       product_id, material, form, width_mm, height_mm, diameter_mm, wall_thickness_mm,
+      width_micrometers, height_micrometers, diameter_micrometers, wall_thickness_micrometers,
       standard_purchase_lengths_mm_json, custom_length_allowed
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(product_id) DO UPDATE SET material=excluded.material, form=excluded.form,
       width_mm=excluded.width_mm, height_mm=excluded.height_mm, diameter_mm=excluded.diameter_mm,
       wall_thickness_mm=excluded.wall_thickness_mm,
+      width_micrometers=excluded.width_micrometers, height_micrometers=excluded.height_micrometers,
+      diameter_micrometers=excluded.diameter_micrometers, wall_thickness_micrometers=excluded.wall_thickness_micrometers,
       standard_purchase_lengths_mm_json=excluded.standard_purchase_lengths_mm_json,
       custom_length_allowed=excluded.custom_length_allowed, updated_at=CURRENT_TIMESTAMP`)
-      .run(productId, profile.material, profile.form, profile.width_mm ?? null, profile.height_mm ?? null,
-        profile.diameter_mm ?? null, profile.wall_thickness_mm, JSON.stringify(profile.standard_purchase_lengths_mm),
+      .run(productId, profile.material, profile.form, profile.width_mm == null ? null : Number(profile.width_mm),
+        profile.height_mm == null ? null : Number(profile.height_mm), profile.diameter_mm == null ? null : Number(profile.diameter_mm),
+        Number(profile.wall_thickness_mm), profile.width_micrometers ?? null, profile.height_micrometers ?? null,
+        profile.diameter_micrometers ?? null, profile.wall_thickness_micrometers,
+        JSON.stringify(profile.standard_purchase_lengths_mm),
         profile.custom_length_allowed ? 1 : 0);
   }
 
@@ -269,13 +307,23 @@ export class CatalogService {
   }
 
   private mapRow(row: any): CatalogProduct {
+    const mm = (micrometers: unknown): string | null => {
+      if (micrometers === null || micrometers === undefined) return null;
+      const value = Number(micrometers);
+      const fraction = String(value % 1000).padStart(3, "0").replace(/0+$/, "");
+      return fraction ? `${Math.floor(value / 1000)}.${fraction}` : String(Math.floor(value / 1000));
+    };
     const profile = row.profile_form ? {
       material: row.profile_material,
       form: row.profile_form,
-      width_mm: row.profile_width_mm ?? null,
-      height_mm: row.profile_height_mm ?? null,
-      diameter_mm: row.profile_diameter_mm ?? null,
-      wall_thickness_mm: row.wall_thickness_mm,
+      width_mm: mm(row.profile_width_micrometers),
+      height_mm: mm(row.profile_height_micrometers),
+      diameter_mm: mm(row.profile_diameter_micrometers),
+      wall_thickness_mm: mm(row.wall_thickness_micrometers)!,
+      width_micrometers: row.profile_width_micrometers ?? null,
+      height_micrometers: row.profile_height_micrometers ?? null,
+      diameter_micrometers: row.profile_diameter_micrometers ?? null,
+      wall_thickness_micrometers: row.wall_thickness_micrometers,
       standard_purchase_lengths_mm: JSON.parse(row.standard_purchase_lengths_mm_json),
       custom_length_allowed: Number(row.custom_length_allowed) === 1,
     } as ProfileAttributesInput : null;

@@ -251,8 +251,8 @@ export function createWarehouseRouter({
 
   router.get("/catalog/products", authenticate("read:products"), requireWarehouseUser, (req, res) => {
     const requested = typeof req.query.catalog_type === "string" ? req.query.catalog_type : undefined;
-    const type = requested && ["product", "profile", "connector", "cap", "wheel"].includes(requested)
-      ? requested as "product" | "profile" | "connector" | "cap" | "wheel"
+    const type = requested && ["product", "profile", "connector", "cap", "wheel", "complementary"].includes(requested)
+      ? requested as "product" | "profile" | "connector" | "cap" | "wheel" | "complementary"
       : undefined;
     auditRead(req);
     res.json({ success: true, contract: "dsdst.catalog-product.v1", data: catalogService.listProducts(type) });

@@ -63,3 +63,20 @@ test("catalog create is versioned, audited and idempotently replayed", async () 
   assert.equal(db.prepare("SELECT COUNT(*) FROM catalog_product_versions WHERE product_id='cap-30'").pluck().get(), 1);
   assert.equal(db.prepare("SELECT COUNT(*) FROM command_audit_log WHERE command_type='catalog.product.create.v1'").pluck().get(), 1);
 });
+
+test("catalog update increments version and preserves the immutable old snapshot", async () => {
+  const oldSnapshot = db.prepare("SELECT snapshot_json FROM catalog_product_versions WHERE product_id=? AND catalog_version=1").pluck().get(product.id) as string;
+  const response = await fetch(`${baseUrl}/api/catalog-admin/v1/products/${product.id}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json", "x-operation-id": "catalog-update-cap-30-v2" },
+    body: JSON.stringify({ expected_catalog_version: 1, product: { ...product, title: "30 mm cap v2" } }),
+  });
+  assert.equal(response.status, 200);
+  const payload = await response.json() as any;
+  assert.equal(payload.data.catalog_version, 2);
+  assert.equal(payload.data.catalog_version_ref, "catalog-product:cap-30:v2");
+  assert.equal(db.prepare("SELECT snapshot_json FROM catalog_product_versions WHERE product_id=? AND catalog_version=1").pluck().get(product.id), oldSnapshot);
+  assert.match(oldSnapshot, /30 mm cap/);
+  assert.doesNotMatch(oldSnapshot, /30 mm cap v2/);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM command_audit_log WHERE command_type='catalog.product.update.v1'").pluck().get(), 1);
+});
