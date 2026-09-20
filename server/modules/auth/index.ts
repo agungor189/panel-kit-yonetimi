@@ -18,17 +18,33 @@ type AuthModuleDependencies = {
   hashApiKey: (clearKey: string) => string;
   logActivity: ActivityWriter;
   logger: AuthLogger;
+  allowedOrigins?: string[];
 };
 type SessionClaims = { id?: string; sid?: string; epoch?: number };
 type ServicePrincipal = { id: string; name: string; scopes: string[] };
 type AuthenticatedSession = { user: AuthenticatedUser; sessionId: string; servicePrincipalId: string | null };
 
 const SESSION_MAX_AGE_SECONDS = 12 * 60 * 60;
+const SESSION_COOKIE = "panel_session";
+const SESSION_COOKIE_OPTIONS = {
+  httpOnly: true,
+  sameSite: "strict" as const,
+  secure: process.env.NODE_ENV === "production",
+  path: "/",
+};
 const isSelfAuthenticatedRoute = (path: string) =>
   path.startsWith("/auth/") || path.startsWith("/public/") || path.startsWith("/warehouse/") || path.startsWith("/kit-catalog/");
 const bearerToken = (req: Request) => {
   const header = req.headers.authorization;
   return header?.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+};
+const cookieValue = (req: Request, name: string) => {
+  for (const pair of String(req.headers.cookie || "").split(";")) {
+    const separator = pair.indexOf("=");
+    if (separator < 0 || pair.slice(0, separator).trim() !== name) continue;
+    try { return decodeURIComponent(pair.slice(separator + 1).trim()); } catch { return ""; }
+  }
+  return "";
 };
 const errorResponse = (res: Response, status: number, code: string, message: string) =>
   res.status(status).json({ success: false, error: { code, message } });
@@ -41,7 +57,27 @@ const parseScopes = (raw: unknown): string[] => {
   }
 };
 
-export function createAuthModule({ db, jwtSecret, hashApiKey, logActivity, logger }: AuthModuleDependencies) {
+export function createAuthModule({ db, jwtSecret, hashApiKey, logActivity, logger, allowedOrigins = [] }: AuthModuleDependencies) {
+  const directSessionToken = (req: Request) => cookieValue(req, SESSION_COOKIE);
+  const requireSameOrigin = (req: Request, res: Response): boolean => {
+    if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return true;
+    if (req.headers["sec-fetch-site"] === "cross-site") {
+      errorResponse(res, 403, "CSRF_FORBIDDEN", "Cross-site mutation reddedildi.");
+      return false;
+    }
+    const origin = req.headers.origin;
+    if (!origin) {
+      errorResponse(res, 403, "CSRF_FORBIDDEN", "Mutation için Origin header zorunludur.");
+      return false;
+    }
+    const forwardedProto = String(req.headers["x-forwarded-proto"] || req.protocol).split(",", 1)[0].trim();
+    const expectedOrigin = `${forwardedProto}://${req.get("host")}`;
+    if (origin !== expectedOrigin && !allowedOrigins.includes(origin)) {
+      errorResponse(res, 403, "CSRF_FORBIDDEN", "Origin izinli değil.");
+      return false;
+    }
+    return true;
+  };
   const loadUserForAuth = (userId: string): { user?: AuthenticatedUser; disabled?: boolean } => {
     const row = db.prepare(`
       SELECT id, username, role, is_active, permissions, must_change_password, session_epoch
@@ -133,7 +169,8 @@ export function createAuthModule({ db, jwtSecret, hashApiKey, logActivity, logge
     authenticateSessionToken(token, servicePrincipalId)?.user || null;
 
   const requireSession = (serviceBound: boolean) => (req: Request, res: Response, next: NextFunction) => {
-    const token = bearerToken(req);
+    if (!serviceBound && !requireSameOrigin(req, res)) return;
+    const token = serviceBound ? bearerToken(req) : directSessionToken(req);
     if (!token) return errorResponse(res, 401, "UNAUTHORIZED", "Token gerekli.");
     const expectedServiceId = serviceBound ? req.servicePrincipal?.id : null;
     if (serviceBound && !expectedServiceId) return errorResponse(res, 401, "SERVICE_UNAUTHORIZED", "Service identity gerekli.");
@@ -153,6 +190,7 @@ export function createAuthModule({ db, jwtSecret, hashApiKey, logActivity, logge
   });
 
   const loginHandler = (serviceBound: boolean) => (req: Request, res: Response) => {
+    if (!serviceBound && !requireSameOrigin(req, res)) return;
     try {
       const { username, password } = req.body;
       if (!username || !password) return errorResponse(res, 400, "VALIDATION_ERROR", "Kullanıcı adı ve şifre zorunludur.");
@@ -170,7 +208,9 @@ export function createAuthModule({ db, jwtSecret, hashApiKey, logActivity, logge
         return issueSession(user, serviceId);
       })();
       logActivity("LOGIN_SUCCESS", "auth", row.id, { ip: req.ip, service_principal_id: serviceId }, row.id);
-      return res.json({ success: true, token, user: publicUser(user) });
+      if (serviceBound) return res.json({ success: true, token, user: publicUser(user) });
+      res.cookie(SESSION_COOKIE, token, { ...SESSION_COOKIE_OPTIONS, maxAge: SESSION_MAX_AGE_SECONDS * 1000 });
+      return res.json({ success: true, user: publicUser(user) });
     } catch (error: any) {
       logger.error("AUTH_ERROR", "Login failed", error);
       return errorResponse(res, 500, "INTERNAL_ERROR", error.message);
@@ -197,7 +237,11 @@ export function createAuthModule({ db, jwtSecret, hashApiKey, logActivity, logge
       return { token: issueSession(user, serviceId), user };
     })();
     logActivity("PASSWORD_CHANGED", "auth", currentSession.user.id, { ip: req.ip, service_principal_id: serviceId }, currentSession.user.id);
-    return res.json({ success: true, token: replacement.token, user: publicUser(replacement.user), message: "Şifre başarıyla değiştirildi." });
+    if (serviceBound) {
+      return res.json({ success: true, token: replacement.token, user: publicUser(replacement.user), message: "Şifre başarıyla değiştirildi." });
+    }
+    res.cookie(SESSION_COOKIE, replacement.token, { ...SESSION_COOKIE_OPTIONS, maxAge: SESSION_MAX_AGE_SECONDS * 1000 });
+    return res.json({ success: true, user: publicUser(replacement.user), message: "Şifre başarıyla değiştirildi." });
   };
 
   const logoutHandler = (req: Request, res: Response) => {
@@ -205,6 +249,7 @@ export function createAuthModule({ db, jwtSecret, hashApiKey, logActivity, logge
     db.prepare("UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = 'logout' WHERE id = ? AND revoked_at IS NULL")
       .run(session.sessionId);
     logActivity("LOGOUT", "auth", session.user.id, { ip: req.ip, service_principal_id: session.servicePrincipalId }, session.user.id);
+    if (!session.servicePrincipalId) res.clearCookie(SESSION_COOKIE, SESSION_COOKIE_OPTIONS);
     return res.json({ success: true, message: "Logged out" });
   };
 
@@ -229,7 +274,8 @@ export function createAuthModule({ db, jwtSecret, hashApiKey, logActivity, logge
 
   const authenticateApi = (req: Request, res: Response, next: NextFunction) => {
     if (isSelfAuthenticatedRoute(req.path)) return next();
-    const token = bearerToken(req);
+    if (!requireSameOrigin(req, res)) return;
+    const token = directSessionToken(req);
     const session = token ? authenticateSessionToken(token, null) : null;
     if (!session) {
       if (token) logger.warn("AUTH_ERROR", "Session verification failed", { ip: req.ip });
@@ -279,5 +325,5 @@ export function createAuthModule({ db, jwtSecret, hashApiKey, logActivity, logge
   };
 }
 
-export { parseUserPermissions, sanitizePermissions, userHasCapability, validUserRoles } from "./permissions.js";
+export { CAPABILITY_REGISTRY, parseUserPermissions, sanitizePermissions, userHasCapability, validUserRoles } from "./permissions.js";
 export type { AuthenticatedUser } from "./types.js";

@@ -20,7 +20,7 @@ Ayrıca her sabah 09:00'da otomatik günlük brifing atar.
 Panel arayüzünde **Entegrasyonlar → Panel API Anahtarları → Yeni Anahtar**:
 
 İzinler (en az):
-- `expenses:write` (gider oluşturma + fiş ekleme)
+- `expenses:write` artık atanmaz; generic service-only gider/fiş yazımı V2-03 kapsamında kapatılmıştır
 - `assistant:read` (rapor uçları)
 
 İsteğe bağlı:
@@ -103,8 +103,8 @@ n8n:
 
 | Endpoint | İzin | Amaç |
 |---|---|---|
-| `POST /api/public/expenses` | `expenses:write` | Gider oluştur |
-| `POST /api/public/expenses/:id/attachments` | `expenses:write` | Fiş ekle |
+| `POST /api/public/expenses` | kapalı | `403 HUMAN_SESSION_REQUIRED`; manuel gider için Panel human session + `finance:write` kullanılır |
+| `POST /api/public/expenses/:id/attachments` | kapalı | `403 HUMAN_SESSION_REQUIRED`; generic service-only fiş yazımı yoktur |
 | `GET /api/public/assistant/today` | `assistant:read` | Bugün özeti |
 | `GET /api/public/assistant/low-stock` | `assistant:read` | Düşük stok |
 | `GET /api/public/assistant/top-products` | `assistant:read` | En çok satanlar |

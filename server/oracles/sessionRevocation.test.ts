@@ -31,18 +31,21 @@ test("KNOWN BUSINESS RED: logout revokes the exact issued session", async () => 
   try {
     const login = await fetch(`${baseUrl}/api/auth/login`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", origin: baseUrl },
       body: JSON.stringify({ username: "admin", password: "admin" }),
     });
     assert.equal(login.status, 200);
-    const token = (await login.json() as { token: string }).token;
-    assert.equal((await fetch(`${baseUrl}/api/protected`, { headers: { authorization: `Bearer ${token}` } })).status, 200);
+    const loginBody = await login.json() as { token?: string };
+    assert.equal(loginBody.token, undefined);
+    const cookie = (login.headers.get("set-cookie") || "").split(";", 1)[0];
+    assert.ok(cookie);
+    assert.equal((await fetch(`${baseUrl}/api/protected`, { headers: { cookie } })).status, 200);
     assert.equal((await fetch(`${baseUrl}/api/auth/logout`, {
       method: "POST",
-      headers: { authorization: `Bearer ${token}` },
+      headers: { cookie, origin: baseUrl },
     })).status, 200);
     assert.equal(
-      (await fetch(`${baseUrl}/api/protected`, { headers: { authorization: `Bearer ${token}` } })).status,
+      (await fetch(`${baseUrl}/api/protected`, { headers: { cookie } })).status,
       401,
       "the pre-logout token must be rejected by the backend",
     );

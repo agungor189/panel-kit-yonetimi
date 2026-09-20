@@ -1316,7 +1316,7 @@ async function startServer() {
   // JWT_SECRET validated at startup — no fallback allowed.
   const JWT_SECRET = process.env.JWT_SECRET!;
 
-  const auth = createAuthModule({ db, jwtSecret: JWT_SECRET, hashApiKey, logActivity, logger: AppLogger });
+  const auth = createAuthModule({ db, jwtSecret: JWT_SECRET, hashApiKey, logActivity, logger: AppLogger, allowedOrigins });
   const hasOwn = (obj: unknown, key: string) => Object.prototype.hasOwnProperty.call(obj || {}, key);
 
   const toBit = (value: unknown, defaultValue: number) => {
@@ -1394,7 +1394,13 @@ async function startServer() {
   app.use("/api", auth.authenticateApi);
   app.use("/api", auth.requireCompletedPasswordChange);
   app.use("/api", auth.authorizeApi);
-  const requireAdmin = auth.requireAdmin;
+  const requireIdentityAdmin = auth.requireCapability("identity:admin");
+  const requireIntegrationsAdmin = auth.requireCapability("integrations:admin");
+  const requireBackupAdmin = auth.requireCapability("backup:admin");
+  const requireCatalogAdmin = auth.requireCapability("catalog:admin");
+  const requireSettingsAdmin = auth.requireCapability("settings:admin");
+  const requireMaintenanceAdmin = auth.requireCapability("maintenance:admin");
+  const requireFinanceWrite = auth.requireCapability("finance:write");
 
   // --- API ROUTES ---
 
@@ -1442,7 +1448,7 @@ async function startServer() {
   });
 
   // Admin-only user management
-  app.get("/api/users", requireAdmin, (req, res) => {
+  app.get("/api/users", requireIdentityAdmin, (req, res) => {
     try {
       const users = (db.prepare(`
         SELECT id, username, email, role, is_active, must_change_password, permissions, notes, session_epoch,
@@ -1457,7 +1463,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/users", requireAdmin, (req, res) => {
+  app.post("/api/users", requireIdentityAdmin, (req, res) => {
     try {
       const username = cleanText(req.body?.username);
       const email = cleanText(req.body?.email).toLocaleLowerCase('tr-TR');
@@ -1503,7 +1509,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/users/:id", requireAdmin, (req, res) => {
+  app.put("/api/users/:id", requireIdentityAdmin, (req, res) => {
     try {
       const before = getManageableUser(req.params.id) as any;
       if (!before) {
@@ -1569,7 +1575,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/users/:id/reset-password", requireAdmin, (req, res) => {
+  app.post("/api/users/:id/reset-password", requireIdentityAdmin, (req, res) => {
     try {
       const password = typeof req.body?.password === 'string' ? req.body.password : '';
       const mustChangePassword = toBit(req.body?.must_change_password, 1);
@@ -2722,7 +2728,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/products", requireAdmin, (req, res) => {
+  app.delete("/api/products", requireCatalogAdmin, (req, res) => {
     logActivity('DELETE_ALL_BLOCKED', 'product', 'all', { ip: req.ip }, req.user?.id);
     res.status(410).json({
       success: false,
@@ -2889,7 +2895,7 @@ async function startServer() {
     res.json({ ...expense, attachments });
   });
 
-  app.post("/api/expenses", (req, res) => {
+  app.post("/api/expenses", requireFinanceWrite, (req, res) => {
     const {
       date, category, platform, amount, note, reference_number, title, description, payment_method, supplier, invoice_number,
       cash_account_id, currency, exchange_rate, amount_try, payer_person_id, will_be_refunded, refund_status, is_invoice,
@@ -2962,7 +2968,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/expenses/:id", (req, res) => {
+  app.put("/api/expenses/:id", requireFinanceWrite, (req, res) => {
     const {
       date, category, platform, amount, note, reference_number, title, description, payment_method, supplier, invoice_number,
       currency, exchange_rate, amount_try, payer_person_id, will_be_refunded, refund_status, is_invoice, invoice_name,
@@ -3050,7 +3056,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/expenses/:id", (req, res) => {
+  app.delete("/api/expenses/:id", requireFinanceWrite, (req, res) => {
     try {
       db.transaction(() => {
         const beforeState = db.prepare(`
@@ -3084,7 +3090,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/expenses/:id/attachments", expenseUpload.single("file"), async (req, res) => {
+  app.post("/api/expenses/:id/attachments", requireFinanceWrite, expenseUpload.single("file"), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
     const attId = uuidv4();
@@ -3105,7 +3111,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/expenses/:id/attachments/:attachmentId", (req, res) => {
+  app.delete("/api/expenses/:id/attachments/:attachmentId", requireFinanceWrite, (req, res) => {
     const attachment = db.prepare("SELECT * FROM expense_attachments WHERE id = ? AND expense_id = ?").get(req.params.attachmentId, req.params.id) as any;
 
     if (!attachment) return res.status(404).json({ error: "Attachment not found" });
@@ -3220,7 +3226,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/cash-accounts", (req, res) => {
+  app.post("/api/cash-accounts", requireFinanceWrite, (req, res) => {
     try {
       const id = uuidv4();
       const body = req.body;
@@ -3261,7 +3267,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/cash-accounts/:id", (req, res) => {
+  app.put("/api/cash-accounts/:id", requireFinanceWrite, (req, res) => {
     try {
       const { is_active } = req.body;
       const beforeState = db.prepare("SELECT * FROM cash_accounts WHERE id = ?").get(req.params.id);
@@ -3289,7 +3295,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/cash-deposit", (req, res) => {
+  app.post("/api/cash-deposit", requireFinanceWrite, (req, res) => {
     try {
       const { account_id, amount, description, source_type } = req.body;
       const amountNum = parseFloat(amount);
@@ -3313,7 +3319,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/cash-transfer", (req, res) => {
+  app.post("/api/cash-transfer", requireFinanceWrite, (req, res) => {
     try {
       const { from_account_id, to_account_id, amount, rate, description } = req.body;
       const amountNum = parseFloat(amount);
@@ -3378,7 +3384,7 @@ async function startServer() {
     res.json(transactions);
   });
 
-  app.post("/api/transactions", (req, res) => {
+  app.post("/api/transactions", requireFinanceWrite, (req, res) => {
     const {
       date, type, category, platform, amount, product_id, note, reference_number, supplier, invoice_number, expense_type, cash_account_id,
       currency, exchange_rate, amount_try, payer_person_id, will_be_refunded, refund_status, is_invoice, invoice_name,
@@ -3436,7 +3442,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/transactions/:id", (req, res) => {
+  app.delete("/api/transactions/:id", requireFinanceWrite, (req, res) => {
     try {
       db.transaction(() => {
         const beforeState = db.prepare("SELECT * FROM transactions WHERE id = ? AND COALESCE(is_deleted, 0) = 0").get(req.params.id) as any;
@@ -3505,7 +3511,7 @@ async function startServer() {
     res.json(settings);
   });
 
-  app.put("/api/settings", requireAdmin, (req, res) => {
+  app.put("/api/settings", requireSettingsAdmin, (req, res) => {
     const body = req.body;
     const stmt = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
 
@@ -4675,7 +4681,7 @@ async function startServer() {
     return summary;
   };
 
-  app.get("/api/integrations/trendyol/status", requireAdmin, apiLimiter, (req, res) => {
+  app.get("/api/integrations/trendyol/status", requireIntegrationsAdmin, apiLimiter, (req, res) => {
     try {
       const config = getTrendyolConfig();
       const keys = db.prepare(`
@@ -4714,7 +4720,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/integrations/trendyol/config", requireAdmin, apiLimiter, (req, res) => {
+  app.put("/api/integrations/trendyol/config", requireIntegrationsAdmin, apiLimiter, (req, res) => {
     try {
       const current = getTrendyolConfig();
       const nextConfig = {
@@ -4733,7 +4739,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/integrations/trendyol/test", requireAdmin, apiLimiter, async (req, res) => {
+  app.post("/api/integrations/trendyol/test", requireIntegrationsAdmin, apiLimiter, async (req, res) => {
     try {
       const config = { ...getTrendyolConfig(), ...req.body };
       config.environment = normalizeTrendyolEnvironment(config.environment);
@@ -4770,7 +4776,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/integrations/trendyol/sync", requireAdmin, apiLimiter, async (req, res) => {
+  app.post("/api/integrations/trendyol/sync", requireIntegrationsAdmin, apiLimiter, async (req, res) => {
     try {
       const config = { ...getTrendyolConfig(), ...req.body };
       config.environment = normalizeTrendyolEnvironment(config.environment);
@@ -4782,7 +4788,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/integrations/trendyol/orders", requireAdmin, apiLimiter, (req, res) => {
+  app.get("/api/integrations/trendyol/orders", requireIntegrationsAdmin, apiLimiter, (req, res) => {
     try {
       const environment = normalizeTrendyolEnvironment(req.query.environment);
       const limit = Math.min(Number(req.query.limit) || 100, 500);
@@ -4814,7 +4820,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/integrations/keys", apiLimiter, requireAdmin, (req, res) => {
+  app.get("/api/integrations/keys", apiLimiter, requireIntegrationsAdmin, (req, res) => {
     try {
       const keys = db.prepare(`
         SELECT id, service_name, display_name, key_name, merchant_id, seller_id,
@@ -4841,7 +4847,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/integrations/keys", apiLimiter, requireAdmin, (req, res) => {
+  app.post("/api/integrations/keys", apiLimiter, requireIntegrationsAdmin, (req, res) => {
     try {
       const { service_name, display_name, key_name, api_key, api_secret, merchant_id, seller_id, notes } = req.body;
 
@@ -4877,7 +4883,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/integrations/keys/:id", apiLimiter, requireAdmin, (req, res) => {
+  app.put("/api/integrations/keys/:id", apiLimiter, requireIntegrationsAdmin, (req, res) => {
     try {
       const { display_name, key_name, api_key, api_secret, merchant_id, seller_id, notes } = req.body;
       const id = req.params.id;
@@ -4926,7 +4932,7 @@ async function startServer() {
     }
   });
 
-  app.patch("/api/integrations/keys/:id/status", apiLimiter, requireAdmin, (req, res) => {
+  app.patch("/api/integrations/keys/:id/status", apiLimiter, requireIntegrationsAdmin, (req, res) => {
     try {
       const { status } = req.body;
       db.prepare("UPDATE api_keys SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(status, req.params.id);
@@ -4943,7 +4949,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/integrations/keys/:id/test", apiLimiter, requireAdmin, async (req, res) => {
+  app.post("/api/integrations/keys/:id/test", apiLimiter, requireIntegrationsAdmin, async (req, res) => {
     try {
       const id = req.params.id;
       const current = db.prepare("SELECT * FROM api_keys WHERE id = ? AND deleted_at IS NULL").get(id) as any;
@@ -5048,7 +5054,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/integrations/keys/:id", apiLimiter, requireAdmin, (req, res) => {
+  app.delete("/api/integrations/keys/:id", apiLimiter, requireIntegrationsAdmin, (req, res) => {
     try {
       const id = req.params.id;
       const current = db.prepare("SELECT display_name, service_name FROM api_keys WHERE id = ? AND deleted_at IS NULL").get(id) as any;
@@ -5072,7 +5078,7 @@ async function startServer() {
   });
 
   // --- PANEL API (INTERNAL KEYS FOR EXTERNAL SYSTEMS) ---
-  app.get("/api/integrations/panel-api", apiLimiter, requireAdmin, (req, res) => {
+  app.get("/api/integrations/panel-api", apiLimiter, requireIntegrationsAdmin, (req, res) => {
     try {
       const keys = db.prepare("SELECT id, name, key_prefix, last4, status, environment, permissions, allowed_ips, expires_at, last_used_at, last_used_ip, created_at, updated_at, revoked_at FROM panel_api_keys WHERE deleted_at IS NULL ORDER BY created_at DESC").all() as any[];
 
@@ -5093,7 +5099,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/integrations/panel-api", apiLimiter, requireAdmin, (req, res) => {
+  app.post("/api/integrations/panel-api", apiLimiter, requireIntegrationsAdmin, (req, res) => {
     try {
       const { name, environment, permissions, allowed_ips, expires_at } = req.body;
 
@@ -5124,7 +5130,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/integrations/panel-api/:id", apiLimiter, requireAdmin, (req, res) => {
+  app.put("/api/integrations/panel-api/:id", apiLimiter, requireIntegrationsAdmin, (req, res) => {
     try {
       const { name, permissions, allowed_ips, expires_at } = req.body;
       const id = req.params.id;
@@ -5151,7 +5157,7 @@ async function startServer() {
     }
   });
 
-  app.patch("/api/integrations/panel-api/:id/status", apiLimiter, requireAdmin, (req, res) => {
+  app.patch("/api/integrations/panel-api/:id/status", apiLimiter, requireIntegrationsAdmin, (req, res) => {
     try {
       const { status } = req.body;
       db.prepare("UPDATE panel_api_keys SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(status, req.params.id);
@@ -5171,7 +5177,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/integrations/panel-api/:id/revoke", apiLimiter, requireAdmin, (req, res) => {
+  app.post("/api/integrations/panel-api/:id/revoke", apiLimiter, requireIntegrationsAdmin, (req, res) => {
     try {
       const id = req.params.id;
       db.prepare("UPDATE panel_api_keys SET status = 'revoked', revoked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL").run(id);
@@ -5187,7 +5193,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/integrations/panel-api/:id/rotate", apiLimiter, requireAdmin, (req, res) => {
+  app.post("/api/integrations/panel-api/:id/rotate", apiLimiter, requireIntegrationsAdmin, (req, res) => {
     try {
       const id = req.params.id;
       const current = db.prepare("SELECT * FROM panel_api_keys WHERE id = ? AND deleted_at IS NULL").get(id) as any;
@@ -5219,7 +5225,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/integrations/panel-api/:id/test", apiLimiter, requireAdmin, (req, res) => {
+  app.post("/api/integrations/panel-api/:id/test", apiLimiter, requireIntegrationsAdmin, (req, res) => {
     try {
       const id = req.params.id;
       const current = db.prepare("SELECT * FROM panel_api_keys WHERE id = ? AND deleted_at IS NULL").get(id) as any;
@@ -5251,7 +5257,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/integrations/panel-api/:id", apiLimiter, requireAdmin, (req, res) => {
+  app.delete("/api/integrations/panel-api/:id", apiLimiter, requireIntegrationsAdmin, (req, res) => {
     try {
       const id = req.params.id;
 
@@ -5435,114 +5441,14 @@ async function startServer() {
     });
   });
 
-  // --- PUBLIC EXPENSES (Telegram bot / asistan akışı) ---
-
-  app.post("/api/public/expenses", publicApiAuth("expenses:write"), (req, res) => {
-    const {
-      date, category, amount, currency, supplier, note, title,
-      payment_method, invoice_number, cash_account_id,
-    } = req.body || {};
-
-    try {
-      const expenseAmount = Number(amount);
-      if (!Number.isFinite(expenseAmount) || expenseAmount <= 0) {
-        return res.status(400).json({ success: false, error: { code: 'INVALID_AMOUNT', message: "Tutar 0'dan büyük olmalıdır." } });
-      }
-      const expenseCurrency = (cleanText(currency) || 'TRY').toUpperCase();
-      const activeRate = getActiveExchangeRate();
-      if (!activeRate || activeRate <= 0) {
-        return res.status(400).json({ success: false, error: { code: 'NO_RATE', message: 'Döviz kuru alınamadı.' } });
-      }
-
-      let accountId = cleanText(cash_account_id);
-      if (!accountId) {
-        const account = db.prepare(
-          "SELECT id FROM cash_accounts WHERE is_active = 1 AND COALESCE(is_liability, 0) = 0 ORDER BY created_at ASC LIMIT 1"
-        ).get() as any;
-        accountId = account?.id || null;
-      }
-      if (!accountId) {
-        return res.status(400).json({ success: false, error: { code: 'NO_ACCOUNT', message: 'Aktif kasa hesabı bulunamadı.' } });
-      }
-
-      const txId = uuidv4();
-      const expensePayload = {
-        id: txId,
-        date: cleanText(date) || new Date().toISOString(),
-        category: cleanText(category) || 'Diğer',
-        platform: null,
-        amount: expenseAmount,
-        note: cleanText(note),
-        reference_number: null,
-        title: cleanText(title) || cleanText(supplier) || 'Telegram fişi',
-        description: null,
-        payment_method: cleanText(payment_method) || 'Nakit',
-        supplier: cleanText(supplier),
-        invoice_number: cleanText(invoice_number),
-        cash_account_id: accountId,
-        currency: expenseCurrency,
-        exchange_rate_at_transaction: activeRate,
-        amount_try: expenseCurrency === 'USD' ? expenseAmount * activeRate : expenseAmount,
-        payer_person_id: null,
-        will_be_refunded: 0,
-        refund_status: null,
-        is_invoice: 0,
-        invoice_name: null,
-        is_stock_related: 0,
-        distribute_to_product_cost: 0,
-      };
-
-      db.transaction(() => {
-        insertExpenseCashTransaction(expensePayload);
-        db.prepare(`
-          INSERT INTO transactions (
-            id, date, type, category, platform, amount, note, reference_number, title, description, payment_method, supplier, invoice_number, cash_account_id, exchange_rate_at_transaction,
-            currency, amount_try, payer_person_id, will_be_refunded, refund_status, is_invoice, invoice_name, is_stock_related, distribute_to_product_cost
-          )
-          VALUES (?, ?, 'Expense', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          txId, expensePayload.date, expensePayload.category, expensePayload.platform, expensePayload.amount, expensePayload.note, expensePayload.reference_number, expensePayload.title, expensePayload.description, expensePayload.payment_method, expensePayload.supplier, expensePayload.invoice_number, expensePayload.cash_account_id, expensePayload.exchange_rate_at_transaction,
-          expensePayload.currency, expensePayload.amount_try, expensePayload.payer_person_id, expensePayload.will_be_refunded, expensePayload.refund_status, expensePayload.is_invoice, expensePayload.invoice_name, expensePayload.is_stock_related, expensePayload.distribute_to_product_cost
-        );
-        logActivity('CREATE', 'expense', txId, { source: 'public_api', after: expensePayload }, null);
-      })();
-
-      logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip, expenseId: txId });
-      res.json({ success: true, data: { id: txId, amount: expenseAmount, currency: expenseCurrency, category: expensePayload.category } });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: { code: 'EXPENSE_FAILED', message: err.message } });
-    }
+  // Generic service-only finance writes are intentionally closed. Future marketplace
+  // finance automation must enter through its own scoped connector/inbox/domain path.
+  const denyServiceOnlyFinance = (_req: express.Request, res: express.Response) => res.status(403).json({
+    success: false,
+    error: { code: "HUMAN_SESSION_REQUIRED", message: "Manuel gider ve kasa işlemleri geçerli human session gerektirir." },
   });
-
-  app.post(
-    "/api/public/expenses/:id/attachments",
-    publicApiAuth("expenses:write"),
-    expenseUpload.single("file"),
-    async (req, res) => {
-      if (!req.file) return res.status(400).json({ success: false, error: { code: 'NO_FILE', message: 'Dosya yüklenmedi.' } });
-
-      const expense = db.prepare("SELECT id FROM transactions WHERE id = ? AND type = 'Expense'").get(req.params.id) as any;
-      if (!expense) {
-        return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Gider bulunamadı.' } });
-      }
-
-      const attId = uuidv4();
-      let stored: StoredRequestUpload | null = null;
-      try {
-        stored = await persistRequestUpload(req.file, "expenses", "expense", true);
-        db.prepare(`
-          INSERT INTO expense_attachments (id, expense_id, file_name, file_path, mime_type, file_size)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(attId, req.params.id, req.file.originalname, stored.publicPath, stored.mimeType, stored.size);
-
-        logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip, attachmentId: attId });
-        res.json({ success: true, data: { id: attId, file_path: stored.publicPath } });
-      } catch (err: any) {
-        if (stored) cleanupPersistedUploads([stored]);
-        res.status(err?.statusCode || 500).json({ success: false, error: { code: err?.code || 'ATTACH_FAILED', message: err.message } });
-      }
-    }
-  );
+  app.post("/api/public/expenses", publicApiAuth("expenses:write"), denyServiceOnlyFinance);
+  app.post("/api/public/expenses/:id/attachments", publicApiAuth("expenses:write"), denyServiceOnlyFinance);
 
   // --- ASISTAN RAPORLARI (Telegram bot için) ---
 
@@ -5683,7 +5589,7 @@ async function startServer() {
 
   // --- DATABASE BACKUP / RESTORE ---
   // Both endpoints are admin-only — a backup contains the entire DB including credentials.
-  app.get("/api/backup/download", requireAdmin, async (req, res) => {
+  app.get("/api/backup/download", requireBackupAdmin, async (req, res) => {
     let tempDbPath = "";
     let zipPath = "";
     try {
@@ -5706,7 +5612,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/backup/status", requireAdmin, (req, res) => {
+  app.get("/api/backup/status", requireBackupAdmin, (req, res) => {
     try {
       const config = getBackupConfig();
       cleanupOldBackups(config.retention_days);
@@ -5741,7 +5647,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/backup/config", requireAdmin, (req, res) => {
+  app.put("/api/backup/config", requireBackupAdmin, (req, res) => {
     try {
       const nextConfig = normalizeBackupConfig(req.body || {});
       saveBackupConfig(nextConfig);
@@ -5753,7 +5659,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/backup/run", requireAdmin, async (req, res) => {
+  app.post("/api/backup/run", requireBackupAdmin, async (req, res) => {
     try {
       const mode = ["smart", "full", "incremental", "none"].includes(req.body?.uploads_mode)
         ? req.body.uploads_mode
@@ -5767,7 +5673,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/backup/files/:id/download", requireAdmin, (req, res) => {
+  app.get("/api/backup/files/:id/download", requireBackupAdmin, (req, res) => {
     try {
       const run = db.prepare("SELECT * FROM backup_runs WHERE id = ?").get(req.params.id) as any;
       if (!run || run.status !== "success" || !run.file_path) {
@@ -5784,7 +5690,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/backup/files/:id/cloud-upload", requireAdmin, async (req, res) => {
+  app.post("/api/backup/files/:id/cloud-upload", requireBackupAdmin, async (req, res) => {
     try {
       const result = await uploadBackupRunToCloud(req.params.id, req.user?.id || null);
       res.json({ success: true, data: result });
@@ -5793,7 +5699,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/backup/files/:id", requireAdmin, (req, res) => {
+  app.delete("/api/backup/files/:id", requireBackupAdmin, (req, res) => {
     try {
       const run = db.prepare("SELECT * FROM backup_runs WHERE id = ?").get(req.params.id) as any;
       if (!run) {
@@ -5811,7 +5717,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/maintenance/fix-pricing", requireAdmin, (req, res) => {
+  app.post("/api/maintenance/fix-pricing", requireMaintenanceAdmin, (req, res) => {
     try {
       if (req.body?.confirm !== 'FIX_PRICING') {
         return res.status(400).json({
@@ -5927,7 +5833,7 @@ async function startServer() {
   // Restore is admin-only and uses a mutex flag to prevent concurrent access during the swap.
   let isRestoring = false;
 
-  app.post("/api/backup/restore", requireAdmin, backupUpload.single("zipfile"), async (req, res) => {
+  app.post("/api/backup/restore", requireBackupAdmin, backupUpload.single("zipfile"), async (req, res) => {
     if (isRestoring) {
       return res.status(503).json({ success: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'Restore işlemi zaten devam ediyor.' } });
     }
@@ -6039,6 +5945,9 @@ async function startServer() {
   // Global Error Handler must be last!
   app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
     AppLogger.error('REQUEST_ERROR', `Error processing ${req.method} ${req.url}`, err);
+    if (typeof err?.message === "string" && err.message.startsWith("CORS:")) {
+      return res.status(403).json({ success: false, error: { code: "CSRF_FORBIDDEN", message: "Origin izinli değil." } });
+    }
     if (err instanceof multer.MulterError || err?.code === "INVALID_FILE_TYPE") {
       return res.status(400).json({ success: false, error: { code: err.code || "UPLOAD_ERROR", message: err.message || "Dosya yüklenemedi." } });
     }
