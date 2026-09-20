@@ -27,6 +27,17 @@ db.prepare(`
     is_active = 1
 `).run(bcrypt.hashSync("admin", 4));
 
+db.prepare(`
+  INSERT INTO cash_accounts (id, name, currency, type, opening_balance, is_active)
+  VALUES ('operations-e2e-cash', 'Operations E2E Cash', 'TRY', 'cash', 0, 1)
+  ON CONFLICT(id) DO UPDATE SET
+    name = excluded.name,
+    currency = excluded.currency,
+    type = excluded.type,
+    opening_balance = 0,
+    is_active = 1
+`).run();
+
 const permissions = [
   "read:warehouse_orders",
   "read:products",
