@@ -57,7 +57,7 @@ test("V2-08 execution API audits and replays receive/identify/place while legacy
   const topology = {
     id: "route-topology", name: "Route topology", codeTemplate: "{rack}-K{level}-P{position}-{depth}",
     racks: [{
-      code: "A1", levelCount: 1, positionCount: 2, active: true, role: "MIXED",
+      code: "A1", levelCount: 1, positionCount: 6, active: true, role: "MIXED",
       allowMixedSku: true, allowMixedLot: true, placementPriority: 100,
       depths: [{ code: "FRONT", isFront: true, priority: 0 }, { code: "REAR_1", isFront: false, priority: 1 }],
       levels: [{ number: 1, role: "MIXED", heavyPenalty: 0 }],

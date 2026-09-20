@@ -2802,9 +2802,19 @@ const migrations: Migration[] = [
       db.exec(WAREHOUSE_EXECUTION_SCHEMA_V71);
     },
   },
+  {
+    version: 72,
+    name: "persist_warehouse_execution_thresholds",
+    up(db) {
+      db.prepare(`INSERT INTO warehouse_execution_settings
+        (id,watch_threshold_pct,prepare_threshold_pct,heavy_package_threshold_grams)
+        VALUES ('default',20,10,20000)
+        ON CONFLICT(id) DO NOTHING`).run();
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 71;
+export const CURRENT_SCHEMA_VERSION = 72;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),

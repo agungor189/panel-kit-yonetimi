@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
+import { WarehousePackageBalanceError, WarehousePackageBalanceService } from "../warehouse/warehousePackageBalanceService.js";
 
 type LocationKind = "PICKING" | "RESERVE";
 type ReservationStatus = "ACTIVE" | "PICKED" | "PACKED" | "RELEASED" | "DISPATCHED" | "STOCK_DISCREPANCY";
@@ -280,13 +281,26 @@ export class InventoryService {
           .run(allocation.quantity_base_int, allocation.quantity_base_int, dispatchedAt, allocation.lot_id, allocation.quantity_base_int, allocation.quantity_base_int);
         if (changed.changes !== 1) throw new InventoryValidationError("INVENTORY_CONSERVATION_FAILED", "Dispatch would create negative or inconsistent stock.", 409);
         let remaining = Number(allocation.quantity_base_int);
-        const positions = this.db.prepare(`SELECT id,quantity_base_int FROM inventory_lot_location_balances
+        const positions = this.db.prepare(`SELECT id,location_id,quantity_base_int FROM inventory_lot_location_balances
           WHERE lot_id=? AND location_kind='PICKING' AND active=1 AND physical_state='CONFIRMED' AND quantity_base_int>0
           ORDER BY location_id`).all(allocation.lot_id) as any[];
         for (const position of positions) {
           if (remaining === 0) break;
           const take = Math.min(remaining, Number(position.quantity_base_int));
           this.db.prepare("UPDATE inventory_lot_location_balances SET quantity_base_int=quantity_base_int-?,updated_at=? WHERE id=?").run(take, dispatchedAt, position.id);
+          try {
+            new WarehousePackageBalanceService(this.db).consumePicking({
+              lotId: allocation.lot_id,
+              locationId: position.location_id,
+              quantityBaseInt: take,
+              occurredAt: dispatchedAt,
+            });
+          } catch (error) {
+            if (error instanceof WarehousePackageBalanceError) {
+              throw new InventoryValidationError(error.code, error.message, 409);
+            }
+            throw error;
+          }
           remaining -= take;
         }
         if (remaining !== 0) throw new InventoryValidationError("INVENTORY_CONSERVATION_FAILED", "Picking location balance cannot satisfy dispatch.", 409);

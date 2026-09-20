@@ -153,9 +153,9 @@ export class WarehouseExecutionService {
     }
     const configHash = canonicalPayloadHash(input);
     return this.db.transaction(() => {
-      this.db.prepare("UPDATE warehouse_topologies SET active=0,updated_at=CURRENT_TIMESTAMP WHERE active=1").run();
+      const previousTopology = this.db.prepare("SELECT id FROM warehouse_topologies WHERE active=1").get() as { id: string } | undefined;
       this.db.prepare(`INSERT INTO warehouse_topologies
-        (id,name,code_template,config_json,config_hash,active) VALUES (?,?,?,?,?,1)`)
+        (id,name,code_template,config_json,config_hash,active) VALUES (?,?,?,?,?,0)`)
         .run(topologyId, name, template, JSON.stringify(input), configHash);
       const rackCodes = new Set<string>();
       const locationCodes = new Set<string>();
@@ -173,6 +173,10 @@ export class WarehouseExecutionService {
         (id,topology_id,code,rack_code,level_number,position_number,depth_code,depth_index,is_front,role,
          allow_mixed_sku,allow_mixed_lot,max_weight_grams,placement_priority,last_resort,heavy_penalty,active)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      const updateSlot = this.db.prepare(`UPDATE warehouse_location_slots SET
+        topology_id=?,rack_code=?,level_number=?,position_number=?,depth_code=?,depth_index=?,is_front=?,role=?,
+        allow_mixed_sku=?,allow_mixed_lot=?,max_weight_grams=?,placement_priority=?,last_resort=?,heavy_penalty=?,
+        active=? WHERE id=?`);
 
       for (const [rackIndex, rackInput] of input.racks.entries()) {
         const rackCode = requiredText(rackInput.code, `racks[${rackIndex}].code`, 80).toUpperCase();
@@ -180,6 +184,9 @@ export class WarehouseExecutionService {
         rackCodes.add(rackCode);
         const levelCount = positiveInteger(rackInput.levelCount, `racks[${rackIndex}].levelCount`);
         const positionCount = positiveInteger(rackInput.positionCount, `racks[${rackIndex}].positionCount`);
+        if (positionCount !== 6) {
+          throw new WarehouseExecutionError("INVALID_POSITION_COUNT", `Rack ${rackCode} must define exactly six positions per level.`);
+        }
         if (!Array.isArray(rackInput.depths) || rackInput.depths.length === 0) {
           throw new WarehouseExecutionError("WAREHOUSE_VALIDATION_FAILED", `Rack ${rackCode} requires depth slots.`);
         }
@@ -233,13 +240,33 @@ export class WarehouseExecutionService {
               const code = slotCode(template, { rack: rackCode, level: levelNumber, position: positionNumber, depth: depth.code });
               if (locationCodes.has(code)) throw new WarehouseExecutionError("DUPLICATE_LOCATION_CODE", `Location ${code} is duplicated.`);
               locationCodes.add(code);
-              insertSlot.run(randomUUID(), topologyId, code, rackCode, levelNumber, positionNumber, depth.code,
-                depthIndex, depth.isFront ? 1 : 0, positionRole, positionMixedSku, positionMixedLot, positionWeight,
-                positionPriority + depth.priority, positionLast, positionPenalty, positionActive);
+              const existing = this.db.prepare("SELECT id FROM warehouse_location_slots WHERE code=?").get(code) as { id: string } | undefined;
+              if (existing) {
+                updateSlot.run(topologyId, rackCode, levelNumber, positionNumber, depth.code, depthIndex,
+                  depth.isFront ? 1 : 0, positionRole, positionMixedSku, positionMixedLot, positionWeight,
+                  positionPriority + depth.priority, positionLast, positionPenalty, positionActive, existing.id);
+              } else {
+                insertSlot.run(randomUUID(), topologyId, code, rackCode, levelNumber, positionNumber, depth.code,
+                  depthIndex, depth.isFront ? 1 : 0, positionRole, positionMixedSku, positionMixedLot, positionWeight,
+                  positionPriority + depth.priority, positionLast, positionPenalty, positionActive);
+              }
             }
           }
         }
       }
+      if (previousTopology) {
+        const removedSlots = this.db.prepare("SELECT id,code FROM warehouse_location_slots WHERE topology_id=?").all(previousTopology.id) as Array<{ id: string; code: string }>;
+        for (const removed of removedSlots) {
+          const occupied = this.db.prepare(`SELECT 1 FROM warehouse_execution_packages
+            WHERE current_slot_id=? AND remaining_quantity_base_int>0 LIMIT 1`).get(removed.id);
+          if (occupied) {
+            throw new WarehouseExecutionError("TOPOLOGY_GEOMETRY_OCCUPIED", `Occupied location ${removed.code} cannot be removed from warehouse geometry.`, 409);
+          }
+          this.db.prepare("UPDATE warehouse_location_slots SET active=0 WHERE id=?").run(removed.id);
+        }
+      }
+      this.db.prepare("UPDATE warehouse_topologies SET active=0,updated_at=CURRENT_TIMESTAMP WHERE active=1 AND id<>?").run(topologyId);
+      this.db.prepare("UPDATE warehouse_topologies SET active=1,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(topologyId);
       return this.getTopology();
     }).immediate();
   }
@@ -277,10 +304,13 @@ export class WarehouseExecutionService {
 
   getSettings() {
     const row = this.db.prepare("SELECT * FROM warehouse_execution_settings WHERE id='default'").get() as any;
+    if (!row) {
+      throw new WarehouseExecutionError("WAREHOUSE_SETTINGS_NOT_CONFIGURED", "Persisted warehouse execution settings are required.", 409);
+    }
     return {
-      watchThresholdPct: Number(row?.watch_threshold_pct ?? 20),
-      prepareThresholdPct: Number(row?.prepare_threshold_pct ?? 10),
-      heavyPackageThresholdGrams: Number(row?.heavy_package_threshold_grams ?? 20_000),
+      watchThresholdPct: Number(row.watch_threshold_pct),
+      prepareThresholdPct: Number(row.prepare_threshold_pct),
+      heavyPackageThresholdGrams: Number(row.heavy_package_threshold_grams),
     };
   }
 
@@ -357,7 +387,8 @@ export class WarehouseExecutionService {
         throw new WarehouseExecutionError("RECEIPT_ALREADY_FINALIZED", "This cost snapshot already has a final goods receipt.", 409);
       }
       const expected = Number(snapshot.quantity_base_int);
-      const variance = accepted - expected;
+      const delivered = accepted + damaged;
+      const variance = delivered - expected;
       const shortage = Math.max(0, -variance);
       const excess = Math.max(0, variance);
       let approvalId: string | null = null;
@@ -368,7 +399,7 @@ export class WarehouseExecutionService {
         approvalId = requiredText(input.excessApprovalId, "excessApprovalId");
         const approval = this.db.prepare(`SELECT id,maximum_accepted_quantity_base_int,receipt_id
           FROM warehouse_excess_approvals WHERE id=? AND acquisition_cost_snapshot_id=?`).get(approvalId, snapshotId) as any;
-        if (!approval || approval.receipt_id || Number(approval.maximum_accepted_quantity_base_int) < accepted) {
+        if (!approval || approval.receipt_id || Number(approval.maximum_accepted_quantity_base_int) < delivered) {
           throw new WarehouseExecutionError("EXCESS_APPROVAL_REQUIRED", "Excess receipt requires a matching unused authorized approval.", 409);
         }
       }
@@ -412,7 +443,7 @@ export class WarehouseExecutionService {
         id: receiptId, receiptSeriesId: seriesId, stageIndex: 1, isFinal: true, partialPolicy: "DISABLED" as const,
         costSnapshotId: snapshotId, purchaseOrderId: snapshot.purchase_order_id, purchaseLineId: snapshot.purchase_line_id,
         productId: snapshot.product_id, supplierLotCode, inventoryLotId, expectedQuantityBaseInt: expected,
-        acceptedQuantityBaseInt: accepted, damagedQuantityBaseInt: damaged, varianceQuantityBaseInt: variance,
+        deliveredQuantityBaseInt: delivered, acceptedQuantityBaseInt: accepted, damagedQuantityBaseInt: damaged, varianceQuantityBaseInt: variance,
         shortageQuantityBaseInt: shortage, excessQuantityBaseInt: excess, excessApprovalId: approvalId, status,
         packages: packages.map(({ id }) => this.getPackage(id)),
       };
@@ -485,7 +516,8 @@ export class WarehouseExecutionService {
     const requiresFront = !hasPickFace || (fifoLotId === pkg.inventory_lot_id && !hasSameLotPickFace);
     const rows = this.db.prepare(`SELECT s.* FROM warehouse_location_slots s
       WHERE s.topology_id=? AND s.active=1
-        AND NOT EXISTS (SELECT 1 FROM warehouse_execution_packages p WHERE p.current_slot_id=s.id AND p.id<>?)`).all(topology.id, packageId) as SlotRow[];
+        AND NOT EXISTS (SELECT 1 FROM warehouse_execution_packages p
+          WHERE p.current_slot_id=s.id AND p.id<>? AND p.remaining_quantity_base_int>0)`).all(topology.id, packageId) as SlotRow[];
     const candidates: Array<ReturnType<typeof mapSlot> & { score: number[] }> = [];
     for (const row of rows) {
       if (row.id === pkg.current_slot_id || row.role === "QUARANTINE") continue;
@@ -493,7 +525,8 @@ export class WarehouseExecutionService {
       if (row.max_weight_grams !== null && Number(pkg.weight_grams) > Number(row.max_weight_grams)) continue;
       const peers = this.db.prepare(`SELECT p.product_id,p.inventory_lot_id,p.id,s.is_front,s.depth_code
         FROM warehouse_execution_packages p JOIN warehouse_location_slots s ON s.id=p.current_slot_id
-        WHERE s.topology_id=? AND s.rack_code=? AND s.level_number=? AND s.position_number=? AND p.id<>?`)
+        WHERE s.topology_id=? AND s.rack_code=? AND s.level_number=? AND s.position_number=? AND p.id<>?
+          AND p.remaining_quantity_base_int>0`)
         .all(topology.id, row.rack_code, row.level_number, row.position_number, packageId) as any[];
       if (!row.allow_mixed_sku && peers.some((peer) => peer.product_id !== pkg.product_id)) continue;
       if (!row.allow_mixed_lot && peers.some((peer) => peer.inventory_lot_id !== pkg.inventory_lot_id)) continue;
@@ -529,7 +562,7 @@ export class WarehouseExecutionService {
     const rackCode = requiredText(rackCodeValue, "rackCode").toUpperCase();
     return (this.db.prepare(`SELECT s.depth_code,p.id AS package_id FROM warehouse_location_slots s
       JOIN warehouse_topologies t ON t.id=s.topology_id AND t.active=1
-      LEFT JOIN warehouse_execution_packages p ON p.current_slot_id=s.id
+      LEFT JOIN warehouse_execution_packages p ON p.current_slot_id=s.id AND p.remaining_quantity_base_int>0
       WHERE s.rack_code=? AND s.level_number=? AND s.position_number=? ORDER BY s.depth_index`)
       .all(rackCode, positiveInteger(levelNumber, "levelNumber"), positiveInteger(positionNumber, "positionNumber")) as any[])
       .map((row) => ({ depthCode: row.depth_code, packageId: row.package_id ?? null }));
@@ -588,7 +621,7 @@ export class WarehouseExecutionService {
       const pick = this.db.prepare(`SELECT p.*,s.id AS slot_id FROM warehouse_execution_packages p
         JOIN warehouse_location_slots s ON s.id=p.current_slot_id
         WHERE p.product_id=? AND p.inventory_lot_id=? AND p.status='PICKING' AND s.is_front=1
-        ORDER BY p.created_at,p.id LIMIT 1`).get(productId, lot.id) as any;
+        ORDER BY (p.remaining_quantity_base_int>0) DESC,p.created_at,p.id LIMIT 1`).get(productId, lot.id) as any;
       if (!pick) throw new WarehouseExecutionError("MANDATORY_PICK_FACE_MISSING", "The FIFO lot has no accessible front pick face.", 409);
       const currentPct = Math.floor(Number(pick.remaining_quantity_base_int) * 100 / Number(pick.target_quantity_base_int));
       if (currentPct > settings.watchThresholdPct) return { state: "HEALTHY" as const, productId, lotId: lot.id, currentPct };

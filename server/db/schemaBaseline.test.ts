@@ -78,7 +78,6 @@ const businessTablesThatMustStartEmpty = [
   "warehouse_level_configs",
   "warehouse_position_configs",
   "warehouse_location_slots",
-  "warehouse_execution_settings",
   "warehouse_excess_approvals",
   "warehouse_goods_receipts",
   "warehouse_execution_packages",
@@ -94,7 +93,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 70);
+  assert.equal(manifest.length, 71);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -169,6 +168,13 @@ test("fresh production schema is exact, versioned and has zero business history"
   assert.equal(count(db, "dashboard_widgets"), 0, "user-owned dashboard data must not be invented before a user exists");
   assert.equal(count(db, "settings"), 0, "unresolved business policy must remain unconfigured");
   assert.equal(count(db, "warehouse_rack_metadata"), 0, "fresh bootstrap must not invent warehouse placement policy");
+  assert.deepEqual(db.prepare(`SELECT id,watch_threshold_pct,prepare_threshold_pct,heavy_package_threshold_grams
+    FROM warehouse_execution_settings`).all(), [{
+    id: "default",
+    watch_threshold_pct: 20,
+    prepare_threshold_pct: 10,
+    heavy_package_threshold_grams: 20_000,
+  }], "warehouse execution thresholds must be explicit persisted configuration");
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM users WHERE username='admin'").pluck().get(), 0);
 
   assert.throws(

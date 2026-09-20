@@ -4,6 +4,7 @@ import Database from "better-sqlite3";
 import { initializeDatabase } from "../../db/initialize.js";
 import { CatalogService } from "../catalog/catalogService.js";
 import { CommandExecutor } from "../commands/commandFoundation.js";
+import { InventoryService } from "../inventory/inventoryService.js";
 import { ProcurementService } from "../procurement/procurementService.js";
 import { WarehouseExecutionError, WarehouseExecutionService, type WarehouseTopologyInput } from "./warehouseExecutionService.js";
 
@@ -106,30 +107,32 @@ const receive = (
     ...extra,
   } as any));
 
-test("topology is DB/config driven for the current 14x4x6x3 shape and a custom 1x10x1 rack", () => {
+test("topology is DB/config driven for the current 14x4x6x3 shape and future racks retain six positions", () => {
   const { db, warehouse } = setup();
   warehouse.configureTopology(topology(Array.from({ length: 14 }, (_, index) => rack(`R${String(index + 1).padStart(2, "0")}`))));
   assert.equal(warehouse.getTopology().summary.slotCount, 14 * 4 * 6 * 3);
   assert.equal(warehouse.getTopology().racks.length, 14);
 
   warehouse.configureTopology(topology([{
-    ...rack("CUSTOM", 1, 10),
+    ...rack("CUSTOM", 1, 6),
     depths: [{ code: "FRONT", isFront: true, priority: 0 }],
     levels: [{ number: 1, role: "PICKING", heavyPenalty: 0 }],
   }]));
   const custom = warehouse.getTopology();
-  assert.equal(custom.summary.slotCount, 10);
-  assert.equal(custom.racks[0].positionCount, 10);
+  assert.equal(custom.summary.slotCount, 6);
+  assert.equal(custom.racks[0].positionCount, 6);
   assert.deepEqual(db.prepare("SELECT level_number,role FROM warehouse_level_configs WHERE topology_id=? ORDER BY level_number").all(custom.id), [
     { level_number: 1, role: "PICKING" },
   ]);
+  assert.throws(() => warehouse.configureTopology(topology([rack("INVALID", 1, 10)])),
+    (error: unknown) => error instanceof WarehouseExecutionError && error.code === "INVALID_POSITION_COUNT");
   db.close();
 });
 
 test("per-position mixed-SKU and mixed-lot policy filters placement candidates", () => {
   const { db, procurement, warehouse } = setup();
   warehouse.configureTopology(topology([{
-    ...rack("M1", 1, 2),
+    ...rack("M1", 1, 6),
     levels: [{ number: 1, role: "MIXED", heavyPenalty: 0 }],
     positions: [
       { level: 1, position: 1, allowMixedSku: false, allowMixedLot: false },
@@ -227,9 +230,22 @@ test("goods receipt preserves V2-06 facts, records shortage, gates excess, quara
     { id: "ok", code: "OK", quantityBaseInt: 8 },
     { id: "damaged", code: "DAMAGED", quantityBaseInt: 2, disposition: "DAMAGED" },
   ], 8, 2);
+  assert.equal(damaged.deliveredQuantityBaseInt, 10);
+  assert.equal(damaged.varianceQuantityBaseInt, 0);
+  assert.equal(damaged.shortageQuantityBaseInt, 0);
+  assert.equal(damaged.excessQuantityBaseInt, 0);
   assert.equal(damaged.damagedQuantityBaseInt, 2);
   assert.equal(warehouse.getPackage("damaged").status, "QUARANTINE");
   assert.equal(warehouse.getAvailability("p3").availableBaseInt, 8);
+
+  const deliveredExcessLot = costed(procurement, "p3", "delivered-excess", 10);
+  const deliveredApproval = execute(db, "approve-delivered-excess", "warehouse.goods-receipt.excess-approve.v1", { costSnapshotId: deliveredExcessLot.id }, () =>
+    warehouse.approveExcess({ approvalId: "approval-delivered-excess", costSnapshotId: deliveredExcessLot.id, maximumAcceptedQuantityBaseInt: 11, reason: "Only eleven delivered units approved", operationId: "approve-delivered-excess" }));
+  assert.throws(() => receive(db, warehouse, deliveredExcessLot.id, "delivered-excess", [
+    { id: "delivered-ok", code: "DELIVERED-OK", quantityBaseInt: 9 },
+    { id: "delivered-damaged", code: "DELIVERED-DAMAGED", quantityBaseInt: 3, disposition: "DAMAGED" },
+  ], 9, 3, { excessApprovalId: deliveredApproval.id }),
+  (error: unknown) => error instanceof WarehouseExecutionError && error.code === "EXCESS_APPROVAL_REQUIRED");
 
   const partialLot = costed(procurement, "p3", "partial", 5);
   assert.throws(() => receive(db, warehouse, partialLot.id, "partial", [{ id: "partial", code: "PARTIAL", quantityBaseInt: 2 }], 2, 0, { isFinal: false }),
@@ -241,6 +257,10 @@ test("goods receipt preserves V2-06 facts, records shortage, gates excess, quara
 test("configurable watch/prepare thresholds require same-lot replenishment and discrepancy blocks newer-lot fallback", () => {
   const { db, procurement, warehouse } = setup();
   warehouse.configureTopology(topology([rack("A1")]));
+  assert.deepEqual(warehouse.getSettings(), { watchThresholdPct: 20, prepareThresholdPct: 10, heavyPackageThresholdGrams: 20_000 });
+  db.prepare("DELETE FROM warehouse_execution_settings WHERE id='default'").run();
+  assert.throws(() => warehouse.getSettings(),
+    (error: unknown) => error instanceof WarehouseExecutionError && error.code === "WAREHOUSE_SETTINGS_NOT_CONFIGURED");
   warehouse.configureSettings({ watchThresholdPct: 20, prepareThresholdPct: 10, heavyPackageThresholdGrams: 20_000 });
   assert.throws(() => warehouse.configureSettings({ watchThresholdPct: 10, prepareThresholdPct: 20, heavyPackageThresholdGrams: 20_000 }),
     (error: unknown) => error instanceof WarehouseExecutionError && error.code === "INVALID_REPLENISHMENT_THRESHOLDS");
@@ -281,6 +301,75 @@ test("configurable watch/prepare thresholds require same-lot replenishment and d
   assert.equal(discrepancy.state, "STOCK_DISCREPANCY");
   assert.equal(discrepancy.lotId, olderReceipt.inventoryLotId);
   assert.notEqual(discrepancy.sourcePackageId, "reserve-new");
+  db.close();
+});
+
+test("topology policy edits and rack additions preserve slot identity while occupied geometry cannot be removed", () => {
+  const { db, procurement, warehouse } = setup();
+  const initial = topology([rack("A1"), rack("C2", 4, 6, true)]);
+  warehouse.configureTopology(initial);
+  const planned = costed(procurement, "p1", "topology-edit", 1);
+  receive(db, warehouse, planned.id, "topology-edit", [{ id: "stable-package", code: "STABLE-PACKAGE", quantityBaseInt: 1 }], 1);
+  warehouse.identifyPackage({ packageId: "stable-package", labelIdentity: "STABLE-LABEL" });
+  warehouse.placePackage({
+    packageId: "stable-package",
+    destinationCode: "C2-K1-P1-FRONT",
+    scannedDestinationCode: "C2-K1-P1-FRONT",
+    operationId: "stable-place",
+  });
+  const stableSlotId = warehouse.getPackage("stable-package").currentSlotId;
+
+  const edited: WarehouseTopologyInput = {
+    ...topology([rack("A1"), { ...rack("C2"), placementPriority: 25, lastResort: false }, rack("D1", 2, 6)]),
+    id: "topology-policy-edit-add-rack",
+  };
+  const configured = warehouse.configureTopology(edited);
+  assert.equal(configured.racks.length, 3);
+  assert.equal(warehouse.getPackage("stable-package").currentSlotId, stableSlotId);
+  assert.equal(db.prepare("SELECT last_resort FROM warehouse_location_slots WHERE id=?").pluck().get(stableSlotId), 0);
+
+  assert.throws(() => warehouse.configureTopology({ ...topology([rack("A1"), rack("D1", 2, 6)]), id: "topology-destructive" }),
+    (error: unknown) => error instanceof WarehouseExecutionError && error.code === "TOPOLOGY_GEOMETRY_OCCUPIED");
+  assert.equal(warehouse.getTopology().id, edited.id);
+  assert.equal(warehouse.getPackage("stable-package").currentSlotId, stableSlotId);
+  db.close();
+});
+
+test("dispatch consumes the matching picking package and leaves lot, ledger, location, package, and central projection reconciled", () => {
+  const { db, procurement, warehouse } = setup();
+  warehouse.configureTopology(topology([rack("A1")]));
+  const planned = costed(procurement, "p1", "dispatch-reconcile", 100);
+  receive(db, warehouse, planned.id, "dispatch-reconcile", [
+    { id: "dispatch-pick", code: "DISPATCH-PICK", quantityBaseInt: 20, targetQuantityBaseInt: 100 },
+    { id: "dispatch-reserve", code: "DISPATCH-RESERVE", quantityBaseInt: 80 },
+  ], 100);
+  for (const id of ["dispatch-pick", "dispatch-reserve"]) warehouse.identifyPackage({ packageId: id, labelIdentity: `LABEL-${id}` });
+  const pick = warehouse.suggestLocation("dispatch-pick");
+  warehouse.placePackage({ packageId: "dispatch-pick", destinationCode: pick.code, scannedDestinationCode: pick.code, operationId: "dispatch-pick-place" });
+  const reserve = warehouse.suggestLocation("dispatch-reserve");
+  warehouse.placePackage({ packageId: "dispatch-reserve", destinationCode: reserve.code, scannedDestinationCode: reserve.code, operationId: "dispatch-reserve-place" });
+
+  const inventory = new InventoryService(db);
+  inventory.reserveOrder({ reservationId: "dispatch-reservation", orderId: "dispatch-order", lines: [{ productId: "p1", quantityBaseInt: 10 }], operationId: "dispatch-reserve-op" });
+  inventory.markPicked({ reservationId: "dispatch-reservation", operationId: "dispatch-pick-op" });
+  inventory.markPacked({ reservationId: "dispatch-reservation", operationId: "dispatch-pack-op" });
+  execute(db, "dispatch-op", "inventory.reservation.dispatch.v1", { reservationId: "dispatch-reservation" }, () =>
+    inventory.dispatchReservation({ reservationId: "dispatch-reservation", shipmentId: "dispatch-shipment", dispatchedAt: "2026-09-20T12:00:00.000Z", operationId: "dispatch-op" }));
+
+  assert.equal(warehouse.getPackage("dispatch-pick").remainingQuantityBaseInt, 10);
+  assert.deepEqual(warehouse.getReconciliation("p1"), {
+    productId: "p1",
+    lotOnHandBaseInt: 90,
+    ledgerOnHandBaseInt: 90,
+    locationOnHandBaseInt: 90,
+    packageOnHandBaseInt: 90,
+    centralStockProjectionBaseInt: 90,
+    reconciled: true,
+  });
+  const replenishment = warehouse.prepareReplenishment({ productId: "p1", operationId: "dispatch-replenishment" });
+  assert.equal(replenishment.state, "PREPARE_REPLENISHMENT");
+  assert.equal(replenishment.currentPct, 10);
+  assert.equal(replenishment.sourcePackageId, "dispatch-reserve");
   db.close();
 });
 
