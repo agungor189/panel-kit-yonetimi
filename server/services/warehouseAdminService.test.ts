@@ -207,6 +207,95 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     assert.equal((await visible.json() as any).data.length, 1);
     await new Promise<void>((resolve, reject) => http.close((error) => error ? reject(error) : resolve()));
   });
+
+  test("Warehouse temel read route service key yanında insan oturumu ve pick yetkisi de zorunlu tutar", async () => {
+    db.prepare(`INSERT INTO panel_api_keys (id, name, key_prefix, key_hash, last4, permissions)
+      VALUES ('warehouse-read-key', 'Warehouse Read', 'test', 'read-secret', 'cret', ?)`)
+      .run(JSON.stringify(["read:warehouse_orders", "read:products", "read:bom", "write:warehouse_status"]));
+    db.prepare(`INSERT INTO panel_api_keys (id, name, key_prefix, key_hash, last4, permissions)
+      VALUES ('warehouse-wrong-scope', 'Warehouse Wrong Scope', 'test', 'wrong-scope-secret', 'cret', ?)`)
+      .run(JSON.stringify(["read:products"]));
+    const allowed = { id: "warehouse-user-2", username: "Ayşe", role: "user", permissions: { "warehouse:pick_orders": true }, must_change_password: false };
+    const denied = { ...allowed, permissions: {} };
+    const readonly = { ...allowed, role: "readonly" };
+    const app = express();
+    app.use(express.json());
+    app.use("/api/warehouse/v1", createWarehouseRouter({
+      db, hashApiKey: (value) => value, logActivity: () => {}, uploadsDir: process.cwd(),
+      authenticateUserToken: (token) => token === "allowed" ? allowed : token === "denied" ? denied : token === "readonly" ? readonly : null,
+    }));
+    const http = createServer(app);
+    await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
+    const address = http.address();
+    assert.ok(address && typeof address !== "string");
+    const base = `http://127.0.0.1:${address.port}/api/warehouse/v1/orders`;
+    const call = (token?: string, key = "read-secret") => fetch(base, {
+      headers: { "x-api-key": key, ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    });
+    try {
+      assert.equal((await call()).status, 401);
+      assert.equal((await call("fake")).status, 401);
+      assert.equal((await call("expired")).status, 401);
+      assert.equal((await call("denied")).status, 403);
+      assert.equal((await call("readonly")).status, 403);
+      assert.equal((await call("allowed", "wrong-key")).status, 401);
+      assert.equal((await call("allowed", "wrong-scope-secret")).status, 403);
+      assert.equal((await call("allowed")).status, 200);
+    } finally {
+      await new Promise<void>((resolve, reject) => http.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  test("service key tek başına hiçbir user-facing Warehouse route'una erişemez", async () => {
+    db.prepare(`INSERT INTO panel_api_keys (id, name, key_prefix, key_hash, last4, permissions)
+      VALUES ('warehouse-all-scope', 'Warehouse All Scope', 'test', 'all-scope-secret', 'cret', ?)`)
+      .run(JSON.stringify(["read:warehouse_orders", "read:products", "read:bom", "write:warehouse_status"]));
+    const app = express();
+    app.use(express.json());
+    app.use("/api/warehouse/v1", createWarehouseRouter({
+      db, hashApiKey: (value) => value, logActivity: () => {}, uploadsDir: process.cwd(),
+      authenticateUserToken: () => null,
+    }));
+    const http = createServer(app);
+    await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
+    const address = http.address();
+    assert.ok(address && typeof address !== "string");
+    const routes: Array<["GET" | "POST", string]> = [
+      ["GET", "/orders"], ["GET", "/pick-history"], ["GET", "/pick-history/test"],
+      ["GET", "/orders/test"], ["GET", "/orders/test/pick-plan"], ["GET", "/scan/test"],
+      ["GET", "/products/test/image"], ["POST", "/orders/test/start"],
+      ["POST", "/orders/test/verify-pick"], ["POST", "/orders/test/pick-items/product/complete"],
+      ["POST", "/orders/test/complete"], ["GET", "/admin/batches"], ["POST", "/admin/batches"],
+      ["GET", "/admin/batches/test"], ["POST", "/admin/batches/test/import/preview"],
+      ["POST", "/admin/batches/test/import/apply"], ["GET", "/admin/receiving/lots/test"],
+      ["GET", "/admin/receiving/sessions"], ["POST", "/admin/receiving/sessions"],
+      ["GET", "/admin/receiving/sessions/test"], ["GET", "/admin/receiving/my-active-package"],
+      ["GET", "/admin/receiving/sessions/test/my-active-package"], ["GET", "/admin/receiving/sessions/test/my-packages"],
+      ["POST", "/admin/receiving/sessions/test/state"], ["POST", "/admin/receiving/sessions/test/complete"],
+      ["POST", "/admin/packages/claim-next"], ["GET", "/admin/packages/by-code/test"],
+      ["POST", "/admin/packages/test/print"], ["POST", "/admin/packages/test/release-receiving"],
+      ["GET", "/admin/print-jobs"], ["GET", "/admin/locations"], ["POST", "/admin/locations/test/print"],
+      ["GET", "/admin/warehouse-map"], ["GET", "/admin/layouts/placement"],
+      ["POST", "/admin/layouts/placement/preview"], ["POST", "/admin/layouts/placement/apply"],
+      ["POST", "/admin/layouts/import-legacy"], ["GET", "/admin/packages"], ["GET", "/admin/movements"],
+      ["GET", "/admin/user-activity"], ["GET", "/admin/locations/suggestion"],
+      ["GET", "/admin/packages/test/receiving-location"], ["POST", "/admin/locations"],
+      ["POST", "/admin/placements"], ["POST", "/admin/moves"], ["POST", "/admin/stock-counts"],
+      ["GET", "/admin/label-templates"], ["POST", "/admin/label-templates"],
+    ];
+    try {
+      for (const [method, route] of routes) {
+        const response = await fetch(`http://127.0.0.1:${address.port}/api/warehouse/v1${route}`, {
+          method,
+          headers: { "x-api-key": "all-scope-secret", "content-type": "application/json" },
+          ...(method === "POST" ? { body: "{}" } : {}),
+        });
+        assert.equal(response.status, 401, `${method} ${route}`);
+      }
+    } finally {
+      await new Promise<void>((resolve, reject) => http.close((error) => error ? reject(error) : resolve()));
+    }
+  });
   test("kuru çalıştırma veritabanına yazmadan doğrular", () => {
     const batch = service.createBatch({ supplier_code: "SUP-1" }, actor) as any;
     const preview = service.previewImport(batch.id, importRows());

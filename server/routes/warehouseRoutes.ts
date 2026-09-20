@@ -1,8 +1,8 @@
 import express from "express";
-import path from "node:path";
 import Database from "better-sqlite3";
 import { WarehousePicker, WarehouseService, WarehouseServiceError } from "../services/warehouseService.js";
 import { WarehouseAdminService, type WarehouseActor } from "../services/warehouseAdminService.js";
+import { resolveStoredUpload } from "../services/uploadSecurity.js";
 
 type WarehouseUser = WarehousePicker & {
   role: string;
@@ -211,7 +211,7 @@ export function createWarehouseRouter({
     return source && Number.isFinite(new Date(source).getTime()) ? source : undefined;
   };
 
-  router.get("/orders", authenticate("read:warehouse_orders"), (req, res) => {
+  router.get("/orders", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
     const page = Math.max(1, Math.trunc(Number(req.query.page)) || 1);
     const limit = Math.min(100, Math.max(1, Math.trunc(Number(req.query.limit)) || 25));
     const result = service.listPickableOrders({ page, limit });
@@ -223,6 +223,7 @@ export function createWarehouseRouter({
     "/pick-history",
     authenticate("read:warehouse_orders"),
     requireWarehouseUser,
+    requireAnyWarehousePermission(["warehouse:pick_orders", "warehouse:view_analytics"]),
     (req, res) => {
       const page = Math.max(1, Math.trunc(Number(req.query.page)) || 1);
       const limit = Math.min(100, Math.max(1, Math.trunc(Number(req.query.limit)) || 25));
@@ -256,6 +257,7 @@ export function createWarehouseRouter({
     "/pick-history/:id",
     authenticate("read:warehouse_orders"),
     requireWarehouseUser,
+    requireAnyWarehousePermission(["warehouse:pick_orders", "warehouse:view_analytics"]),
     (req, res) => {
       const history = service.getPickHistory(req.params.id);
       if (!history) return errorResponse(res, 404, "PICK_SESSION_NOT_FOUND", "Toplama kaydı bulunamadı.");
@@ -264,7 +266,7 @@ export function createWarehouseRouter({
     },
   );
 
-  router.get("/orders/:id", authenticate("read:warehouse_orders"), (req, res) => {
+  router.get("/orders/:id", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
     const order = service.getOrder(req.params.id);
     if (!order) return errorResponse(res, 404, "ORDER_NOT_FOUND", "Sipariş bulunamadı.");
     auditRead(req);
@@ -274,6 +276,8 @@ export function createWarehouseRouter({
   router.get(
     "/orders/:id/pick-plan",
     authenticate(["read:warehouse_orders", "read:products", "read:bom"]),
+    requireWarehouseUser,
+    requireWarehousePermission("warehouse:pick_orders"),
     (req, res) => {
       const pickPlan = service.buildPickPlan(req.params.id);
       if (!pickPlan) return errorResponse(res, 404, "ORDER_NOT_FOUND", "Sipariş bulunamadı.");
@@ -282,7 +286,7 @@ export function createWarehouseRouter({
     },
   );
 
-  router.get("/scan/:code", authenticate("read:products"), (req, res) => {
+  router.get("/scan/:code", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
     const code = String(req.params.code || "").trim();
     if (!code) return errorResponse(res, 400, "INVALID_CODE", "Barkod veya SKU zorunludur.");
     const product = service.scanProduct(code);
@@ -294,24 +298,24 @@ export function createWarehouseRouter({
   router.get(
     "/products/:id/image",
     authenticate("read:products"),
+    requireWarehouseUser,
+    requireWarehousePermission("warehouse:pick_orders"),
     (req, res) => {
       const storedPath = service.getProductImagePath(req.params.id);
       if (!storedPath) return errorResponse(res, 404, "IMAGE_NOT_FOUND", "Ürün görseli bulunamadı.");
 
-      const relativePath = storedPath.replace(/^[/\\]+uploads[/\\]+/i, "").replace(/^[/\\]+/, "");
-      const root = path.resolve(uploadsDir);
-      const absolutePath = path.resolve(root, relativePath);
-      if (absolutePath !== root && !absolutePath.startsWith(`${root}${path.sep}`)) {
+      const resolved = resolveStoredUpload(uploadsDir, storedPath);
+      if (resolved.status !== "resolved") {
         return errorResponse(res, 404, "IMAGE_NOT_FOUND", "Ürün görseli bulunamadı.");
       }
       auditRead(req);
-      return res.sendFile(absolutePath, (error) => {
+      return res.sendFile(resolved.absolutePath, (error) => {
         if (error && !res.headersSent) errorResponse(res, 404, "IMAGE_NOT_FOUND", "Ürün görseli bulunamadı.");
       });
     },
   );
 
-  router.post("/orders/:id/start", authenticate("write:warehouse_status"), requireWarehouseUser, (req, res) => {
+  router.post("/orders/:id/start", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
     try {
       const result = service.startPicking(req.params.id, res.locals.warehouseUser);
       res.json({ success: true, data: result.order, idempotent: result.idempotent });
@@ -320,7 +324,7 @@ export function createWarehouseRouter({
     }
   });
 
-  router.post("/orders/:id/verify-pick", authenticate("write:warehouse_status"), requireWarehouseUser, (req, res) => {
+  router.post("/orders/:id/verify-pick", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
     const productId = String(req.body?.product_id || "").trim();
     const code = String(req.body?.code || "").trim();
     if (!productId || !code) {
@@ -338,6 +342,7 @@ export function createWarehouseRouter({
     "/orders/:id/pick-items/:productId/complete",
     authenticate("write:warehouse_status"),
     requireWarehouseUser,
+    requireWarehousePermission("warehouse:pick_orders"),
     (req, res) => {
       if (req.body?.picked_quantity === undefined) {
         return errorResponse(res, 400, "VALIDATION_ERROR", "picked_quantity zorunludur.");
@@ -356,7 +361,7 @@ export function createWarehouseRouter({
     },
   );
 
-  router.post("/orders/:id/complete", authenticate("write:warehouse_status"), requireWarehouseUser, (req, res) => {
+  router.post("/orders/:id/complete", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
     const note = typeof req.body?.note === "string" ? req.body.note.trim().slice(0, 2000) : null;
     try {
       const result = service.completePicking(req.params.id, res.locals.warehouseUser, note);

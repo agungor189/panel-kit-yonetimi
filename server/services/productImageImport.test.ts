@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import Database from "better-sqlite3";
-import { importProductImages, inspectProductImageFile, type StagedProductImage } from "./productImageImport.js";
+import { ensureProductImageDirectory, importProductImages, inspectProductImageFile, type StagedProductImage } from "./productImageImport.js";
 import { chunkItems } from "../../shared/productImageBatch.js";
 
 function setup() {
@@ -24,8 +24,16 @@ function setup() {
   return { db, uploadsDir };
 }
 
-function stage(uploadsDir: string, originalname: string, contents: string, mimetype = "image/png"): StagedProductImage {
-  const stagedPath = path.join(uploadsDir, `staged-${crypto.randomUUID()}`);
+const pngBytes = (payload: string) => Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  Buffer.from(payload),
+]);
+const jpegBytes = (payload: string) => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.from(payload)]);
+
+function stage(uploadsDir: string, originalname: string, contents: string | Buffer, mimetype = "image/png"): StagedProductImage {
+  const productsDir = path.join(uploadsDir, "products");
+  fs.mkdirSync(productsDir, { recursive: true });
+  const stagedPath = path.join(productsDir, `.staged-${crypto.randomUUID()}`);
   fs.writeFileSync(stagedPath, contents);
   return { originalname, mimetype, path: stagedPath };
 }
@@ -33,8 +41,8 @@ function stage(uploadsDir: string, originalname: string, contents: string, mimet
 test("SKU filename is matched case-insensitively and missing products are skipped", () => {
   const { db, uploadsDir } = setup();
   try {
-    const matched = stage(uploadsDir, "al-r100-elb.png", "first");
-    const missing = stage(uploadsDir, "ABC.png", "missing");
+    const matched = stage(uploadsDir, "al-r100-elb.png", pngBytes("first"));
+    const missing = stage(uploadsDir, "ABC.png", pngBytes("missing"));
     const report = importProductImages(db, uploadsDir, [matched, missing]);
 
     assert.equal(report.uploaded, 1);
@@ -49,7 +57,7 @@ test("SKU filename is matched case-insensitively and missing products are skippe
       path: "/uploads/products/AL-R100-ELB.png",
       sort_order: 0,
     });
-    assert.equal(fs.readFileSync(path.join(uploadsDir, "products", "AL-R100-ELB.png"), "utf8"), "first");
+    assert.equal(fs.readFileSync(path.join(uploadsDir, "products", "AL-R100-ELB.png")).subarray(8).toString(), "first");
   } finally {
     db.close();
     fs.rmSync(uploadsDir, { recursive: true, force: true });
@@ -59,14 +67,14 @@ test("SKU filename is matched case-insensitively and missing products are skippe
 test("uploading the same SKU replaces its image without duplicate records", () => {
   const { db, uploadsDir } = setup();
   try {
-    importProductImages(db, uploadsDir, [stage(uploadsDir, "AL-R100-ELB.png", "old")]);
-    const report = importProductImages(db, uploadsDir, [stage(uploadsDir, "AL-R100-ELB.jpg", "new", "image/jpeg")]);
+    importProductImages(db, uploadsDir, [stage(uploadsDir, "AL-R100-ELB.png", pngBytes("old"))]);
+    const report = importProductImages(db, uploadsDir, [stage(uploadsDir, "AL-R100-ELB.jpg", jpegBytes("new"), "image/jpeg")]);
 
     assert.equal(report.results[0].code, "IMAGE_REPLACED");
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM product_images WHERE product_id = 'product-1'").get() as any).count, 1);
     assert.equal((db.prepare("SELECT path FROM product_images WHERE product_id = 'product-1'").pluck().get()), "/uploads/products/AL-R100-ELB.jpg");
     assert.equal(fs.existsSync(path.join(uploadsDir, "products", "AL-R100-ELB.png")), false);
-    assert.equal(fs.readFileSync(path.join(uploadsDir, "products", "AL-R100-ELB.jpg"), "utf8"), "new");
+    assert.equal(fs.readFileSync(path.join(uploadsDir, "products", "AL-R100-ELB.jpg")).subarray(3).toString(), "new");
   } finally {
     db.close();
     fs.rmSync(uploadsDir, { recursive: true, force: true });
@@ -84,6 +92,62 @@ test("invalid extensions, MIME mismatches and unsafe names are rejected", () => 
   });
 });
 
+test("MIME and extension compatible uploads still reject invalid image bytes", () => {
+  const { db, uploadsDir } = setup();
+  try {
+    const spoofed = stage(uploadsDir, "AL-R100-ELB.png", "this is not a png", "image/png");
+    const report = importProductImages(db, uploadsDir, [spoofed]);
+
+    assert.equal(report.uploaded, 0);
+    assert.equal(report.skipped, 1);
+    assert.equal(report.results[0].code, "INVALID_FILE_CONTENT");
+    assert.equal(fs.existsSync(spoofed.path), false);
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM product_images").get() as any).count, 0);
+  } finally {
+    db.close();
+    fs.rmSync(uploadsDir, { recursive: true, force: true });
+  }
+});
+
+test("bulk import rejects arbitrary local paths and symlinked staged files without deleting their targets", () => {
+  const { db, uploadsDir } = setup();
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "product-image-outside-"));
+  const outside = path.join(outsideDir, "secret.png");
+  fs.writeFileSync(outside, pngBytes("secret"));
+  fs.mkdirSync(path.join(uploadsDir, "products"), { recursive: true });
+  const symlink = path.join(uploadsDir, "products", ".staged-symlink.png");
+  fs.symlinkSync(outside, symlink);
+  try {
+    const report = importProductImages(db, uploadsDir, [
+      { originalname: "AL-R100-ELB.png", mimetype: "image/png", path: outside },
+      { originalname: "AL-R100-ELB.png", mimetype: "image/png", path: symlink },
+    ]);
+    assert.deepEqual(report.results.map((result) => result.code), ["UNSAFE_STAGED_PATH", "UNSAFE_STAGED_PATH"]);
+    assert.equal(fs.readFileSync(outside).subarray(8).toString(), "secret");
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM product_images").get() as any).count, 0);
+  } finally {
+    db.close();
+    fs.rmSync(uploadsDir, { recursive: true, force: true });
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test("bulk staging directory cannot be a symlink outside the upload root", () => {
+  const uploadsDir = fs.mkdtempSync(path.join(os.tmpdir(), "product-image-root-"));
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "product-image-staging-outside-"));
+  fs.symlinkSync(outsideDir, path.join(uploadsDir, "products"), "dir");
+  try {
+    assert.throws(
+      () => ensureProductImageDirectory(uploadsDir),
+      /escapes the server-owned upload root/,
+    );
+    assert.deepEqual(fs.readdirSync(outsideDir), []);
+  } finally {
+    fs.rmSync(uploadsDir, { recursive: true, force: true });
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
 test("300 SKU-named images survive client-sized batches without loss", () => {
   const { db, uploadsDir } = setup();
   try {
@@ -92,7 +156,7 @@ test("300 SKU-named images survive client-sized batches without loss", () => {
     for (let index = 1; index <= 300; index++) {
       const sku = `BULK-${String(index).padStart(3, "0")}`;
       insert.run(`bulk-${index}`, sku);
-      files.push(stage(uploadsDir, `${sku}.png`, `image-${index}`));
+      files.push(stage(uploadsDir, `${sku}.png`, pngBytes(`image-${index}`)));
     }
     const reports = chunkItems(files).map((batch) => importProductImages(db, uploadsDir, batch));
     assert.equal(reports.reduce((sum, report) => sum + report.uploaded, 0), 300);

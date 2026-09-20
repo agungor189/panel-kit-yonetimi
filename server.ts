@@ -60,9 +60,11 @@ import {
   PRODUCT_IMAGE_MAX_FILES,
   PRODUCT_IMAGE_MAX_FILE_SIZE,
   cleanupStagedProductImages,
+  ensureProductImageDirectory,
   importProductImages,
   inspectProductImageFile,
 } from "./server/services/productImageImport.js";
+import { persistUpload, removeStoredUploadReference } from "./server/services/uploadSecurity.js";
 import { PRODUCT_TYPES, canonicalProductType, parseReserveLocations } from "./shared/productCsvMapping.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -148,49 +150,32 @@ const {
 } = createProductStockModule(db);
 export const getActiveExchangeRate = createActiveExchangeRateReader(db);
 
-// Multer setup for image uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, "uploads/");
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `${uuidv4()}${ext}`);
-  }
-});
-
-const expenseStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const expensesDir = path.join(process.cwd(), 'uploads', 'expenses');
-    if (!fs.existsSync(expensesDir)) {
-      fs.mkdirSync(expensesDir, { recursive: true });
-    }
-    cb(null, expensesDir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `expense_${uuidv4()}${ext}`);
-  }
-});
-
+// Uploads stay in bounded memory until their bytes, declared MIME and extension
+// agree. Only then are they persisted under a server-generated path.
 const upload = multer({
-  storage,
-  limits: { fileSize: 8 * 1024 * 1024 }, // 8 MB
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024, files: 12 },
   fileFilter: (req, file, cb) => {
     const allowed = ['image/jpeg', 'image/png', 'image/webp'];
     if (allowed.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error('Sadece JPEG, PNG ve WEBP görselleri yüklenebilir.'));
+      const error = new Error('Sadece JPEG, PNG ve WEBP görselleri yüklenebilir.') as Error & { code?: string };
+      error.code = "INVALID_FILE_TYPE";
+      cb(error);
     }
   }
 });
 
-const productUploadsDir = path.join(uploadsDir, "products");
-fs.mkdirSync(productUploadsDir, { recursive: true });
 const bulkProductImageUpload = multer({
   storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, productUploadsDir),
+    destination: (_req, _file, cb) => {
+      try {
+        cb(null, ensureProductImageDirectory(uploadsDir));
+      } catch (error) {
+        cb(error as Error, "");
+      }
+    },
     filename: (_req, file, cb) => {
       const inspection = inspectProductImageFile(file.originalname, file.mimetype);
       const extension = inspection.valid ? inspection.extension : ".invalid";
@@ -208,17 +193,39 @@ const bulkProductImageUpload = multer({
   },
 });
 const expenseUpload = multer({
-  storage: expenseStorage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024, files: 1 },
   fileFilter: (req, file, cb) => {
     const allowed = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
     if (allowed.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error('Sadece JPG, PNG, WEBP ve PDF dosyaları yüklenebilir.'));
+      const error = new Error('Sadece JPG, PNG, WEBP ve PDF dosyaları yüklenebilir.') as Error & { code?: string };
+      error.code = "INVALID_FILE_TYPE";
+      cb(error);
     }
   }
 });
+const IMAGE_UPLOAD_MIMES = ["image/jpeg", "image/png", "image/webp"] as const;
+const EXPENSE_UPLOAD_MIMES = [...IMAGE_UPLOAD_MIMES, "application/pdf"] as const;
+
+function persistRequestUpload(file: Express.Multer.File, folder: string, prefix: string, expense = false) {
+  return persistUpload({
+    uploadsDir,
+    folder,
+    prefix,
+    originalName: file.originalname,
+    declaredMime: file.mimetype,
+    buffer: file.buffer,
+    allowedMimes: expense ? EXPENSE_UPLOAD_MIMES : IMAGE_UPLOAD_MIMES,
+  });
+}
+
+function cleanupPersistedUploads(files: readonly { absolutePath: string }[]) {
+  for (const file of files) {
+    try { fs.unlinkSync(file.absolutePath); } catch (_) {}
+  }
+}
 // 500 MB max backup restore size — prevents disk exhaustion from malicious / corrupt uploads.
 const backupUpload = multer({ dest: os.tmpdir(), limits: { fileSize: 500 * 1024 * 1024 } });
 
@@ -2732,7 +2739,7 @@ async function startServer() {
     bulkProductImageUpload.array("images", PRODUCT_IMAGE_MAX_FILES)(req, res, (uploadError: any) => {
       const files = Array.isArray(req.files) ? req.files as Express.Multer.File[] : [];
       if (uploadError) {
-        cleanupStagedProductImages(files);
+        cleanupStagedProductImages(uploadsDir, files);
         const message = uploadError instanceof multer.MulterError && uploadError.code === "LIMIT_FILE_SIZE"
           ? `Her görsel en fazla ${PRODUCT_IMAGE_MAX_FILE_SIZE / 1024 / 1024} MB olabilir.`
           : uploadError instanceof multer.MulterError && uploadError.code === "LIMIT_FILE_COUNT"
@@ -2754,36 +2761,46 @@ async function startServer() {
         }, req.user?.id);
         return res.json({ success: true, ...report });
       } catch (error: any) {
-        cleanupStagedProductImages(files);
+        cleanupStagedProductImages(uploadsDir, files);
         AppLogger.error("BULK_PRODUCT_IMAGE_UPLOAD_ERROR", "Bulk product image upload failed", error);
         return res.status(500).json({ success: false, error: { code: "UPLOAD_FAILED", message: error.message || "Görseller yüklenemedi." } });
       }
     });
   });
 
-  app.post("/api/products/:id/images", upload.array("images"), (req: any, res) => {
-    const files = req.files as any[];
+  app.post("/api/products/:id/images", upload.array("images", 12), (req: any, res) => {
+    const files = (Array.isArray(req.files) ? req.files : []) as Express.Multer.File[];
     const productId = req.params.id;
+    if (!files.length) return res.status(400).json({ success: false, error: { code: "IMAGES_REQUIRED", message: "En az bir görsel seçilmelidir." } });
+    if (!db.prepare("SELECT 1 FROM products WHERE id = ?").get(productId)) {
+      return res.status(404).json({ success: false, error: { code: "PRODUCT_NOT_FOUND", message: "Ürün bulunamadı." } });
+    }
 
-    db.transaction(() => {
-      const stmt = db.prepare("INSERT INTO product_images (id, product_id, path, sort_order) VALUES (?, ?, ?, ?)");
-      const lastOrder = db.prepare("SELECT MAX(sort_order) as max FROM product_images WHERE product_id = ?").get(productId) as any;
-      let order = (lastOrder?.max || 0) + 1;
-
-      for (const file of files) {
-        stmt.run(uuidv4(), productId, `/uploads/${file.filename}`, order++);
-      }
-    })();
-
-    res.json({ success: true });
+    const stored: ReturnType<typeof persistRequestUpload>[] = [];
+    try {
+      for (const file of files) stored.push(persistRequestUpload(file, "products", "product"));
+      db.transaction(() => {
+        const stmt = db.prepare("INSERT INTO product_images (id, product_id, path, sort_order) VALUES (?, ?, ?, ?)");
+        const lastOrder = db.prepare("SELECT MAX(sort_order) as max FROM product_images WHERE product_id = ?").get(productId) as any;
+        let order = (lastOrder?.max || 0) + 1;
+        for (const file of stored) stmt.run(uuidv4(), productId, file.publicPath, order++);
+      })();
+      return res.json({ success: true });
+    } catch (error: any) {
+      cleanupPersistedUploads(stored);
+      return res.status(error?.statusCode || 500).json({ success: false, error: { code: error?.code || "UPLOAD_FAILED", message: error?.message || "Görseller yüklenemedi." } });
+    }
   });
 
   app.delete("/api/images/:id", (req, res) => {
     const image = db.prepare("SELECT path FROM product_images WHERE id = ?").get(req.params.id) as any;
     if (image) {
-      const fullPath = path.join(process.cwd(), image.path);
-      if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
-      db.prepare("DELETE FROM product_images WHERE id = ?").run(req.params.id);
+      const removal = removeStoredUploadReference(uploadsDir, image.path, () => {
+        db.prepare("DELETE FROM product_images WHERE id = ?").run(req.params.id);
+      });
+      if (removal.status === "rejected") {
+        logActivity("UNSAFE_UPLOAD_PATH_REJECTED", "product_image", req.params.id, { reason: removal.reason }, req.user?.id);
+      }
     }
     res.json({ success: true });
   });
@@ -3063,19 +3080,20 @@ async function startServer() {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
     const attId = uuidv4();
-    const filePath = `uploads/expenses/${req.file.filename}`;
+    let stored: ReturnType<typeof persistRequestUpload> | null = null;
 
     try {
+      stored = persistRequestUpload(req.file, "expenses", "expense", true);
       db.prepare(`
         INSERT INTO expense_attachments (id, expense_id, file_name, file_path, mime_type, file_size)
         VALUES (?, ?, ?, ?, ?, ?)
-      `).run(attId, req.params.id, req.file.originalname, filePath, req.file.mimetype, req.file.size);
+      `).run(attId, req.params.id, req.file.originalname, stored.publicPath, stored.mimeType, stored.size);
 
       const attachment = db.prepare("SELECT * FROM expense_attachments WHERE id = ?").get(attId);
       res.json({ success: true, attachment });
     } catch (err: any) {
-      if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-      res.status(500).json({ error: err.message });
+      if (stored) cleanupPersistedUploads([stored]);
+      res.status(err?.statusCode || 500).json({ error: err.message });
     }
   });
 
@@ -3084,11 +3102,16 @@ async function startServer() {
 
     if (!attachment) return res.status(404).json({ error: "Attachment not found" });
 
-    if (attachment.file_path && fs.existsSync(path.join(process.cwd(), attachment.file_path))) {
-      try { fs.unlinkSync(path.join(process.cwd(), attachment.file_path)); } catch(e) {}
+    if (attachment.file_path) {
+      const removal = removeStoredUploadReference(uploadsDir, attachment.file_path, () => {
+        db.prepare("DELETE FROM expense_attachments WHERE id = ?").run(req.params.attachmentId);
+      });
+      if (removal.status === "rejected") {
+        logActivity("UNSAFE_UPLOAD_PATH_REJECTED", "expense_attachment", req.params.attachmentId, { reason: removal.reason }, req.user?.id);
+      }
+    } else {
+      db.prepare("DELETE FROM expense_attachments WHERE id = ?").run(req.params.attachmentId);
     }
-
-    db.prepare("DELETE FROM expense_attachments WHERE id = ?").run(req.params.attachmentId);
 
     res.json({ success: true });
   });
@@ -5266,35 +5289,55 @@ async function startServer() {
     const kit = db.prepare("SELECT id FROM kits WHERE id = ?").get(req.params.id);
     if (!kit) return res.status(404).json({ error: "Kit bulunamadı" });
     if (!req.file) return res.status(400).json({ error: "Görsel seçilmedi" });
-    const coverImage = `/uploads/${req.file.filename}`;
-    db.prepare("UPDATE kits SET cover_image = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(coverImage, req.params.id);
-    res.json({ success: true, cover_image: coverImage });
+    let stored: ReturnType<typeof persistRequestUpload> | null = null;
+    try {
+      stored = persistRequestUpload(req.file, "kits", "kit");
+      db.prepare("UPDATE kits SET cover_image = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(stored.publicPath, req.params.id);
+      res.json({ success: true, cover_image: stored.publicPath });
+    } catch (error: any) {
+      if (stored) cleanupPersistedUploads([stored]);
+      res.status(error?.statusCode || 500).json({ success: false, error: { code: error?.code || "UPLOAD_FAILED", message: error?.message || "Görsel yüklenemedi." } });
+    }
   });
   app.post("/api/kits/complementary-products/:id/image", upload.single("image"), (req: any, res) => {
     const product = db.prepare("SELECT id FROM complementary_products WHERE id = ?").get(req.params.id);
     if (!product) return res.status(404).json({ error: "Tamamlayıcı ürün bulunamadı" });
     if (!req.file) return res.status(400).json({ error: "Görsel seçilmedi" });
-    const coverImage = `/uploads/${req.file.filename}`;
-    const nextOrder = Number((db.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM complementary_product_images WHERE complementary_product_id = ?").get(req.params.id) as any)?.next_order || 0);
-    db.prepare("INSERT INTO complementary_product_images (id, complementary_product_id, path, sort_order) VALUES (?, ?, ?, ?)").run(uuidv4(), req.params.id, coverImage, nextOrder);
-    db.prepare("UPDATE complementary_products SET cover_image = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(coverImage, req.params.id);
-    res.json({ success: true, cover_image: coverImage });
+    let stored: ReturnType<typeof persistRequestUpload> | null = null;
+    try {
+      stored = persistRequestUpload(req.file, "complementary-products", "complementary");
+      const nextOrder = Number((db.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM complementary_product_images WHERE complementary_product_id = ?").get(req.params.id) as any)?.next_order || 0);
+      db.transaction(() => {
+        db.prepare("INSERT INTO complementary_product_images (id, complementary_product_id, path, sort_order) VALUES (?, ?, ?, ?)").run(uuidv4(), req.params.id, stored!.publicPath, nextOrder);
+        db.prepare("UPDATE complementary_products SET cover_image = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(stored!.publicPath, req.params.id);
+      })();
+      res.json({ success: true, cover_image: stored.publicPath });
+    } catch (error: any) {
+      if (stored) cleanupPersistedUploads([stored]);
+      res.status(error?.statusCode || 500).json({ success: false, error: { code: error?.code || "UPLOAD_FAILED", message: error?.message || "Görsel yüklenemedi." } });
+    }
   });
   app.post("/api/kits/complementary-products/:id/images", upload.array("images", 12), (req: any, res) => {
     const product = db.prepare("SELECT id, cover_image FROM complementary_products WHERE id = ?").get(req.params.id) as any;
     if (!product) return res.status(404).json({ error: "Tamamlayıcı ürün bulunamadı" });
-    const files = req.files || [];
+    const files = (Array.isArray(req.files) ? req.files : []) as Express.Multer.File[];
     if (!files.length) return res.status(400).json({ error: "Görsel seçilmedi" });
-    let nextOrder = Number((db.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM complementary_product_images WHERE complementary_product_id = ?").get(req.params.id) as any)?.next_order || 0);
-    const insert = db.prepare("INSERT INTO complementary_product_images (id, complementary_product_id, path, sort_order) VALUES (?, ?, ?, ?)");
-    const images = files.map((file: any) => {
-      const image = { id: uuidv4(), path: `/uploads/${file.filename}`, sort_order: nextOrder++ };
-      insert.run(image.id, req.params.id, image.path, image.sort_order);
-      return image;
-    });
-    const coverImage = product.cover_image || images[0]?.path || null;
-    db.prepare("UPDATE complementary_products SET cover_image = COALESCE(cover_image, ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(coverImage, req.params.id);
-    res.json({ success: true, cover_image: coverImage, images });
+    const stored: ReturnType<typeof persistRequestUpload>[] = [];
+    try {
+      for (const file of files) stored.push(persistRequestUpload(file, "complementary-products", "complementary"));
+      let nextOrder = Number((db.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM complementary_product_images WHERE complementary_product_id = ?").get(req.params.id) as any)?.next_order || 0);
+      const images = stored.map((file) => ({ id: uuidv4(), path: file.publicPath, sort_order: nextOrder++ }));
+      const coverImage = product.cover_image || images[0]?.path || null;
+      db.transaction(() => {
+        const insert = db.prepare("INSERT INTO complementary_product_images (id, complementary_product_id, path, sort_order) VALUES (?, ?, ?, ?)");
+        for (const image of images) insert.run(image.id, req.params.id, image.path, image.sort_order);
+        db.prepare("UPDATE complementary_products SET cover_image = COALESCE(cover_image, ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(coverImage, req.params.id);
+      })();
+      res.json({ success: true, cover_image: coverImage, images });
+    } catch (error: any) {
+      cleanupPersistedUploads(stored);
+      res.status(error?.statusCode || 500).json({ success: false, error: { code: error?.code || "UPLOAD_FAILED", message: error?.message || "Görseller yüklenemedi." } });
+    }
   });
 
   // --- PUBLIC API ROUTES ---
@@ -5486,23 +5529,23 @@ async function startServer() {
 
       const expense = db.prepare("SELECT id FROM transactions WHERE id = ? AND type = 'Expense'").get(req.params.id) as any;
       if (!expense) {
-        try { fs.unlinkSync(req.file.path); } catch (_) {}
         return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Gider bulunamadı.' } });
       }
 
       const attId = uuidv4();
-      const filePath = `uploads/expenses/${req.file.filename}`;
+      let stored: ReturnType<typeof persistRequestUpload> | null = null;
       try {
+        stored = persistRequestUpload(req.file, "expenses", "expense", true);
         db.prepare(`
           INSERT INTO expense_attachments (id, expense_id, file_name, file_path, mime_type, file_size)
           VALUES (?, ?, ?, ?, ?, ?)
-        `).run(attId, req.params.id, req.file.originalname, filePath, req.file.mimetype, req.file.size);
+        `).run(attId, req.params.id, req.file.originalname, stored.publicPath, stored.mimeType, stored.size);
 
         logActivity("PANEL_API_USED", "public_api", req.panelApiKey.id, { path: req.path, userIp: req.ip, attachmentId: attId });
-        res.json({ success: true, data: { id: attId, file_path: filePath } });
+        res.json({ success: true, data: { id: attId, file_path: stored.publicPath } });
       } catch (err: any) {
-        try { fs.unlinkSync(req.file.path); } catch (_) {}
-        res.status(500).json({ success: false, error: { code: 'ATTACH_FAILED', message: err.message } });
+        if (stored) cleanupPersistedUploads([stored]);
+        res.status(err?.statusCode || 500).json({ success: false, error: { code: err?.code || 'ATTACH_FAILED', message: err.message } });
       }
     }
   );
@@ -6002,6 +6045,9 @@ async function startServer() {
   // Global Error Handler must be last!
   app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
     AppLogger.error('REQUEST_ERROR', `Error processing ${req.method} ${req.url}`, err);
+    if (err instanceof multer.MulterError || err?.code === "INVALID_FILE_TYPE") {
+      return res.status(400).json({ success: false, error: { code: err.code || "UPLOAD_ERROR", message: err.message || "Dosya yüklenemedi." } });
+    }
     if (err instanceof z.ZodError) {
        return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: err.issues } });
     }

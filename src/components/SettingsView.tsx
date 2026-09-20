@@ -39,6 +39,7 @@ interface SettingsViewProps {
 }
 
 const APP_PERMISSIONS = [
+  ['warehouse:pick_orders', 'Sipariş toplama'],
   ['warehouse:receive', 'Mal kabul'],
   ['warehouse:manage_receiving_sessions', 'Mal kabul oturumu yönetimi'],
   ['warehouse:print_labels', 'Etiket basma'],

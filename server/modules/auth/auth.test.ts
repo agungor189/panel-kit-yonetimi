@@ -4,7 +4,18 @@ import Database from "better-sqlite3";
 import bcrypt from "bcrypt";
 import express from "express";
 import { applySchema } from "../../db/schema.js";
-import { createAuthModule } from "./index.js";
+import { createAuthModule, sanitizePermissions } from "./index.js";
+
+test("warehouse pick and receiving-session permissions survive backend sanitization", () => {
+  assert.deepEqual(sanitizePermissions({
+    "warehouse:pick_orders": true,
+    "warehouse:manage_receiving_sessions": true,
+    "warehouse:unknown": true,
+  }), {
+    "warehouse:pick_orders": true,
+    "warehouse:manage_receiving_sessions": true,
+  });
+});
 
 test("auth module preserves login, current-user and protected API contracts", async () => {
   const db = new Database(":memory:");

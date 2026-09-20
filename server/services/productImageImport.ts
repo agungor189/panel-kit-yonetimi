@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type Database from "better-sqlite3";
+import { inspectUpload, removeStoredUpload, resolveStoredUpload } from "./uploadSecurity.js";
 
 export const PRODUCT_IMAGE_MAX_FILE_SIZE = 8 * 1024 * 1024;
 export { PRODUCT_IMAGE_SERVER_BATCH_LIMIT as PRODUCT_IMAGE_MAX_FILES } from "../../shared/productImageBatch";
@@ -80,6 +81,33 @@ function isInside(root: string, candidate: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+export function ensureProductImageDirectory(uploadsDir: string): string {
+  const uploadsRoot = path.resolve(uploadsDir);
+  fs.mkdirSync(uploadsRoot, { recursive: true });
+  const uploadsRootReal = fs.realpathSync(uploadsRoot);
+  const productsDir = path.resolve(uploadsRoot, "products");
+  fs.mkdirSync(productsDir, { recursive: true });
+  const productsDirReal = fs.realpathSync(productsDir);
+  if (!isInside(uploadsRootReal, productsDirReal)) {
+    throw new Error("Product image directory escapes the server-owned upload root");
+  }
+  return productsDirReal;
+}
+
+function safeStagedPath(productsDir: string, stagedPath: string): string | null {
+  const root = path.resolve(productsDir);
+  const candidate = path.resolve(String(stagedPath || ""));
+  try {
+    const rootReal = fs.realpathSync(root);
+    const stat = fs.lstatSync(candidate);
+    if (!stat.isFile() || stat.isSymbolicLink()) return null;
+    const candidateReal = fs.realpathSync(candidate);
+    return isInside(rootReal, candidateReal) ? candidateReal : null;
+  } catch {
+    return null;
+  }
+}
+
 function removeFile(filePath: string): void {
   try {
     if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
@@ -88,16 +116,17 @@ function removeFile(filePath: string): void {
   }
 }
 
-function storedImageAbsolutePath(uploadsDir: string, publicPath: string): string | null {
-  const normalized = String(publicPath || "").replace(/\\/g, "/");
-  if (!normalized.startsWith("/uploads/")) return null;
-  const relativePath = normalized.slice("/uploads/".length);
-  const absolutePath = path.resolve(uploadsDir, relativePath);
-  return isInside(uploadsDir, absolutePath) ? absolutePath : null;
-}
-
-export function cleanupStagedProductImages(files: readonly StagedProductImage[]): void {
-  for (const file of files) removeFile(file.path);
+export function cleanupStagedProductImages(uploadsDir: string, files: readonly StagedProductImage[]): void {
+  let productsDir: string;
+  try {
+    productsDir = ensureProductImageDirectory(uploadsDir);
+  } catch {
+    return;
+  }
+  for (const file of files) {
+    const safePath = safeStagedPath(productsDir, file.path);
+    if (safePath) removeFile(safePath);
+  }
 }
 
 export function importProductImages(
@@ -105,8 +134,7 @@ export function importProductImages(
   uploadsDir: string,
   files: readonly StagedProductImage[],
 ): ProductImageImportReport {
-  const productsDir = path.resolve(uploadsDir, "products");
-  fs.mkdirSync(productsDir, { recursive: true });
+  const productsDir = ensureProductImageDirectory(uploadsDir);
 
   const findProduct = db.prepare(`
     SELECT id, sku
@@ -125,9 +153,20 @@ export function importProductImages(
   const results: ProductImageImportResult[] = [];
 
   for (const file of files) {
+    const stagedPath = safeStagedPath(productsDir, file.path);
+    if (!stagedPath) {
+      results.push({
+        original_filename: file.originalname,
+        sku: "",
+        status: "skipped",
+        code: "UNSAFE_STAGED_PATH",
+        message: "Yüklenen geçici dosya server-owned upload alanında değil.",
+      });
+      continue;
+    }
     const inspection = inspectProductImageFile(file.originalname, file.mimetype);
     if ("message" in inspection) {
-      removeFile(file.path);
+      removeFile(stagedPath);
       results.push({
         original_filename: file.originalname,
         sku: "",
@@ -138,9 +177,27 @@ export function importProductImages(
       continue;
     }
 
+    const contentInspection = inspectUpload(
+      file.originalname,
+      file.mimetype,
+      fs.readFileSync(stagedPath),
+      ["image/jpeg", "image/png", "image/webp"],
+    );
+    if ("code" in contentInspection) {
+      removeFile(stagedPath);
+      results.push({
+        original_filename: file.originalname,
+        sku: inspection.sku,
+        status: "skipped",
+        code: contentInspection.code,
+        message: contentInspection.message,
+      });
+      continue;
+    }
+
     const matches = findProduct.all(inspection.sku) as Array<{ id: string; sku: string }>;
     if (matches.length === 0) {
-      removeFile(file.path);
+      removeFile(stagedPath);
       results.push({
         original_filename: file.originalname,
         sku: inspection.sku,
@@ -151,7 +208,7 @@ export function importProductImages(
       continue;
     }
     if (matches.length > 1) {
-      removeFile(file.path);
+      removeFile(stagedPath);
       results.push({
         original_filename: file.originalname,
         sku: inspection.sku,
@@ -164,7 +221,7 @@ export function importProductImages(
 
     const product = matches[0];
     if (seenProductIds.has(product.id)) {
-      removeFile(file.path);
+      removeFile(stagedPath);
       results.push({
         original_filename: file.originalname,
         sku: inspection.sku,
@@ -180,7 +237,7 @@ export function importProductImages(
     const targetName = `${sanitizeSkuFilename(product.sku)}${inspection.extension}`;
     const targetPath = path.resolve(productsDir, targetName);
     if (!isInside(productsDir, targetPath)) {
-      removeFile(file.path);
+      removeFile(stagedPath);
       results.push({
         original_filename: file.originalname,
         sku: inspection.sku,
@@ -198,7 +255,7 @@ export function importProductImages(
 
     try {
       if (backupPath) fs.renameSync(targetPath, backupPath);
-      fs.renameSync(file.path, targetPath);
+      fs.renameSync(stagedPath, targetPath);
 
       db.transaction(() => {
         deleteImages.run(product.id);
@@ -207,8 +264,10 @@ export function importProductImages(
 
       if (backupPath) removeFile(backupPath);
       for (const oldImage of oldImages) {
-        const oldPath = storedImageAbsolutePath(uploadsDir, oldImage.path);
-        if (oldPath && path.resolve(oldPath) !== targetPath) removeFile(oldPath);
+        const oldPath = resolveStoredUpload(uploadsDir, oldImage.path);
+        if (oldPath.status === "resolved" && path.resolve(oldPath.absolutePath) !== targetPath) {
+          removeStoredUpload(uploadsDir, oldImage.path);
+        }
       }
 
       results.push({
@@ -223,7 +282,7 @@ export function importProductImages(
     } catch (error: any) {
       removeFile(targetPath);
       if (backupPath && fs.existsSync(backupPath)) fs.renameSync(backupPath, targetPath);
-      removeFile(file.path);
+      removeFile(stagedPath);
       results.push({
         original_filename: file.originalname,
         sku: inspection.sku,
