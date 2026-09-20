@@ -1,8 +1,9 @@
 import express from "express";
 import Database from "better-sqlite3";
 import { WarehousePicker, WarehouseService, WarehouseServiceError } from "../services/warehouseService.js";
-import { WarehouseAdminService, type WarehouseActor } from "../services/warehouseAdminService.js";
+import { normalizeWarehouseLocationCode, WarehouseAdminService, type WarehouseActor } from "../services/warehouseAdminService.js";
 import { resolveStoredUpload } from "../services/uploadSecurity.js";
+import { CommandExecutor, CommandFoundationError } from "../modules/commands/commandFoundation.js";
 
 type WarehouseUser = WarehousePicker & {
   role: string;
@@ -57,6 +58,7 @@ export function createWarehouseRouter({
   const adminService = new WarehouseAdminService(db, logActivity, {
     claimLeaseSeconds: Number(process.env.WAREHOUSE_CLAIM_LEASE_SECONDS) || undefined,
   });
+  const commandExecutor = new CommandExecutor(db);
 
   const authenticate = (requiredPermissions: string | string[]) => (
     req: express.Request,
@@ -199,8 +201,40 @@ export function createWarehouseRouter({
     if (error instanceof WarehouseServiceError) {
       return errorResponse(res, error.statusCode, error.code, error.message);
     }
+    if (error instanceof CommandFoundationError) {
+      return errorResponse(res, error.statusCode, error.code, error.message);
+    }
     throw error;
   };
+
+  const requestHeader = (req: express.Request, name: string) => {
+    const value = req.headers[name];
+    return Array.isArray(value) ? value[0] : value;
+  };
+
+  const operationIdFromRequest = (req: express.Request) => String(
+    req.body?.idempotency_key || requestHeader(req, "idempotency-key") || "",
+  ).trim();
+
+  const commandRequest = (
+    req: express.Request,
+    res: express.Response,
+    commandType: string,
+    capability: string,
+    payload: Record<string, unknown>,
+  ) => ({
+    operationId: operationIdFromRequest(req),
+    commandType,
+    payload,
+    actor: {
+      human: { id: actor(res).id, name: actor(res).username },
+      service: req.panelApiKey ? { id: req.panelApiKey.id, name: req.panelApiKey.name } : undefined,
+    },
+    authorization: { decision: "ALLOW" as const, capability },
+    correlationId: requestHeader(req, "x-correlation-id"),
+    requestId: requestHeader(req, "x-request-id"),
+    requestMetadata: { method: req.method, route: req.route?.path || req.path },
+  });
 
   const queryText = (value: unknown, maxLength = 120) => {
     const source = Array.isArray(value) ? value[0] : value;
@@ -459,8 +493,20 @@ export function createWarehouseRouter({
   });
   router.post("/admin/locations/:id/print", authenticate("write:warehouse_status"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:manage_locations", "warehouse:print_labels"]), (req, res) => {
     try {
-      const result = adminService.queueLocationPrint(req.params.id, req.body || {}, actor(res));
-      res.json({ success: true, data: result, idempotent: result.idempotent });
+      const input = req.body || {};
+      const operationId = operationIdFromRequest(req);
+      const printerName = String(input.printer_name ?? "").trim().slice(0, 160) || null;
+      const outcome = commandExecutor.execute(commandRequest(
+        req,
+        res,
+        "warehouse.location-label.queue.v1",
+        "warehouse:print_labels|warehouse:manage_locations",
+        { location_id: req.params.id, printer_name: printerName },
+      ), () => {
+        const result = adminService.queueLocationPrint(req.params.id, { ...input, idempotency_key: operationId }, actor(res));
+        return { statusCode: 200, body: { success: true, data: result, idempotent: result.idempotent } };
+      });
+      res.status(outcome.result.statusCode).json(outcome.result.body);
     } catch (error) { return handleServiceError(res, error); }
   });
   router.get("/admin/warehouse-map", authenticate(["read:products", "read:warehouse_orders"]), requireWarehouseUser, requireWarehousePermission("warehouse:view_map"), (_req, res) => {
@@ -517,8 +563,21 @@ export function createWarehouseRouter({
   });
   router.post("/admin/moves", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:move_stock"), (req, res) => {
     try {
-      const result = adminService.movePackage(String(req.body?.package_code || ""), String(req.body?.location_code || ""), req.body || {}, actor(res));
-      res.json({ success: true, data: result, idempotent: result.idempotent });
+      const input = req.body || {};
+      const operationId = operationIdFromRequest(req);
+      const packageCode = String(input.package_code || "").trim().toLocaleUpperCase("tr-TR");
+      const locationCode = normalizeWarehouseLocationCode(input.location_code);
+      const outcome = commandExecutor.execute(commandRequest(
+        req,
+        res,
+        "warehouse.package.move.v1",
+        "warehouse:move_stock",
+        { package_code: packageCode, location_code: locationCode },
+      ), () => {
+        const result = adminService.movePackage(packageCode, locationCode, { ...input, idempotency_key: operationId }, actor(res));
+        return { statusCode: 200, body: { success: true, data: result, idempotent: result.idempotent } };
+      });
+      res.status(outcome.result.statusCode).json(outcome.result.body);
     } catch (error) { return handleServiceError(res, error); }
   });
   router.post("/admin/stock-counts", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:count_stock"), (req, res) => {

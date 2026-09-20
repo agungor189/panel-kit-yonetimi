@@ -246,6 +246,93 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     }
   });
 
+  test("temsilî move ve location-print commandları exact replay, payload conflict ve actor audit uygular", async () => {
+    db.prepare(`INSERT INTO panel_api_keys (id, name, key_prefix, key_hash, last4, permissions)
+      VALUES ('warehouse-command-key', 'Warehouse Command', 'test', 'command-secret', 'cret', ?)`)
+      .run(JSON.stringify(["read:products", "write:warehouse_status"]));
+    const batch = createImportedBatch(importRows({ "Paket Sayısı": 1, "Paket İçi Adet": 6, "Toplam Adet": 6 }));
+    const pkg = db.prepare("SELECT * FROM warehouse_packages WHERE batch_id = ?").get(batch.id) as any;
+    const locationA = service.createLocation({ code: "CMD-A", package_capacity: 2 }, actor) as any;
+    const locationB = service.createLocation({ code: "CMD-B", package_capacity: 2 }, actor) as any;
+    const locationC = service.createLocation({ code: "CMD-C", package_capacity: 2 }, actor) as any;
+    db.prepare("UPDATE warehouse_packages SET status = 'LABELED' WHERE id = ?").run(pkg.id);
+    service.placePackage(pkg.package_code, locationA.code, { idempotency_key: "command-place" }, actor);
+
+    const app = express();
+    app.use(express.json());
+    app.use("/api/warehouse/v1", createWarehouseRouter({
+      db, hashApiKey: (value) => value, logActivity: () => {}, uploadsDir: process.cwd(),
+      authenticateUserToken: (token) => token === "command-user" ? { ...actor, must_change_password: false } : null,
+    }));
+    const http = createServer(app);
+    await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
+    const address = http.address();
+    assert.ok(address && typeof address !== "string");
+    const call = (path: string, body: Record<string, unknown>) => fetch(`http://127.0.0.1:${address.port}/api/warehouse/v1${path}`, {
+      method: "POST",
+      headers: {
+        "x-api-key": "command-secret",
+        authorization: "Bearer command-user",
+        "content-type": "application/json",
+        "x-correlation-id": "warehouse-correlation",
+        "x-request-id": "warehouse-request",
+      },
+      body: JSON.stringify(body),
+    });
+
+    try {
+      const moveBody = { package_code: pkg.package_code, location_code: locationB.code, idempotency_key: "command-move" };
+      const firstMove = await call("/admin/moves", moveBody);
+      const firstMoveJson = await firstMove.json() as any;
+      assert.equal(firstMove.status, 200);
+      const replayMove = await call("/admin/moves", moveBody);
+      assert.equal(replayMove.status, 200);
+      assert.deepEqual(await replayMove.json(), firstMoveJson);
+
+      const conflictMove = await call("/admin/moves", { ...moveBody, location_code: locationC.code });
+      assert.equal(conflictMove.status, 409);
+      assert.equal((await conflictMove.json() as any).error.code, "IDEMPOTENCY_KEY_CONFLICT");
+      assert.equal((db.prepare("SELECT COUNT(*) FROM package_placements WHERE action = 'MOVE'").pluck().get()), 1);
+
+      const printBody = { idempotency_key: "command-location-print", printer_name: "dry-run-printer" };
+      const firstPrint = await call(`/admin/locations/${locationC.id}/print`, printBody);
+      const firstPrintJson = await firstPrint.json() as any;
+      assert.equal(firstPrint.status, 200);
+      const replayPrint = await call(`/admin/locations/${locationC.id}/print`, printBody);
+      assert.equal(replayPrint.status, 200);
+      assert.deepEqual(await replayPrint.json(), firstPrintJson);
+      const conflictPrint = await call(`/admin/locations/${locationC.id}/print`, { ...printBody, printer_name: "other-printer" });
+      assert.equal(conflictPrint.status, 409);
+      assert.equal((db.prepare("SELECT COUNT(*) FROM label_print_jobs WHERE idempotency_key = 'command-location-print'").pluck().get()), 1);
+
+      const audits = db.prepare(`SELECT human_actor_id, human_actor_name, service_actor_id, service_actor_name,
+        correlation_id, request_id, command_type FROM command_audit_log ORDER BY command_type`).all() as any[];
+      assert.deepEqual(audits, [
+        {
+          human_actor_id: actor.id,
+          human_actor_name: actor.username,
+          service_actor_id: "warehouse-command-key",
+          service_actor_name: "Warehouse Command",
+          correlation_id: "warehouse-correlation",
+          request_id: "warehouse-request",
+          command_type: "warehouse.location-label.queue.v1",
+        },
+        {
+          human_actor_id: actor.id,
+          human_actor_name: actor.username,
+          service_actor_id: "warehouse-command-key",
+          service_actor_name: "Warehouse Command",
+          correlation_id: "warehouse-correlation",
+          request_id: "warehouse-request",
+          command_type: "warehouse.package.move.v1",
+        },
+      ]);
+      assert.equal(db.prepare("SELECT COUNT(*) FROM command_operations").pluck().get(), 2);
+    } finally {
+      await new Promise<void>((resolve, reject) => http.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   test("service key tek başına hiçbir user-facing Warehouse route'una erişemez", async () => {
     db.prepare(`INSERT INTO panel_api_keys (id, name, key_prefix, key_hash, last4, permissions)
       VALUES ('warehouse-all-scope', 'Warehouse All Scope', 'test', 'all-scope-secret', 'cret', ?)`)
