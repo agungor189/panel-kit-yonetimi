@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { api } from '../../lib/api';
+import React, { useState, useEffect, useRef } from 'react';
+import { api, createRetryOperation } from '../../lib/api';
 import { ArrowLeft, User, Phone, MapPin, Truck, Hash, Search, Plus, Trash2, Package, AlertTriangle, CheckCircle2, Layers } from 'lucide-react';
 
 const DEFAULT_SALES_CHANNELS = ['Satış Sistemi', 'Website', 'Trendyol', 'Hepsiburada', 'Amazon', 'N11'];
@@ -7,6 +7,7 @@ const DEFAULT_PENDING_CHANNELS = ['Trendyol', 'Hepsiburada', 'Amazon', 'N11'];
 const DIRECT_SALES_CHANNELS = ['Satış Sistemi', 'Website'];
 
 export default function SalesForm({ onBack }: { onBack: () => void }) {
+  const createSaleOperation = useRef(createRetryOperation('sale-create'));
   const [formData, setFormData] = useState({
     customer_name: '',
     customer_phone: '',
@@ -256,23 +257,27 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
       return alert(`BOM komponent stoğu yetersiz: ${bomShortage.component_sku} için gerekli ${bomShortage.required}, mevcut ${bomShortage.current_stock}.`);
     }
     
+    const salePayload = {
+      ...formData,
+      external_order_id: formData.external_order_id.trim(),
+      total_quantity: totalQuantity,
+      total_weight: totalWeight,
+      total_amount: totalAmount,
+      items: selectedItems.map(item => ({
+        ...item,
+        weight: item.weight_per_unit * item.quantity,
+        price: parseFloat(item.sale_price)
+      }))
+    };
+    const operationId = createSaleOperation.current.idFor(salePayload);
+
     setSaving(true);
     try {
-      const response = await api.post('/sales', {
-        ...formData,
-        external_order_id: formData.external_order_id.trim(),
-        total_quantity: totalQuantity,
-        total_weight: totalWeight,
-        total_amount: totalAmount,
-        items: selectedItems.map(item => ({
-          ...item,
-          weight: item.weight_per_unit * item.quantity,
-          price: parseFloat(item.sale_price)
-        }))
-      });
+      const response = await api.post('/sales', salePayload, { operationId });
       if (response.success === false) {
         alert(response.error || 'Satış oluşturulurken bir hata oluştu');
       } else {
+        createSaleOperation.current.complete(operationId);
         alert(response.message || 'Satış başarıyla kaydedildi.');
         onBack();
       }

@@ -1,7 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { X, Save, Edit3, MapPin, Truck, Hash, User, Package, CheckCircle, AlertCircle, RotateCcw } from 'lucide-react';
 import { useCurrency } from '../../CurrencyContext';
-import { api } from '../../lib/api';
+import { api, createRetryOperation } from '../../lib/api';
 import { useAuth } from '../../App';
 
 type SaleDetailFormData = {
@@ -51,6 +51,7 @@ const getSaleStatusClass = (status?: string) => {
 };
 
 export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: any, onClose: () => void, onUpdated?: (sale: any) => void }) {
+  const updateSaleOperation = useRef(createRetryOperation('sale-update'));
   const { isReadOnly } = useAuth();
   const { FormatAmount } = useCurrency();
   const [isEditing, setIsEditing] = useState(false);
@@ -106,19 +107,23 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
       return;
     }
 
+    const salePayload = {
+      ...formData,
+      customer_name: formData.customer_name.trim(),
+      customer_phone: formData.customer_phone.trim(),
+      customer_address: formData.customer_address.trim(),
+      external_order_id: formData.external_order_id.trim(),
+      shipping_company: formData.shipping_company.trim(),
+      tracking_number: formData.tracking_number.trim(),
+    };
+    const operationId = updateSaleOperation.current.idFor(salePayload);
+
     setSaving(true);
     setError('');
     setSaved(false);
     try {
-      const res = await api.put(`/sales/${currentSale.id}`, {
-        ...formData,
-        customer_name: formData.customer_name.trim(),
-        customer_phone: formData.customer_phone.trim(),
-        customer_address: formData.customer_address.trim(),
-        external_order_id: formData.external_order_id.trim(),
-        shipping_company: formData.shipping_company.trim(),
-        tracking_number: formData.tracking_number.trim(),
-      });
+      const res = await api.put(`/sales/${currentSale.id}`, salePayload, { operationId });
+      updateSaleOperation.current.complete(operationId);
       const updatedSale = res.sale || { ...currentSale, ...formData };
       setCurrentSale(updatedSale);
       setFormData(buildFormData(updatedSale));

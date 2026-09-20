@@ -12,6 +12,7 @@ import { CatalogService } from "../modules/catalog/catalogService.js";
 import { ExchangeRateService } from "../modules/finance/exchangeRates.js";
 import { InventoryService } from "../modules/inventory/inventoryService.js";
 import { ProcurementService } from "../modules/procurement/procurementService.js";
+import { api, createRetryOperation } from "../../src/lib/api.js";
 
 const panelRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
 
@@ -86,6 +87,8 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
   let output = "";
   child.stdout!.on("data", (chunk) => { output += chunk.toString(); });
   child.stderr!.on("data", (chunk) => { output += chunk.toString(); });
+  const nativeFetch = globalThis.fetch;
+  let browserClientInstalled = false;
 
   try {
     await new Promise<void>((resolve, reject) => {
@@ -97,18 +100,26 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
       };
       poll();
     });
-    const login = await fetch(`${base}/api/auth/login`, {
+    const login = await nativeFetch(`${base}/api/auth/login`, {
       method: "POST", headers: { "content-type": "application/json", origin: base },
       body: JSON.stringify({ username: "admin", password: "password-1" }),
     });
     assert.equal(login.status, 200);
     const cookie = (login.headers.get("set-cookie") || "").split(";", 1)[0];
     assert.ok(cookie);
-    const request = (url: string, operationId: string, body: unknown, method = "POST") => fetch(`${base}${url}`, {
+    const request = (url: string, operationId: string, body: unknown, method = "POST") => nativeFetch(`${base}${url}`, {
       method,
       headers: { "content-type": "application/json", origin: base, cookie, "x-operation-id": operationId },
       body: JSON.stringify(body),
     });
+    globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      headers.set("origin", base);
+      headers.set("cookie", cookie);
+      const target = String(input).startsWith("/") ? `${base}${String(input)}` : input;
+      return nativeFetch(target, { ...init, headers });
+    }) as typeof fetch;
+    browserClientInstalled = true;
     const saleBody = {
       customer_name: "Inventory customer", total_amount: 100, total_quantity: 2, cash_account_id: "cash", platform: "Satış Sistemi",
       items: [
@@ -117,9 +128,9 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
       ],
     };
 
-    const created = await request("/api/sales", "sale-create-1", saleBody);
-    assert.equal(created.status, 201, `${await created.clone().text()}\n${output}`);
-    const createdBody = await created.json() as any;
+    const createOperation = createRetryOperation("sale-create");
+    const createOperationId = createOperation.idFor(saleBody);
+    const createdBody = await api.post("/sales", saleBody, { operationId: createOperationId }) as any;
     assert.equal(createdBody.idempotent, false);
     const saleId = createdBody.id as string;
     const reservationId = `sale-reservation:${saleId}`;
@@ -129,10 +140,14 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
     assert.deepEqual(inspect.prepare("SELECT product_id AS productId,quantity_base_int AS quantity FROM inventory_reservation_lines WHERE reservation_id=?").all(reservationId), [{ productId: "component", quantity: 5 }]);
     assert.equal(inspect.prepare("SELECT central_stock FROM products WHERE id='component'").pluck().get(), 10);
 
-    const replay = await request("/api/sales", "sale-create-1", saleBody);
-    assert.equal(replay.status, 201);
-    assert.equal((await replay.json() as any).idempotent, true);
+    const replay = await api.post("/sales", saleBody, { operationId: createOperation.idFor(saleBody) }) as any;
+    assert.equal(replay.idempotent, true);
     assert.equal(inspect.prepare("SELECT COUNT(*) FROM sales").pluck().get(), 1);
+
+    const updatePayload = { customer_name: "Updated inventory customer", status: "Hazırlanıyor" };
+    const updateOperation = createRetryOperation("sale-update");
+    const updated = await api.put(`/sales/${saleId}`, updatePayload, { operationId: updateOperation.idFor(updatePayload) }) as any;
+    assert.equal(updated.sale.customer_name, "Updated inventory customer");
 
     const shortage = await request("/api/sales", "sale-shortage", { ...saleBody, items: [{ product_id: "kit-a", product_name: "Kit A", quantity: 3, price: 50 }] });
     assert.equal(shortage.status, 409);
@@ -140,8 +155,10 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
     assert.equal(inspect.prepare("SELECT COUNT(*) FROM sales").pluck().get(), 1);
     assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_operations WHERE operation_id='sale-shortage'").pluck().get(), 0);
 
-    const cancelled = await request(`/api/sales/${saleId}/status`, "sale-cancel-1", { status: "İptal Edildi" }, "PATCH");
-    assert.equal(cancelled.status, 200, await cancelled.text());
+    const cancellationPayload = { status: "İptal Edildi" };
+    const cancellationOperation = createRetryOperation("sale-cancel");
+    const cancelled = await api.patch(`/sales/${saleId}/status`, cancellationPayload, { operationId: cancellationOperation.idFor(cancellationPayload) }) as any;
+    assert.equal(cancelled.sale.status, "İptal Edildi");
     assert.deepEqual(inspect.prepare("SELECT on_hand_base_int AS onHand,reserved_base_int AS reserved FROM inventory_lots WHERE product_id='component'").get(), { onHand: 10, reserved: 0 });
 
     const dispatchedSale = await request("/api/sales", "sale-create-2", { ...saleBody, items: [{ product_id: "kit-a", product_name: "Kit A", quantity: 1, price: 100 }] });
@@ -163,10 +180,11 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
     assert.equal(legacyAdjust.status, 409, await legacyAdjust.clone().text());
     assert.equal((await legacyAdjust.json() as any).error.code, "STOCK_ADJUSTMENT_REQUIRES_LOT_CORRECTION");
     assert.equal(inspect.prepare("SELECT central_stock FROM products WHERE id='component'").pluck().get(), 8);
-    assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_audit_log WHERE operation_id IN ('sale-create-1','sale-cancel-1','sale-create-2','sale-return-2')").pluck().get(), 4);
-    assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_outbox WHERE operation_record_id IN (SELECT id FROM command_operations WHERE operation_id IN ('sale-create-1','sale-cancel-1','sale-create-2','sale-return-2'))").pluck().get(), 7);
+    assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_audit_log WHERE operation_id IN (?,?,?,'sale-create-2','sale-return-2')").pluck().get(createOperationId, updateOperation.idFor(updatePayload), cancellationOperation.idFor(cancellationPayload)), 5);
+    assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_outbox WHERE operation_record_id IN (SELECT id FROM command_operations WHERE operation_id IN (?,?,?,'sale-create-2','sale-return-2'))").pluck().get(createOperationId, updateOperation.idFor(updatePayload), cancellationOperation.idFor(cancellationPayload)), 8);
     inspect.close();
   } finally {
+    if (browserClientInstalled) globalThis.fetch = nativeFetch;
     await stop(child);
     fs.rmSync(temporaryDirectory, { recursive: true, force: true });
   }
