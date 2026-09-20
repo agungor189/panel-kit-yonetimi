@@ -2469,8 +2469,11 @@ function validateAppliedMigrations(db: Database.Database, manifest: MigrationMan
   return applied;
 }
 
-export function runMigrations(db: Database.Database): void {
+export function runMigrations(db: Database.Database, targetVersion = CURRENT_SCHEMA_VERSION): void {
   const manifest = validateMigrationDefinitions();
+  if (!manifest.some(({ version }) => version === targetVersion)) {
+    throw new Error(`Unsupported migration target v${targetVersion}`);
+  }
   ensureMigrationTable(db);
   const applied = validateAppliedMigrations(db, manifest);
 
@@ -2481,6 +2484,7 @@ export function runMigrations(db: Database.Database): void {
   let applied_count = 0;
 
   for (const migration of migrations) {
+    if (migration.version > targetVersion) continue;
     if (applied.has(migration.version)) continue;
 
     db.transaction(() => {

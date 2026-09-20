@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import Database from "better-sqlite3";
 import { initializeDatabase } from "./initialize.js";
+import { applySchema } from "./schema.js";
 import { CURRENT_SCHEMA_VERSION, getMigrationManifest, runMigrations, SUPPORTED_UPGRADE_STARTS } from "../migrations/runner.js";
 
 const count = (db: Database.Database, table: string): number => Number(
@@ -111,3 +112,32 @@ test("migration history fails closed on unknown, renamed or changed entries", ()
   assert.throws(() => runMigrations(changed), /Migration v1 checksum mismatch/);
   changed.close();
 });
+
+for (const start of SUPPORTED_UPGRADE_STARTS) {
+  test(`supported v${start} fixture converges exactly and repeatably to v${CURRENT_SCHEMA_VERSION}`, () => {
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    applySchema(db);
+    const manifest = getMigrationManifest();
+    const markApplied = db.prepare("INSERT INTO schema_migrations (version, name) VALUES (?, ?)");
+    for (const migration of manifest.filter(({ version }) => version <= SUPPORTED_UPGRADE_STARTS[0])) {
+      markApplied.run(migration.version, migration.name);
+    }
+    if (start > SUPPORTED_UPGRADE_STARTS[0]) runMigrations(db, start);
+    db.prepare("INSERT INTO products (id, title, product_type) VALUES (?, ?, ?)")
+      .run(`fixture-v${start}`, `Synthetic v${start} product`, "simple");
+
+    runMigrations(db);
+    assert.deepEqual(
+      db.prepare("SELECT version, name, checksum FROM schema_migrations ORDER BY version").all(),
+      manifest,
+    );
+    assert.equal(count(db, "products"), 1, "supported upgrade must preserve fixture business data");
+    runMigrations(db);
+    assert.deepEqual(
+      db.prepare("SELECT version, name, checksum FROM schema_migrations ORDER BY version").all(),
+      manifest,
+    );
+    db.close();
+  });
+}
