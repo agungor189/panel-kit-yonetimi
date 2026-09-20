@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type Database from "better-sqlite3";
-import { inspectUpload, removeStoredUpload, resolveStoredUpload } from "./uploadSecurity.js";
+import { ensureOwnedUploadDirectory, inspectUpload, removeStoredUpload, resolveStoredUpload } from "./uploadSecurity.js";
 
 export const PRODUCT_IMAGE_MAX_FILE_SIZE = 8 * 1024 * 1024;
 export { PRODUCT_IMAGE_SERVER_BATCH_LIMIT as PRODUCT_IMAGE_MAX_FILES } from "../../shared/productImageBatch";
@@ -82,16 +82,7 @@ function isInside(root: string, candidate: string): boolean {
 }
 
 export function ensureProductImageDirectory(uploadsDir: string): string {
-  const uploadsRoot = path.resolve(uploadsDir);
-  fs.mkdirSync(uploadsRoot, { recursive: true });
-  const uploadsRootReal = fs.realpathSync(uploadsRoot);
-  const productsDir = path.resolve(uploadsRoot, "products");
-  fs.mkdirSync(productsDir, { recursive: true });
-  const productsDirReal = fs.realpathSync(productsDir);
-  if (!isInside(uploadsRootReal, productsDirReal)) {
-    throw new Error("Product image directory escapes the server-owned upload root");
-  }
-  return productsDirReal;
+  return ensureOwnedUploadDirectory(uploadsDir, "products");
 }
 
 function safeStagedPath(productsDir: string, stagedPath: string): string | null {
@@ -129,11 +120,11 @@ export function cleanupStagedProductImages(uploadsDir: string, files: readonly S
   }
 }
 
-export function importProductImages(
+export async function importProductImages(
   db: Database.Database,
   uploadsDir: string,
   files: readonly StagedProductImage[],
-): ProductImageImportReport {
+): Promise<ProductImageImportReport> {
   const productsDir = ensureProductImageDirectory(uploadsDir);
 
   const findProduct = db.prepare(`
@@ -177,7 +168,7 @@ export function importProductImages(
       continue;
     }
 
-    const contentInspection = inspectUpload(
+    const contentInspection = await inspectUpload(
       file.originalname,
       file.mimetype,
       fs.readFileSync(stagedPath),

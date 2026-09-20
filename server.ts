@@ -64,7 +64,7 @@ import {
   importProductImages,
   inspectProductImageFile,
 } from "./server/services/productImageImport.js";
-import { persistUpload, removeStoredUploadReference } from "./server/services/uploadSecurity.js";
+import { ensureOwnedUploadRoot, persistUpload, removeStoredUpload, removeStoredUploadReference } from "./server/services/uploadSecurity.js";
 import { PRODUCT_TYPES, canonicalProductType, parseReserveLocations } from "./shared/productCsvMapping.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -132,10 +132,7 @@ function decryptText(cipherText: string): string {
 const hashApiKey = createApiKeyHasher(process.env.PANEL_API_HASH_SECRET!);
 
 // Ensure uploads directory exists
-const uploadsDir = path.join(process.cwd(), "uploads");
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir);
-}
+const uploadsDir = ensureOwnedUploadRoot(path.join(process.cwd(), "uploads"));
 
 // Database initialization — path is configurable via DB_PATH env var.
 // Docker volumes: set DB_PATH=/data/dsdst_panel.db and mount /data as a volume.
@@ -221,9 +218,11 @@ function persistRequestUpload(file: Express.Multer.File, folder: string, prefix:
   });
 }
 
-function cleanupPersistedUploads(files: readonly { absolutePath: string }[]) {
+type StoredRequestUpload = Awaited<ReturnType<typeof persistRequestUpload>>;
+
+function cleanupPersistedUploads(files: readonly Pick<StoredRequestUpload, "publicPath">[]) {
   for (const file of files) {
-    try { fs.unlinkSync(file.absolutePath); } catch (_) {}
+    try { removeStoredUpload(uploadsDir, file.publicPath); } catch (_) {}
   }
 }
 // 500 MB max backup restore size — prevents disk exhaustion from malicious / corrupt uploads.
@@ -2736,7 +2735,7 @@ async function startServer() {
 
   // Images Upload
   app.post("/api/products/images/bulk", (req: any, res) => {
-    bulkProductImageUpload.array("images", PRODUCT_IMAGE_MAX_FILES)(req, res, (uploadError: any) => {
+    bulkProductImageUpload.array("images", PRODUCT_IMAGE_MAX_FILES)(req, res, async (uploadError: any) => {
       const files = Array.isArray(req.files) ? req.files as Express.Multer.File[] : [];
       if (uploadError) {
         cleanupStagedProductImages(uploadsDir, files);
@@ -2752,7 +2751,7 @@ async function startServer() {
       }
 
       try {
-        const report = importProductImages(db, uploadsDir, files);
+        const report = await importProductImages(db, uploadsDir, files);
         logActivity("BULK_PRODUCT_IMAGES_UPLOADED", "product_image", "bulk", {
           total: report.total,
           uploaded: report.uploaded,
@@ -2768,7 +2767,7 @@ async function startServer() {
     });
   });
 
-  app.post("/api/products/:id/images", upload.array("images", 12), (req: any, res) => {
+  app.post("/api/products/:id/images", upload.array("images", 12), async (req: any, res) => {
     const files = (Array.isArray(req.files) ? req.files : []) as Express.Multer.File[];
     const productId = req.params.id;
     if (!files.length) return res.status(400).json({ success: false, error: { code: "IMAGES_REQUIRED", message: "En az bir görsel seçilmelidir." } });
@@ -2776,9 +2775,9 @@ async function startServer() {
       return res.status(404).json({ success: false, error: { code: "PRODUCT_NOT_FOUND", message: "Ürün bulunamadı." } });
     }
 
-    const stored: ReturnType<typeof persistRequestUpload>[] = [];
+    const stored: StoredRequestUpload[] = [];
     try {
-      for (const file of files) stored.push(persistRequestUpload(file, "products", "product"));
+      for (const file of files) stored.push(await persistRequestUpload(file, "products", "product"));
       db.transaction(() => {
         const stmt = db.prepare("INSERT INTO product_images (id, product_id, path, sort_order) VALUES (?, ?, ?, ?)");
         const lastOrder = db.prepare("SELECT MAX(sort_order) as max FROM product_images WHERE product_id = ?").get(productId) as any;
@@ -2800,6 +2799,8 @@ async function startServer() {
       });
       if (removal.status === "rejected") {
         logActivity("UNSAFE_UPLOAD_PATH_REJECTED", "product_image", req.params.id, { reason: removal.reason }, req.user?.id);
+      } else if (removal.status === "cleanup_pending") {
+        logActivity("UPLOAD_DELETE_CLEANUP_PENDING", "product_image", req.params.id, {}, req.user?.id);
       }
     }
     res.json({ success: true });
@@ -3076,14 +3077,14 @@ async function startServer() {
     }
   });
 
-  app.post("/api/expenses/:id/attachments", expenseUpload.single("file"), (req, res) => {
+  app.post("/api/expenses/:id/attachments", expenseUpload.single("file"), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
     const attId = uuidv4();
-    let stored: ReturnType<typeof persistRequestUpload> | null = null;
+    let stored: StoredRequestUpload | null = null;
 
     try {
-      stored = persistRequestUpload(req.file, "expenses", "expense", true);
+      stored = await persistRequestUpload(req.file, "expenses", "expense", true);
       db.prepare(`
         INSERT INTO expense_attachments (id, expense_id, file_name, file_path, mime_type, file_size)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -3108,6 +3109,8 @@ async function startServer() {
       });
       if (removal.status === "rejected") {
         logActivity("UNSAFE_UPLOAD_PATH_REJECTED", "expense_attachment", req.params.attachmentId, { reason: removal.reason }, req.user?.id);
+      } else if (removal.status === "cleanup_pending") {
+        logActivity("UPLOAD_DELETE_CLEANUP_PENDING", "expense_attachment", req.params.attachmentId, {}, req.user?.id);
       }
     } else {
       db.prepare("DELETE FROM expense_attachments WHERE id = ?").run(req.params.attachmentId);
@@ -5285,13 +5288,13 @@ async function startServer() {
 
   // Kit module images intentionally use the same safe image pipeline as the
   // product catalogue, while staying outside products/product_images.
-  app.post("/api/kits/:id/image", upload.single("image"), (req: any, res) => {
+  app.post("/api/kits/:id/image", upload.single("image"), async (req: any, res) => {
     const kit = db.prepare("SELECT id FROM kits WHERE id = ?").get(req.params.id);
     if (!kit) return res.status(404).json({ error: "Kit bulunamadı" });
     if (!req.file) return res.status(400).json({ error: "Görsel seçilmedi" });
-    let stored: ReturnType<typeof persistRequestUpload> | null = null;
+    let stored: StoredRequestUpload | null = null;
     try {
-      stored = persistRequestUpload(req.file, "kits", "kit");
+      stored = await persistRequestUpload(req.file, "kits", "kit");
       db.prepare("UPDATE kits SET cover_image = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(stored.publicPath, req.params.id);
       res.json({ success: true, cover_image: stored.publicPath });
     } catch (error: any) {
@@ -5299,13 +5302,13 @@ async function startServer() {
       res.status(error?.statusCode || 500).json({ success: false, error: { code: error?.code || "UPLOAD_FAILED", message: error?.message || "Görsel yüklenemedi." } });
     }
   });
-  app.post("/api/kits/complementary-products/:id/image", upload.single("image"), (req: any, res) => {
+  app.post("/api/kits/complementary-products/:id/image", upload.single("image"), async (req: any, res) => {
     const product = db.prepare("SELECT id FROM complementary_products WHERE id = ?").get(req.params.id);
     if (!product) return res.status(404).json({ error: "Tamamlayıcı ürün bulunamadı" });
     if (!req.file) return res.status(400).json({ error: "Görsel seçilmedi" });
-    let stored: ReturnType<typeof persistRequestUpload> | null = null;
+    let stored: StoredRequestUpload | null = null;
     try {
-      stored = persistRequestUpload(req.file, "complementary-products", "complementary");
+      stored = await persistRequestUpload(req.file, "complementary-products", "complementary");
       const nextOrder = Number((db.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM complementary_product_images WHERE complementary_product_id = ?").get(req.params.id) as any)?.next_order || 0);
       db.transaction(() => {
         db.prepare("INSERT INTO complementary_product_images (id, complementary_product_id, path, sort_order) VALUES (?, ?, ?, ?)").run(uuidv4(), req.params.id, stored!.publicPath, nextOrder);
@@ -5317,14 +5320,14 @@ async function startServer() {
       res.status(error?.statusCode || 500).json({ success: false, error: { code: error?.code || "UPLOAD_FAILED", message: error?.message || "Görsel yüklenemedi." } });
     }
   });
-  app.post("/api/kits/complementary-products/:id/images", upload.array("images", 12), (req: any, res) => {
+  app.post("/api/kits/complementary-products/:id/images", upload.array("images", 12), async (req: any, res) => {
     const product = db.prepare("SELECT id, cover_image FROM complementary_products WHERE id = ?").get(req.params.id) as any;
     if (!product) return res.status(404).json({ error: "Tamamlayıcı ürün bulunamadı" });
     const files = (Array.isArray(req.files) ? req.files : []) as Express.Multer.File[];
     if (!files.length) return res.status(400).json({ error: "Görsel seçilmedi" });
-    const stored: ReturnType<typeof persistRequestUpload>[] = [];
+    const stored: StoredRequestUpload[] = [];
     try {
-      for (const file of files) stored.push(persistRequestUpload(file, "complementary-products", "complementary"));
+      for (const file of files) stored.push(await persistRequestUpload(file, "complementary-products", "complementary"));
       let nextOrder = Number((db.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM complementary_product_images WHERE complementary_product_id = ?").get(req.params.id) as any)?.next_order || 0);
       const images = stored.map((file) => ({ id: uuidv4(), path: file.publicPath, sort_order: nextOrder++ }));
       const coverImage = product.cover_image || images[0]?.path || null;
@@ -5524,7 +5527,7 @@ async function startServer() {
     "/api/public/expenses/:id/attachments",
     publicApiAuth("expenses:write"),
     expenseUpload.single("file"),
-    (req, res) => {
+    async (req, res) => {
       if (!req.file) return res.status(400).json({ success: false, error: { code: 'NO_FILE', message: 'Dosya yüklenmedi.' } });
 
       const expense = db.prepare("SELECT id FROM transactions WHERE id = ? AND type = 'Expense'").get(req.params.id) as any;
@@ -5533,9 +5536,9 @@ async function startServer() {
       }
 
       const attId = uuidv4();
-      let stored: ReturnType<typeof persistRequestUpload> | null = null;
+      let stored: StoredRequestUpload | null = null;
       try {
-        stored = persistRequestUpload(req.file, "expenses", "expense", true);
+        stored = await persistRequestUpload(req.file, "expenses", "expense", true);
         db.prepare(`
           INSERT INTO expense_attachments (id, expense_id, file_name, file_path, mime_type, file_size)
           VALUES (?, ?, ?, ?, ?, ?)
