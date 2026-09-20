@@ -8,10 +8,14 @@ if (process.env.NODE_ENV !== "test" || process.env.E2E_ALLOW_SEED !== "true") {
 }
 
 const dbPath = process.env.DB_PATH;
-const clearApiKey = process.env.E2E_WAREHOUSE_API_KEY;
+const serviceKeys = {
+  warehouse: process.env.E2E_WAREHOUSE_API_KEY,
+  kitStudio: process.env.E2E_KIT_STUDIO_API_KEY,
+  labelPrinter: process.env.E2E_LABEL_PRINTER_API_KEY,
+};
 const hashSecret = process.env.PANEL_API_HASH_SECRET;
-if (!dbPath || !clearApiKey || !hashSecret) {
-  throw new Error("DB_PATH, E2E_WAREHOUSE_API_KEY and PANEL_API_HASH_SECRET are required.");
+if (!dbPath || !hashSecret || Object.values(serviceKeys).some((value) => !value)) {
+  throw new Error("DB_PATH, E2E_WAREHOUSE_API_KEY, E2E_KIT_STUDIO_API_KEY, E2E_LABEL_PRINTER_API_KEY and PANEL_API_HASH_SECRET are required.");
 }
 
 const db = openDatabase(dbPath);
@@ -38,23 +42,19 @@ db.prepare(`
     is_active = 1
 `).run();
 
-const permissions = [
-  "read:warehouse_orders",
-  "read:products",
-  "read:bom",
-  "write:warehouse_status",
-  "kit-catalog:read",
+const authScopes = ["auth:login", "auth:session:validate", "auth:session:revoke", "auth:password:change"];
+const principals = [
+  { id: "operations-e2e-warehouse", name: "Operations E2E Warehouse", key: serviceKeys.warehouse!, permissions: [...authScopes, "read:warehouse_orders", "read:products", "read:bom", "write:warehouse_status"] },
+  { id: "operations-e2e-kit", name: "Operations E2E Kit Studio", key: serviceKeys.kitStudio!, permissions: [...authScopes, "kit-catalog:read"] },
+  { id: "operations-e2e-label", name: "Operations E2E Label Printer", key: serviceKeys.labelPrinter!, permissions: authScopes },
 ];
-const keyHash = crypto.createHmac("sha256", hashSecret).update(clearApiKey).digest("hex");
-const keyPrefix = clearApiKey.slice(0, 12);
-const last4 = clearApiKey.slice(-4);
-
-db.prepare(`
+const upsertPrincipal = db.prepare(`
   INSERT INTO panel_api_keys
     (id, name, key_prefix, key_hash, last4, status, environment, permissions)
   VALUES
-    ('operations-e2e', 'Operations E2E', ?, ?, ?, 'active', 'test', ?)
+    (?, ?, ?, ?, ?, 'active', 'test', ?)
   ON CONFLICT(id) DO UPDATE SET
+    name = excluded.name,
     key_prefix = excluded.key_prefix,
     key_hash = excluded.key_hash,
     last4 = excluded.last4,
@@ -63,7 +63,11 @@ db.prepare(`
     updated_at = CURRENT_TIMESTAMP,
     deleted_at = NULL,
     revoked_at = NULL
-`).run(keyPrefix, keyHash, last4, JSON.stringify(permissions));
+`);
+for (const principal of principals) {
+  const keyHash = crypto.createHmac("sha256", hashSecret).update(principal.key).digest("hex");
+  upsertPrincipal.run(principal.id, principal.name, principal.key.slice(0, 12), keyHash, principal.key.slice(-4), JSON.stringify(principal.permissions));
+}
 
 db.prepare("UPDATE exchange_rates SET is_active = 0").run();
 db.prepare(`

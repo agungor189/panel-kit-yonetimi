@@ -14,6 +14,7 @@ test("KNOWN BUSINESS RED: logout revokes the exact issued session", async () => 
   const auth = createAuthModule({
     db,
     jwtSecret: "known-red-jwt-secret-with-at-least-32-characters",
+    hashApiKey: (value) => value,
     logActivity() {},
     logger: { warn() {}, error() {} },
   });

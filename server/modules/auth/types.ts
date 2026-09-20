@@ -4,6 +4,7 @@ export type AuthenticatedUser = {
   role: string;
   permissions: Record<string, unknown>;
   must_change_password: boolean;
+  session_epoch: number;
 };
 
 declare global {
@@ -15,7 +16,11 @@ declare global {
         name: string;
         permissions: string[];
       };
+      servicePrincipal?: {
+        id: string;
+        name: string;
+        scopes: string[];
+      };
     }
   }
 }
-

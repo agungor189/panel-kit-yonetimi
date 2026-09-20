@@ -2406,13 +2406,40 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 62,
+    name: "add_revocable_user_sessions",
+    up(db) {
+      const userColumns = new Set((db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map(({ name }) => name));
+      if (!userColumns.has("session_epoch")) {
+        db.exec("ALTER TABLE users ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0");
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS user_sessions (
+          id                   TEXT PRIMARY KEY,
+          user_id              TEXT NOT NULL,
+          session_epoch        INTEGER NOT NULL,
+          service_principal_id TEXT,
+          expires_at           DATETIME NOT NULL,
+          revoked_at           DATETIME,
+          revoked_reason       TEXT,
+          created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
+          last_seen_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+          FOREIGN KEY(service_principal_id) REFERENCES panel_api_keys(id) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_sessions_user_active
+          ON user_sessions(user_id, revoked_at, expires_at);
+      `);
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 61;
+export const CURRENT_SCHEMA_VERSION = 62;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),
-  ...Array.from({ length: 20 }, (_, index) => index + 42),
+  ...Array.from({ length: 21 }, (_, index) => index + 42),
 ] as const;
 const fixtureDirectory = fileURLToPath(new URL("../db/fixtures/", import.meta.url));
 

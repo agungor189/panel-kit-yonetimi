@@ -3,155 +3,220 @@ import type Database from "better-sqlite3";
 import express, { type NextFunction, type Request, type Response } from "express";
 import rateLimit from "express-rate-limit";
 import jwt from "jsonwebtoken";
-import { parseUserPermissions } from "./permissions.js";
+import { randomUUID } from "node:crypto";
+import { parseUserPermissions, userHasCapability } from "./permissions.js";
 import type { AuthenticatedUser } from "./types.js";
 
-type ActivityWriter = (
-  action: string,
-  entityType: string,
-  entityId: string,
-  details?: unknown,
-  userId?: string,
-) => void;
-
+type ActivityWriter = (action: string, entityType: string, entityId: string, details?: unknown, userId?: string) => void;
 type AuthLogger = {
   warn: (category: string, message: string, data?: unknown) => void;
   error: (category: string, message: string, error?: unknown) => void;
 };
-
 type AuthModuleDependencies = {
   db: Database.Database;
   jwtSecret: string;
+  hashApiKey: (clearKey: string) => string;
   logActivity: ActivityWriter;
   logger: AuthLogger;
 };
+type SessionClaims = { id?: string; sid?: string; epoch?: number };
+type ServicePrincipal = { id: string; name: string; scopes: string[] };
+type AuthenticatedSession = { user: AuthenticatedUser; sessionId: string; servicePrincipalId: string | null };
 
+const SESSION_MAX_AGE_SECONDS = 12 * 60 * 60;
 const isSelfAuthenticatedRoute = (path: string) =>
-  path.startsWith("/auth/") ||
-  path.startsWith("/public/") ||
-  path.startsWith("/warehouse/") ||
-  path.startsWith("/kit-catalog/");
+  path.startsWith("/auth/") || path.startsWith("/public/") || path.startsWith("/warehouse/") || path.startsWith("/kit-catalog/");
+const bearerToken = (req: Request) => {
+  const header = req.headers.authorization;
+  return header?.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+};
+const errorResponse = (res: Response, status: number, code: string, message: string) =>
+  res.status(status).json({ success: false, error: { code, message } });
+const parseScopes = (raw: unknown): string[] => {
+  try {
+    const value = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+};
 
-export function createAuthModule({ db, jwtSecret, logActivity, logger }: AuthModuleDependencies) {
+export function createAuthModule({ db, jwtSecret, hashApiKey, logActivity, logger }: AuthModuleDependencies) {
   const loadUserForAuth = (userId: string): { user?: AuthenticatedUser; disabled?: boolean } => {
-    const dbUser = db.prepare(`
-      SELECT id, username, role, is_active, permissions, must_change_password
-      FROM users
-      WHERE id = ?
+    const row = db.prepare(`
+      SELECT id, username, role, is_active, permissions, must_change_password, session_epoch
+      FROM users WHERE id = ?
     `).get(userId) as any;
+    if (!row) return {};
+    if (row.is_active === 0) return { disabled: true };
+    return { user: {
+      id: row.id,
+      username: row.username,
+      role: row.role,
+      permissions: parseUserPermissions(row.permissions),
+      must_change_password: row.must_change_password === 1,
+      session_epoch: Number(row.session_epoch || 0),
+    } };
+  };
 
-    if (!dbUser) return {};
-    if (dbUser.is_active === 0) return { disabled: true };
+  const authenticateServiceKey = (req: Request, requiredScope: string): ServicePrincipal | null => {
+    const clearKey = req.headers["x-api-key"]?.toString();
+    if (!clearKey) return null;
+    const key = db.prepare(`
+      SELECT id, name, status, permissions, allowed_ips, expires_at
+      FROM panel_api_keys WHERE key_hash = ? AND deleted_at IS NULL
+    `).get(hashApiKey(clearKey)) as any;
+    if (!key || key.status !== "active") return null;
+    if (key.expires_at && new Date(key.expires_at).getTime() <= Date.now()) return null;
+    if (key.allowed_ips) {
+      const allowed = String(key.allowed_ips).split(",").map((value) => value.trim()).filter(Boolean);
+      if (!allowed.includes(req.ip)) return null;
+    }
+    const scopes = parseScopes(key.permissions);
+    if (!scopes.includes(requiredScope)) return null;
+    db.prepare("UPDATE panel_api_keys SET last_used_at = CURRENT_TIMESTAMP, last_used_ip = ? WHERE id = ?").run(req.ip, key.id);
+    return { id: key.id, name: key.name, scopes };
+  };
 
-    return {
-      user: {
-        id: dbUser.id,
-        username: dbUser.username,
-        role: dbUser.role,
-        permissions: parseUserPermissions(dbUser.permissions),
-        must_change_password: dbUser.must_change_password === 1,
-      },
-    };
+  const requireService = (scope: string) => (req: Request, res: Response, next: NextFunction) => {
+    const service = authenticateServiceKey(req, scope);
+    if (!service) {
+      logActivity("SERVICE_AUTH_FAILED", "service_principal", "unknown", { scope, path: req.path, ip: req.ip });
+      return errorResponse(res, 401, "SERVICE_UNAUTHORIZED", "Geçerli ve kapsamlı service identity gerekli.");
+    }
+    req.servicePrincipal = service;
+    return next();
+  };
+
+  const issueSession = (user: AuthenticatedUser, servicePrincipalId: string | null) => {
+    const sessionId = randomUUID();
+    const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1000).toISOString();
+    db.prepare(`
+      INSERT INTO user_sessions (id, user_id, session_epoch, service_principal_id, expires_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(sessionId, user.id, user.session_epoch, servicePrincipalId, expiresAt);
+    return jwt.sign({ id: user.id, sid: sessionId, epoch: user.session_epoch }, jwtSecret, { expiresIn: SESSION_MAX_AGE_SECONDS });
+  };
+
+  const authenticateSessionToken = (token: string, expectedServicePrincipalId: string | null): AuthenticatedSession | null => {
+    try {
+      const decoded = jwt.verify(token, jwtSecret) as SessionClaims;
+      if (!decoded.id || !decoded.sid || !Number.isInteger(decoded.epoch)) return null;
+      const session = db.prepare(`
+        SELECT s.id AS session_id, s.service_principal_id, s.session_epoch AS issued_epoch,
+               u.id, u.username, u.role, u.permissions, u.must_change_password, u.is_active, u.session_epoch
+        FROM user_sessions s JOIN users u ON u.id = s.user_id
+        WHERE s.id = ? AND s.user_id = ? AND s.revoked_at IS NULL AND datetime(s.expires_at) > datetime('now')
+      `).get(decoded.sid, decoded.id) as any;
+      if (!session || Number(session.is_active) !== 1) return null;
+      if (Number(decoded.epoch) !== Number(session.session_epoch) || Number(session.issued_epoch) !== Number(session.session_epoch)) return null;
+      if ((session.service_principal_id || null) !== expectedServicePrincipalId) return null;
+      db.prepare("UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?").run(session.session_id);
+      return {
+        sessionId: session.session_id,
+        servicePrincipalId: session.service_principal_id || null,
+        user: {
+          id: session.id,
+          username: session.username,
+          role: session.role,
+          permissions: parseUserPermissions(session.permissions),
+          must_change_password: Number(session.must_change_password) === 1,
+          session_epoch: Number(session.session_epoch),
+        },
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const authenticateUserToken = (token: string, servicePrincipalId: string): AuthenticatedUser | null =>
+    authenticateSessionToken(token, servicePrincipalId)?.user || null;
+
+  const requireSession = (serviceBound: boolean) => (req: Request, res: Response, next: NextFunction) => {
+    const token = bearerToken(req);
+    if (!token) return errorResponse(res, 401, "UNAUTHORIZED", "Token gerekli.");
+    const expectedServiceId = serviceBound ? req.servicePrincipal?.id : null;
+    if (serviceBound && !expectedServiceId) return errorResponse(res, 401, "SERVICE_UNAUTHORIZED", "Service identity gerekli.");
+    const session = authenticateSessionToken(token, expectedServiceId || null);
+    if (!session) return errorResponse(res, 401, "UNAUTHORIZED", "Oturum geçersiz, iptal edilmiş veya süresi dolmuş.");
+    req.user = session.user;
+    res.locals.authSession = session;
+    return next();
+  };
+
+  const publicUser = (user: AuthenticatedUser) => ({
+    id: user.id,
+    username: user.username,
+    role: user.role,
+    permissions: user.permissions,
+    must_change_password: user.must_change_password,
+  });
+
+  const loginHandler = (serviceBound: boolean) => (req: Request, res: Response) => {
+    try {
+      const { username, password } = req.body;
+      if (!username || !password) return errorResponse(res, 400, "VALIDATION_ERROR", "Kullanıcı adı ve şifre zorunludur.");
+      const login = String(username).trim();
+      const row = db.prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE OR email = ? COLLATE NOCASE").get(login, login) as any;
+      if (!row || !bcrypt.compareSync(password, row.password_hash)) {
+        logActivity("LOGIN_FAILED", "auth", row?.id || "unknown", { username, ip: req.ip, reason: row ? "wrong_password" : "user_not_found" });
+        return errorResponse(res, 401, "AUTH_FAILED", "Geçersiz kullanıcı adı veya şifre.");
+      }
+      if (Number(row.is_active) !== 1) return errorResponse(res, 403, "ACCOUNT_DISABLED", "Bu hesap devre dışı bırakılmış.");
+      const user = loadUserForAuth(row.id).user!;
+      const serviceId = serviceBound ? req.servicePrincipal!.id : null;
+      const token = db.transaction(() => {
+        db.prepare("UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?").run(row.id);
+        return issueSession(user, serviceId);
+      })();
+      logActivity("LOGIN_SUCCESS", "auth", row.id, { ip: req.ip, service_principal_id: serviceId }, row.id);
+      return res.json({ success: true, token, user: publicUser(user) });
+    } catch (error: any) {
+      logger.error("AUTH_ERROR", "Login failed", error);
+      return errorResponse(res, 500, "INTERNAL_ERROR", error.message);
+    }
+  };
+
+  const changePasswordHandler = (serviceBound: boolean) => (req: Request, res: Response) => {
+    const currentSession = res.locals.authSession as AuthenticatedSession;
+    const { current_password, new_password } = req.body || {};
+    if (!current_password || !new_password) return errorResponse(res, 400, "VALIDATION_ERROR", "Mevcut ve yeni şifre zorunludur.");
+    if (String(new_password).length < 8) return errorResponse(res, 400, "VALIDATION_ERROR", "Yeni şifre en az 8 karakter olmalıdır.");
+    const row = db.prepare("SELECT password_hash FROM users WHERE id = ? AND is_active = 1").get(currentSession.user.id) as any;
+    if (!row || !bcrypt.compareSync(current_password, row.password_hash)) return errorResponse(res, 401, "AUTH_FAILED", "Mevcut şifre yanlış.");
+    const newHash = bcrypt.hashSync(new_password, 10);
+    const serviceId = serviceBound ? req.servicePrincipal!.id : null;
+    const replacement = db.transaction(() => {
+      db.prepare(`
+        UPDATE users SET password_hash = ?, must_change_password = 0,
+          session_epoch = session_epoch + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+      `).run(newHash, currentSession.user.id);
+      db.prepare("UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = 'password_changed' WHERE user_id = ? AND revoked_at IS NULL")
+        .run(currentSession.user.id);
+      const user = loadUserForAuth(currentSession.user.id).user!;
+      return { token: issueSession(user, serviceId), user };
+    })();
+    logActivity("PASSWORD_CHANGED", "auth", currentSession.user.id, { ip: req.ip, service_principal_id: serviceId }, currentSession.user.id);
+    return res.json({ success: true, token: replacement.token, user: publicUser(replacement.user), message: "Şifre başarıyla değiştirildi." });
+  };
+
+  const logoutHandler = (req: Request, res: Response) => {
+    const session = res.locals.authSession as AuthenticatedSession;
+    db.prepare("UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = 'logout' WHERE id = ? AND revoked_at IS NULL")
+      .run(session.sessionId);
+    logActivity("LOGOUT", "auth", session.user.id, { ip: req.ip, service_principal_id: session.servicePrincipalId }, session.user.id);
+    return res.json({ success: true, message: "Logged out" });
   };
 
   const router = express.Router();
-  router.post("/login", (req, res) => {
-    try {
-      const { username, password } = req.body;
-      if (!username || !password) {
-        return res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "Kullanıcı adı ve şifre zorunludur." } });
-      }
-
-      const login = String(username).trim();
-      const user = db.prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE OR email = ? COLLATE NOCASE").get(login, login) as any;
-      if (!user) {
-        logActivity("LOGIN_FAILED", "auth", "unknown", { username, ip: req.ip, reason: "user_not_found" });
-        return res.status(401).json({ success: false, error: { code: "AUTH_FAILED", message: "Geçersiz kullanıcı adı veya şifre." } });
-      }
-
-      if (user.is_active === 0) {
-        return res.status(403).json({ success: false, error: { code: "ACCOUNT_DISABLED", message: "Bu hesap devre dışı bırakılmış." } });
-      }
-
-      if (!bcrypt.compareSync(password, user.password_hash)) {
-        logActivity("LOGIN_FAILED", "auth", user.id, { username, ip: req.ip, reason: "wrong_password" });
-        return res.status(401).json({ success: false, error: { code: "AUTH_FAILED", message: "Geçersiz kullanıcı adı veya şifre." } });
-      }
-
-      db.prepare("UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?").run(user.id);
-      logActivity("LOGIN_SUCCESS", "auth", user.id, { username, ip: req.ip }, user.id);
-      const token = jwt.sign({ id: user.id }, jwtSecret, { expiresIn: "12h" });
-      return res.json({
-        success: true,
-        token,
-        user: {
-          id: user.id,
-          username: user.username,
-          role: user.role,
-          must_change_password: user.must_change_password === 1,
-        },
-      });
-    } catch (error: any) {
-      logger.error("AUTH_ERROR", "Login failed", error);
-      return res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR", message: error.message } });
-    }
-  });
-
-  router.post("/change-password", (req, res) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith("Bearer ")) {
-      return res.status(401).json({ success: false, error: { code: "UNAUTHORIZED", message: "Token gerekli." } });
-    }
-    try {
-      const decoded = jwt.verify(authHeader.split(" ")[1], jwtSecret) as { id: string };
-      const { current_password, new_password } = req.body;
-      if (!current_password || !new_password) {
-        return res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "Mevcut ve yeni şifre zorunludur." } });
-      }
-      if (new_password.length < 8) {
-        return res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "Yeni şifre en az 8 karakter olmalıdır." } });
-      }
-
-      const user = db.prepare("SELECT * FROM users WHERE id = ?").get(decoded.id) as any;
-      if (!user) return res.status(404).json({ success: false, error: { code: "NOT_FOUND", message: "Kullanıcı bulunamadı." } });
-      if (user.is_active === 0) {
-        return res.status(403).json({ success: false, error: { code: "USER_DISABLED", message: "Bu hesap devre dışı bırakılmış." } });
-      }
-      if (!bcrypt.compareSync(current_password, user.password_hash)) {
-        return res.status(401).json({ success: false, error: { code: "AUTH_FAILED", message: "Mevcut şifre yanlış." } });
-      }
-
-      const newHash = bcrypt.hashSync(new_password, 10);
-      db.prepare("UPDATE users SET password_hash = ?, must_change_password = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-        .run(newHash, user.id);
-      logActivity("PASSWORD_CHANGED", "auth", user.id, { ip: req.ip }, user.id);
-      return res.json({ success: true, message: "Şifre başarıyla değiştirildi." });
-    } catch {
-      return res.status(401).json({ success: false, error: { code: "UNAUTHORIZED", message: "Geçersiz token." } });
-    }
-  });
-
-  router.post("/logout", (_req, res) => res.json({ success: true, message: "Logged out" }));
-
-  router.get("/me", (req, res) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith("Bearer ")) {
-      return res.status(401).json({ success: false, error: { code: "UNAUTHORIZED", message: "No token" } });
-    }
-    try {
-      const decoded = jwt.verify(authHeader.split(" ")[1], jwtSecret) as { id: string };
-      const authUser = loadUserForAuth(decoded.id);
-      if (authUser.disabled) {
-        return res.status(403).json({ success: false, error: { code: "USER_DISABLED", message: "Bu hesap devre dışı bırakılmış." } });
-      }
-      if (!authUser.user) {
-        return res.status(401).json({ success: false, error: { code: "UNAUTHORIZED", message: "Invalid user" } });
-      }
-      return res.json({ success: true, user: authUser.user });
-    } catch {
-      return res.status(401).json({ success: false, error: { code: "UNAUTHORIZED", message: "Invalid token" } });
-    }
-  });
+  router.post("/login", loginHandler(false));
+  router.get("/me", requireSession(false), (req, res) => res.json({ success: true, user: publicUser(req.user!) }));
+  router.post("/logout", requireSession(false), logoutHandler);
+  router.post("/change-password", requireSession(false), changePasswordHandler(false));
+  router.post("/service/login", requireService("auth:login"), loginHandler(true));
+  router.get("/service/me", requireService("auth:session:validate"), requireSession(true), (req, res) => res.json({ success: true, user: publicUser(req.user!) }));
+  router.post("/service/logout", requireService("auth:session:revoke"), requireSession(true), logoutHandler);
+  router.post("/service/change-password", requireService("auth:password:change"), requireSession(true), changePasswordHandler(true));
 
   const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -164,84 +229,55 @@ export function createAuthModule({ db, jwtSecret, logActivity, logger }: AuthMod
 
   const authenticateApi = (req: Request, res: Response, next: NextFunction) => {
     if (isSelfAuthenticatedRoute(req.path)) return next();
-
-    const authHeader = req.headers.authorization;
-    if (authHeader?.startsWith("Bearer ")) {
-      try {
-        const decoded = jwt.verify(authHeader.split(" ")[1], jwtSecret) as { id: string };
-        const authUser = loadUserForAuth(decoded.id);
-        if (authUser.disabled) {
-          return res.status(403).json({ success: false, error: { code: "USER_DISABLED", message: "Bu hesap devre dışı bırakılmış." } });
-        }
-        if (!authUser.user) {
-          return res.status(401).json({ success: false, error: { code: "UNAUTHORIZED", message: "Invalid user." } });
-        }
-        req.user = authUser.user;
-        return next();
-      } catch (error: any) {
-        logger.warn("AUTH_ERROR", "JWT verification failed", { message: error.message, ip: req.ip });
-        return res.status(401).json({ success: false, error: { code: "UNAUTHORIZED", message: "Invalid or expired token." } });
-      }
+    const token = bearerToken(req);
+    const session = token ? authenticateSessionToken(token, null) : null;
+    if (!session) {
+      if (token) logger.warn("AUTH_ERROR", "Session verification failed", { ip: req.ip });
+      return errorResponse(res, 401, "UNAUTHORIZED", "Oturum geçersiz veya süresi dolmuş.");
     }
-
-    const apiKeyHeader = req.headers["x-api-key"] || (authHeader && !authHeader.startsWith("Bearer ") ? authHeader : undefined);
-    const settingsApiKey = db.prepare("SELECT value FROM settings WHERE key='api_key'").get() as any;
-    if (settingsApiKey?.value && apiKeyHeader === settingsApiKey.value) {
-      req.user = {
-        id: "legacy-api-key",
-        username: "legacy-api-key",
-        role: "api_key",
-        permissions: {},
-        must_change_password: false,
-      };
-      return next();
-    }
-    return res.status(401).json({ success: false, error: { code: "UNAUTHORIZED", message: "Unauthorized access." } });
+    req.user = session.user;
+    res.locals.authSession = session;
+    return next();
   };
 
   const requireCompletedPasswordChange = (req: Request, res: Response, next: NextFunction) => {
     if (isSelfAuthenticatedRoute(req.path)) return next();
-    const user = req.user;
-    if (!user || user.role === "api_key") return next();
-    if (user.must_change_password) {
-      return res.status(403).json({
-        success: false,
-        error: { code: "PASSWORD_CHANGE_REQUIRED", message: "Devam etmeden önce şifrenizi değiştirmeniz gerekiyor." },
-      });
+    if (req.user?.must_change_password) return errorResponse(res, 403, "PASSWORD_CHANGE_REQUIRED", "Devam etmeden önce şifrenizi değiştirmeniz gerekiyor.");
+    return next();
+  };
+
+  const requireCapability = (capability: string) => (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user || !userHasCapability(req.user, capability)) {
+      logActivity("CAPABILITY_DENIED", "capability", capability, { method: req.method, path: req.path, ip: req.ip }, req.user?.id);
+      return errorResponse(res, 403, "FORBIDDEN", `Bu işlem için ${capability} capability gerekli.`);
     }
     return next();
+  };
+
+  const authorizeApi = (req: Request, res: Response, next: NextFunction) => {
+    if (isSelfAuthenticatedRoute(req.path)) return next();
+    const capability = ["GET", "HEAD", "OPTIONS"].includes(req.method) ? "panel:read" : "panel:write";
+    return requireCapability(capability)(req, res, next);
   };
 
   const protectWrites = (req: Request, res: Response, next: NextFunction) => {
     if (isSelfAuthenticatedRoute(req.path) || ["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
-    if (req.user?.role === "readonly" || req.user?.role === "api_key") {
-      return res.status(403).json({
-        success: false,
-        error: { code: "FORBIDDEN", message: "Bu kimlik bilgisi yazma işlemleri için yetkili değil." },
-      });
-    }
-    return next();
-  };
-
-  const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
-    const user = req.user;
-    if (!user || user.role !== "admin") {
-      logActivity("FORBIDDEN_ACCESS", "system", req.path, { method: req.method, ip: req.ip }, user?.id);
-      return res.status(403).json({ success: false, error: { code: "FORBIDDEN", message: "Bu işlem için admin yetkisi gereklidir." } });
-    }
-    return next();
+    return requireCapability("panel:write")(req, res, next);
   };
 
   return {
     router,
     loginLimiter,
     authenticateApi,
+    authenticateUserToken,
+    authorizeApi,
     requireCompletedPasswordChange,
     protectWrites,
-    requireAdmin,
+    requireAdmin: requireCapability("identity:admin"),
+    requireCapability,
     loadUserForAuth,
   };
 }
 
-export { parseUserPermissions, sanitizePermissions, validUserRoles } from "./permissions.js";
+export { parseUserPermissions, sanitizePermissions, userHasCapability, validUserRoles } from "./permissions.js";
 export type { AuthenticatedUser } from "./types.js";

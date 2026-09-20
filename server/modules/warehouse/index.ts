@@ -23,7 +23,7 @@ type WarehouseModuleDependencies = {
     actorId?: string,
   ) => void;
   uploadsDir: string;
-  authenticateUserToken: (token: string) => WarehouseUser | null;
+  authenticateUserToken: (token: string, servicePrincipalId: string) => WarehouseUser | null;
   rateLimiters: RequestHandler[];
 };
 
@@ -43,4 +43,3 @@ export function mountWarehouseModule({
   );
   return startPrintQueueWorker(db);
 }
-

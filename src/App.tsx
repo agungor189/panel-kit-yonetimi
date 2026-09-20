@@ -164,12 +164,13 @@ export default function App() {
     setShowLogoutConfirm(true);
   };
 
-  const handleConfirmLogout = () => {
+  const handleConfirmLogout = async () => {
     try {
+      await api.post('/auth/logout', {});
       localStorage.removeItem('token');
       localStorage.removeItem('userRole');
     } catch {
-      // ignore
+      return;
     }
     setIsAuthenticated(false);
     setShowLogoutConfirm(false);

@@ -60,7 +60,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 60);
+  assert.equal(manifest.length, 61);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -76,6 +76,8 @@ test("fresh production schema is exact, versioned and has zero business history"
     sale_items: ["id", "product_id", "purchase_cost", "quantity", "sale_id", "unit_price"],
     cash_transactions: ["account_id", "amount", "currency", "id", "source_id", "source_type", "type"],
     warehouse_packages: ["current_location_id", "id", "planned_quantity", "remaining_quantity", "status"],
+    users: ["id", "permissions", "role", "session_epoch"],
+    user_sessions: ["expires_at", "id", "revoked_at", "service_principal_id", "session_epoch", "user_id"],
     schema_migrations: ["applied_at", "checksum", "name", "version"],
   };
   for (const [table, expected] of Object.entries(requiredColumns)) {

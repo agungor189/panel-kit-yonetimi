@@ -20,7 +20,7 @@ type WarehouseRouterDependencies = {
     details?: unknown,
     actorId?: string,
   ) => void;
-  authenticateUserToken: (token: string) => WarehouseUser | null;
+  authenticateUserToken: (token: string, servicePrincipalId: string) => WarehouseUser | null;
   uploadsDir: string;
 };
 
@@ -151,7 +151,8 @@ export function createWarehouseRouter({
       return errorResponse(res, 401, "UNAUTHORIZED", "Oturum gerekli.");
     }
 
-    const user = authenticateUserToken(authorization.slice("Bearer ".length));
+    if (!req.panelApiKey) return errorResponse(res, 401, "SERVICE_UNAUTHORIZED", "Service identity gerekli.");
+    const user = authenticateUserToken(authorization.slice("Bearer ".length), req.panelApiKey.id);
     if (!user) return errorResponse(res, 401, "UNAUTHORIZED", "Oturum geçersiz veya süresi dolmuş.");
     if (user.must_change_password) {
       return errorResponse(res, 403, "PASSWORD_CHANGE_REQUIRED", "Önce panel üzerinden şifrenizi değiştirin.");

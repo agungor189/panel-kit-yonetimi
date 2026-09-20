@@ -39,6 +39,11 @@ interface SettingsViewProps {
 }
 
 const APP_PERMISSIONS = [
+  ['panel:read', 'Panel görüntüleme'],
+  ['panel:write', 'Panel veri düzenleme'],
+  ['kits:view', 'Kit Studio görüntüleme'],
+  ['kits:write', 'Kit Studio taslak düzenleme'],
+  ['kits:approve', 'Kit Studio versiyon onayı'],
   ['warehouse:pick_orders', 'Sipariş toplama'],
   ['warehouse:receive', 'Mal kabul'],
   ['warehouse:manage_receiving_sessions', 'Mal kabul oturumu yönetimi'],

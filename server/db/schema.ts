@@ -596,9 +596,26 @@ export function applySchema(db: Database.Database): void {
       permissions           TEXT    DEFAULT '{}',
       notes                 TEXT,
       must_change_password  INTEGER DEFAULT 0,
+      session_epoch         INTEGER NOT NULL DEFAULT 0,
       created_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at            DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS user_sessions (
+      id                   TEXT PRIMARY KEY,
+      user_id              TEXT NOT NULL,
+      session_epoch        INTEGER NOT NULL,
+      service_principal_id TEXT,
+      expires_at           DATETIME NOT NULL,
+      revoked_at           DATETIME,
+      revoked_reason       TEXT,
+      created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_seen_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY(service_principal_id) REFERENCES panel_api_keys(id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_sessions_user_active
+      ON user_sessions(user_id, revoked_at, expires_at);
 
     CREATE TABLE IF NOT EXISTS warehouse_pick_progress (
       order_id          TEXT NOT NULL,

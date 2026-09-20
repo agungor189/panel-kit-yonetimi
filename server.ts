@@ -16,7 +16,6 @@ import rateLimit from "express-rate-limit";
 import AdmZip from "adm-zip";
 import crypto from "crypto";
 import bcrypt from "bcrypt";
-import jwt from "jsonwebtoken";
 import { z } from "zod";
 import { createProductAnalyticsRouter } from "./server/routes/productAnalyticsRoutes.js";
 import { createInsightsRouter } from "./server/routes/insightsRoutes.js";
@@ -1317,7 +1316,7 @@ async function startServer() {
   // JWT_SECRET validated at startup — no fallback allowed.
   const JWT_SECRET = process.env.JWT_SECRET!;
 
-  const auth = createAuthModule({ db, jwtSecret: JWT_SECRET, logActivity, logger: AppLogger });
+  const auth = createAuthModule({ db, jwtSecret: JWT_SECRET, hashApiKey, logActivity, logger: AppLogger });
   const hasOwn = (obj: unknown, key: string) => Object.prototype.hasOwnProperty.call(obj || {}, key);
 
   const toBit = (value: unknown, defaultValue: number) => {
@@ -1336,6 +1335,7 @@ async function startServer() {
       role: row.role,
       is_active: Number(row.is_active) === 1,
       must_change_password: Number(row.must_change_password) === 1,
+      session_epoch: Number(row.session_epoch || 0),
       permissions: parseUserPermissions(row.permissions),
       notes: row.notes || '',
       last_login_at: row.last_login_at || null,
@@ -1345,7 +1345,7 @@ async function startServer() {
   };
 
   const getManageableUser = (id: string) => sanitizeUserRow(db.prepare(`
-    SELECT id, username, email, role, is_active, must_change_password, permissions, notes,
+    SELECT id, username, email, role, is_active, must_change_password, permissions, notes, session_epoch,
            last_login_at, created_at, updated_at
     FROM users
     WHERE id = ?
@@ -1389,10 +1389,11 @@ async function startServer() {
   };
 
   app.use("/api/auth/login", auth.loginLimiter);
+  app.use("/api/auth/service/login", auth.loginLimiter);
   app.use("/api/auth", auth.router);
   app.use("/api", auth.authenticateApi);
   app.use("/api", auth.requireCompletedPasswordChange);
-  app.use("/api", auth.protectWrites);
+  app.use("/api", auth.authorizeApi);
   const requireAdmin = auth.requireAdmin;
 
   // --- API ROUTES ---
@@ -1444,7 +1445,7 @@ async function startServer() {
   app.get("/api/users", requireAdmin, (req, res) => {
     try {
       const users = (db.prepare(`
-        SELECT id, username, email, role, is_active, must_change_password, permissions, notes,
+        SELECT id, username, email, role, is_active, must_change_password, permissions, notes, session_epoch,
                last_login_at, created_at, updated_at
         FROM users
         ORDER BY datetime(COALESCE(created_at, '1970-01-01')) DESC, username ASC
@@ -1541,18 +1542,21 @@ async function startServer() {
 
       ensureUserManagementSafe(req.user?.id, before, role, isActive);
 
-      db.prepare(`
-        UPDATE users
-        SET username = ?,
-            email = ?,
-            role = ?,
-            is_active = ?,
-            must_change_password = ?,
-            permissions = ?,
-            notes = ?,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).run(username, email || null, role, isActive, mustChangePassword, JSON.stringify(permissions), notes || null, req.params.id);
+      const authorityChanged = role !== before.role
+        || isActive !== (before.is_active ? 1 : 0)
+        || JSON.stringify(permissions) !== JSON.stringify(before.permissions || {});
+      db.transaction(() => {
+        db.prepare(`
+          UPDATE users
+          SET username = ?, email = ?, role = ?, is_active = ?, must_change_password = ?,
+              permissions = ?, notes = ?, session_epoch = session_epoch + ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(username, email || null, role, isActive, mustChangePassword, JSON.stringify(permissions), notes || null, authorityChanged ? 1 : 0, req.params.id);
+        if (authorityChanged) {
+          db.prepare("UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = 'authority_changed' WHERE user_id = ? AND revoked_at IS NULL")
+            .run(req.params.id);
+        }
+      })();
 
       const after = getManageableUser(req.params.id);
       logActivity('USER_UPDATED', 'user', req.params.id, { before, after }, req.user?.id);
@@ -1579,13 +1583,16 @@ async function startServer() {
         return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Kullanıcı bulunamadı.' } });
       }
 
-      db.prepare(`
-        UPDATE users
-        SET password_hash = ?,
-            must_change_password = ?,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).run(bcrypt.hashSync(password, 10), mustChangePassword, req.params.id);
+      db.transaction(() => {
+        db.prepare(`
+          UPDATE users
+          SET password_hash = ?, must_change_password = ?, session_epoch = session_epoch + 1,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(bcrypt.hashSync(password, 10), mustChangePassword, req.params.id);
+        db.prepare("UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = 'password_reset' WHERE user_id = ? AND revoked_at IS NULL")
+          .run(req.params.id);
+      })();
 
       const after = getManageableUser(req.params.id);
       logActivity('USER_PASSWORD_RESET', 'user', req.params.id, {
@@ -5362,23 +5369,7 @@ async function startServer() {
     logActivity,
     uploadsDir,
     rateLimiters: [publicAuthFailedLimiter, publicApiLimiter],
-    authenticateUserToken: (token) => {
-        try {
-          const decoded = jwt.verify(token, JWT_SECRET) as { id?: string };
-          if (!decoded.id) return null;
-          const sessionAuth = auth.loadUserForAuth(decoded.id);
-          if (!sessionAuth.user || sessionAuth.disabled) return null;
-          return {
-            id: sessionAuth.user.id,
-            username: sessionAuth.user.username,
-            role: sessionAuth.user.role,
-            permissions: sessionAuth.user.permissions,
-            must_change_password: sessionAuth.user.must_change_password,
-          };
-        } catch {
-          return null;
-        }
-      },
+    authenticateUserToken: (token, servicePrincipalId) => auth.authenticateUserToken(token, servicePrincipalId),
   });
 
   app.get("/api/public/health", (req, res) => {
