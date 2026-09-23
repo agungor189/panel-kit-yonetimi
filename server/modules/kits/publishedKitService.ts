@@ -53,6 +53,8 @@ type ResolvedComponent = {
   extendedCostMinor: number;
 };
 
+type ComponentInput = KitPublicationComponent & { costQuantityBaseInt: number };
+
 export class PublishedKitValidationError extends Error {
   constructor(public readonly code: string, message: string, public readonly statusCode = 400) {
     super(message);
@@ -168,11 +170,12 @@ export class PublishedKitService {
     if (duplicate) throw new PublishedKitValidationError("DUPLICATE_SKU", "SKU is already owned by another canonical product.", 409);
 
     if (!Array.isArray(raw.components)) throw new PublishedKitValidationError("INCOMPLETE_KIT", "components are required.");
-    const componentInputs = raw.components.map((component, index) => ({
+    const componentInputs: ComponentInput[] = raw.components.map((component, index) => ({
       productId: text(component?.productId, `components[${index}].productId`, 200),
       catalogVersionRef: text(component?.catalogVersionRef, `components[${index}].catalogVersionRef`, 250),
       quantityBaseInt: positiveInteger(component?.quantityBaseInt, `components[${index}].quantityBaseInt`),
       role: text(component?.role, `components[${index}].role`, 100),
+      costQuantityBaseInt: positiveInteger(component?.quantityBaseInt, `components[${index}].quantityBaseInt`),
     }));
 
     const setting = this.db.prepare("SELECT kerf_mm,formula_version FROM kit_publication_settings WHERE id='default'").get() as any;
@@ -196,7 +199,8 @@ export class PublishedKitService {
       const cutLengthMm = cuts.reduce((sum, cut) => sum + cut.quantity * cut.lengthMm, 0);
       const kerfLengthMm = cuts.reduce((sum, cut) => sum + cut.quantity * kerfMm, 0);
       const consumedLengthMm = cutLengthMm + kerfLengthMm;
-      componentInputs.push({ productId: profileProductId, catalogVersionRef: profileCatalogVersionRef, quantityBaseInt: consumedLengthMm, role: "PROFILE" });
+      componentInputs.push({ productId: profileProductId, catalogVersionRef: profileCatalogVersionRef,
+        quantityBaseInt: cutLengthMm, costQuantityBaseInt: consumedLengthMm, role: "PROFILE" });
       cutPlan = { profileProductId, profileCatalogVersionRef, effectiveKerfMm: kerfMm, cutLengthMm, kerfLengthMm, consumedLengthMm, cuts };
     }
     if (componentInputs.length === 0) throw new PublishedKitValidationError("INCOMPLETE_KIT", "Published kit BOM cannot be empty.");
@@ -219,7 +223,7 @@ export class PublishedKitService {
         ORDER BY datetime(created_at) DESC,created_at DESC,id DESC LIMIT 1`).get(component.productId) as any;
       if (!cost) throw new PublishedKitValidationError("COST_UNKNOWN", `Canonical acquisition cost is UNKNOWN for ${product.sku}.`, 409);
       const baseQuantumCostDenominator = BigInt(cost.normalized_cost_denominator) * BigInt(product.quantity_scale);
-      const extendedCostMinor = roundRatio(BigInt(component.quantityBaseInt) * BigInt(cost.normalized_cost_numerator), baseQuantumCostDenominator);
+      const extendedCostMinor = roundRatio(BigInt(component.costQuantityBaseInt) * BigInt(cost.normalized_cost_numerator), baseQuantumCostDenominator);
       return {
         productId: product.id, sku: product.sku, title: product.title || product.name || product.sku,
         catalogVersion: Number(product.catalog_version), catalogVersionRef: product.catalog_version_ref,
@@ -283,7 +287,7 @@ export class PublishedKitService {
         : null;
       let product;
       if (!kit) {
-        product = catalog.createProduct({ sku: input.proposal.sku, title: input.proposal.title, catalog_type: "KIT", base_uom_code: "piece" });
+        product = catalog.createProduct({ sku: input.proposal.sku, title: input.proposal.title, catalog_type: "KIT", base_uom_code: "piece" }, { allowPublishedKitMutation: true });
         const publishedKitId = randomUUID();
         this.db.prepare(`INSERT INTO published_kits (id,workspace_kit_id,product_id,sku) VALUES (?,?,?,?)`)
           .run(publishedKitId, input.proposal.workspaceKitId, product.id, input.proposal.sku);
@@ -291,7 +295,7 @@ export class PublishedKitService {
       } else {
         const current = catalog.getProduct(kit.product_id);
         if (!current) throw new PublishedKitValidationError("PUBLISHED_KIT_NOT_FOUND", "Published kit product was not found.", 409);
-        product = catalog.updateProduct(kit.product_id, current.catalog_version, { sku: kit.sku, title: input.proposal.title, catalog_type: "KIT", base_uom_code: "piece" });
+        product = catalog.updateProduct(kit.product_id, current.catalog_version, { sku: kit.sku, title: input.proposal.title, catalog_type: "KIT", base_uom_code: "piece" }, { allowPublishedKitMutation: true });
       }
       this.db.prepare(`UPDATE products SET product_type='kit',is_sellable=1,visible_in_catalog=1,status='Active' WHERE id=?`).run(product.id);
 
@@ -357,6 +361,9 @@ export class PublishedKitService {
         VALUES (?,?,?,?,?)`);
       for (const component of preview.cost.components) insertBom.run(randomUUID(), product.id, component.productId, component.quantityBaseInt, component.role);
       this.db.prepare("UPDATE published_kits SET current_version_id=?,updated_at=? WHERE id=?").run(versionId, publishedAt, kit.id);
+      this.db.prepare(`UPDATE products SET purchase_cost=?,sale_price=?,price_locked=1,updated_at=? WHERE id=?`).run(
+        preview.cost.canonicalCostMinor / 100, input.proposal.finalSalePriceMinor / 100, publishedAt, product.id,
+      );
       return { publishedKitId: kit.id as string, productId: product.id, versionId, versionNumber, contentHash: preview.contentHash, corePolicyHash: preview.corePolicyHash };
     }).immediate();
   }
@@ -370,7 +377,9 @@ export class PublishedKitService {
         current: version.id === kit.current_version_id,
         components: this.db.prepare("SELECT * FROM published_kit_version_components WHERE published_kit_version_id=? ORDER BY component_sequence").all(version.id),
         cuts: this.db.prepare("SELECT * FROM published_kit_version_cuts WHERE published_kit_version_id=? ORDER BY cut_sequence").all(version.id),
-        packages: this.db.prepare("SELECT * FROM published_kit_version_packages WHERE published_kit_version_id=? ORDER BY package_number").all(version.id),
+        packages: (this.db.prepare("SELECT * FROM published_kit_version_packages WHERE published_kit_version_id=? ORDER BY package_number").all(version.id) as any[])
+          .map((pack) => ({ ...pack, items: this.db.prepare(`SELECT * FROM published_kit_version_package_items
+            WHERE package_id=? ORDER BY component_product_id,id`).all(pack.id) })),
       }));
     return { ...kit, versions };
   }

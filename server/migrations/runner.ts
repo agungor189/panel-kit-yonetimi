@@ -10,6 +10,7 @@ import { SALES_FINANCIAL_SCHEMA_V74 } from "../db/salesFinancialSchema.js";
 import { RETURNS_SCHEMA_V75 } from "../db/returnsSchema.js";
 import { WAREHOUSE_PACKAGE_ORIGIN_SCHEMA_V76 } from "../db/warehousePackageOriginSchema.js";
 import { PUBLISHED_KIT_SCHEMA_V77 } from "../db/publishedKitSchema.js";
+import { PROFILE_CUT_REMEDIATION_SCHEMA_V78 } from "../db/profileCutRemediationSchema.js";
 import { WAREHOUSE_EXECUTION_SCHEMA_V71, WAREHOUSE_REPLENISHMENT_RUNTIME_SCHEMA_V73 } from "../db/warehouseExecutionSchema.js";
 
 interface Migration {
@@ -2853,9 +2854,65 @@ const migrations: Migration[] = [
       db.exec(PUBLISHED_KIT_SCHEMA_V77);
     },
   },
+  {
+    version: 78,
+    name: "remediate_profile_cut_delivery_and_legacy_representation",
+    up(db) {
+      db.exec(PROFILE_CUT_REMEDIATION_SCHEMA_V78);
+      const lots = db.prepare(`SELECT l.id,l.product_id,l.received_quantity_base_int,l.on_hand_base_int,l.reserved_base_int,
+          l.receipt_operation_id,pol.profile_length_mm,c.landed_cost_try_minor,
+          (SELECT COUNT(*) FROM profile_inventory_pieces p WHERE p.inventory_lot_id=l.id) AS piece_count,
+          (SELECT COALESCE(SUM(p.current_length_mm),0) FROM profile_inventory_pieces p WHERE p.inventory_lot_id=l.id) AS piece_length,
+          (SELECT COUNT(*) FROM inventory_ledger_events e WHERE e.lot_id=l.id) AS ledger_count,
+          (SELECT COUNT(*) FROM inventory_ledger_events e WHERE e.lot_id=l.id AND e.event_type='RECEIPT'
+             AND e.quantity_delta_base_int=l.received_quantity_base_int) AS exact_receipt_count,
+          (SELECT COALESCE(SUM(b.quantity_base_int),0) FROM inventory_lot_location_balances b WHERE b.lot_id=l.id) AS location_length
+        FROM inventory_lots l JOIN products p ON p.id=l.product_id
+        LEFT JOIN purchase_order_lines pol ON pol.id=l.purchase_line_id
+        LEFT JOIN acquisition_lot_cost_snapshots c ON c.id=l.acquisition_cost_snapshot_id
+        WHERE p.catalog_type='profile' AND l.on_hand_base_int>0 ORDER BY l.id`).all() as any[];
+      const insertPiece = db.prepare(`INSERT INTO profile_inventory_pieces (
+        id,product_id,inventory_lot_id,acquisition_cost_snapshot_id,origin_piece_id,parent_piece_id,piece_sequence,
+        original_length_mm,current_length_mm,reserved_length_mm,historical_cost_minor,status,created_operation_id
+      ) SELECT ?,l.product_id,l.id,l.acquisition_cost_snapshot_id,?,NULL,?,?,?,0,?,'AVAILABLE',?
+        FROM inventory_lots l WHERE l.id=?`);
+      const block = db.prepare(`INSERT INTO profile_piece_migration_blocks (inventory_lot_id,product_id,reason_code)
+        VALUES (?,?,?)`);
+      for (const lot of lots) {
+        if (Number(lot.piece_count) > 0) {
+          if (Number(lot.piece_length) !== Number(lot.on_hand_base_int)) block.run(lot.id, lot.product_id, "PROFILE_PIECE_BALANCE_UNPROVEN");
+          continue;
+        }
+        const length = Number(lot.profile_length_mm);
+        const received = Number(lot.received_quantity_base_int);
+        const landed = Number(lot.landed_cost_try_minor);
+        const provable = Number.isSafeInteger(length) && length > 0
+          && Number(lot.on_hand_base_int) === received && Number(lot.reserved_base_int) === 0
+          && received % length === 0 && Number(lot.ledger_count) === 1 && Number(lot.exact_receipt_count) === 1
+          && Number(lot.location_length) === received && Number.isSafeInteger(landed) && landed >= 0;
+        if (!provable) {
+          block.run(lot.id, lot.product_id, "PROFILE_PIECE_MIGRATION_REQUIRED");
+          continue;
+        }
+        const count = received / length;
+        const baseCost = Math.floor(landed / count);
+        const residue = landed % count;
+        for (let index = 0; index < count; index += 1) {
+          const id = `v78-profile-piece:${lot.id}:${index + 1}`;
+          insertPiece.run(id, id, index + 1, length, length, baseCost + (index < residue ? 1 : 0),
+            `v78:derive:${lot.receipt_operation_id}`, lot.id);
+        }
+      }
+      db.prepare(`UPDATE products SET
+          purchase_cost=(SELECT v.canonical_cost_minor/100.0 FROM published_kits k JOIN published_kit_versions v ON v.id=k.current_version_id WHERE k.product_id=products.id),
+          sale_price=(SELECT v.final_sale_price_minor/100.0 FROM published_kits k JOIN published_kit_versions v ON v.id=k.current_version_id WHERE k.product_id=products.id),
+          price_locked=1,updated_at=CURRENT_TIMESTAMP
+        WHERE id IN (SELECT product_id FROM published_kits WHERE current_version_id IS NOT NULL)`).run();
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 77;
+export const CURRENT_SCHEMA_VERSION = 78;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),
@@ -2870,7 +2927,7 @@ export type MigrationManifestEntry = {
 };
 
 const checksumFor = (migration: Migration): string => createHash("sha256")
-  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}${migration.version === 69 ? `\0${INVENTORY_SCHEMA_V69}` : ""}${migration.version === 71 ? `\0${WAREHOUSE_EXECUTION_SCHEMA_V71}` : ""}${migration.version === 74 ? `\0${SALES_FINANCIAL_SCHEMA_V74}` : ""}${migration.version === 75 ? `\0${RETURNS_SCHEMA_V75}` : ""}${migration.version === 76 ? `\0${WAREHOUSE_PACKAGE_ORIGIN_SCHEMA_V76}` : ""}${migration.version === 77 ? `\0${PUBLISHED_KIT_SCHEMA_V77}` : ""}`)
+  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}${migration.version === 69 ? `\0${INVENTORY_SCHEMA_V69}` : ""}${migration.version === 71 ? `\0${WAREHOUSE_EXECUTION_SCHEMA_V71}` : ""}${migration.version === 74 ? `\0${SALES_FINANCIAL_SCHEMA_V74}` : ""}${migration.version === 75 ? `\0${RETURNS_SCHEMA_V75}` : ""}${migration.version === 76 ? `\0${WAREHOUSE_PACKAGE_ORIGIN_SCHEMA_V76}` : ""}${migration.version === 77 ? `\0${PUBLISHED_KIT_SCHEMA_V77}` : ""}${migration.version === 78 ? `\0${PROFILE_CUT_REMEDIATION_SCHEMA_V78}` : ""}`)
   .digest("hex");
 
 export function getMigrationManifest(): MigrationManifestEntry[] {

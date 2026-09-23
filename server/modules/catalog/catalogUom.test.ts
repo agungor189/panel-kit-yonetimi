@@ -160,3 +160,16 @@ test("continuous-cut complementary products require only typed behavior and a co
   }), /continuous.*meter|square_meter/i);
   db.close();
 });
+
+test("generic catalog mutation cannot create or alter canonical KIT identity", () => {
+  const db = new Database(":memory:");
+  initializeDatabase(db);
+  const catalog = new CatalogService(db);
+  assert.throws(() => catalog.createProduct({ sku: "KIT-BYPASS", title: "Bypass", catalog_type: "KIT", base_uom_code: "piece" }),
+    (error: unknown) => error instanceof CatalogValidationError && error.code === "KIT_PUBLICATION_REQUIRED");
+  const ordinary = catalog.createProduct({ id: "ordinary", sku: "ORDINARY", title: "Ordinary", catalog_type: "product", base_uom_code: "piece" });
+  assert.throws(() => catalog.updateProduct(ordinary.id, ordinary.catalog_version,
+    { sku: "ORDINARY", title: "Ordinary", catalog_type: "KIT", base_uom_code: "piece" }),
+  (error: unknown) => error instanceof CatalogValidationError && error.code === "KIT_PUBLICATION_REQUIRED");
+  db.close();
+});

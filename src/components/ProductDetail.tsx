@@ -156,7 +156,7 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
            <span className="font-bold text-sm">Listeye Dön</span>
          </button>
          <div className="flex items-center space-x-3 w-full sm:w-auto">
-             {!isReadOnly && (
+             {!isReadOnly && product?.catalog_type !== 'KIT' && (
                <button
                  onClick={onEdit}
                  className="flex-1 sm:flex-none flex items-center justify-center px-4 py-2.5 bg-[#0F172A] text-white rounded-xl font-bold text-sm hover:scale-105 transition-all shadow-md"
@@ -166,7 +166,7 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
                </button>
              )}
 
-             {!isReadOnly && (!showDeleteConfirm ? (
+             {!isReadOnly && product?.catalog_type !== 'KIT' && (!showDeleteConfirm ? (
                <button
                  onClick={() => setShowDeleteConfirm(true)}
                  className="p-2.5 border border-[#E2E8F0] text-rose-500 rounded-xl hover:bg-rose-50 transition-colors"
@@ -291,10 +291,16 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
                     <p className="text-xs text-emerald-700/80 mt-1">BOM, kesim, paketleme ve kılavuz snapshotları salt okunurdur.</p>
                   </div>
                   <div className="space-y-2">
-                    {product.published_kit.versions.map((version) => (
+                    {product.published_kit.versions.map((version: any) => (
                       <div key={version.id} className="rounded-xl border border-emerald-100 bg-white p-4 text-xs">
                         <div className="flex items-center justify-between"><strong>v{version.version_number} · {version.current ? 'GÜNCEL' : 'ESKİ / AKTİF DEĞİL'}</strong><span>{new Date(version.published_at).toLocaleString('tr-TR')}</span></div>
-                        <div className="mt-2 text-text-muted">BOM {version.components.length} · Kesim {version.cuts.length} · Paket {version.packages.length} · Kerf {version.effective_kerf_mm} mm · Kılavuz {version.installation_guide_version}</div>
+                        <div className="mt-2 font-bold text-emerald-800">Maliyet {moneyMinor(version.canonical_cost_minor, version.currency)} · Satış {moneyMinor(version.final_sale_price_minor, version.currency)}</div>
+                        <div className="mt-1 text-text-muted">Kerf {version.effective_kerf_mm} mm · Kılavuz {version.installation_guide_version}</div>
+                        <div className="mt-3 grid gap-3 md:grid-cols-3">
+                          <SnapshotList title="BOM" rows={version.components.map((item: any) => `${item.component_sku_snapshot} · ${item.quantity_base_int} ${item.base_uom_code_snapshot}`)} />
+                          <SnapshotList title="Kesimler" rows={version.cuts.map((cut: any) => `${cut.quantity} × ${cut.length_mm} mm (+${cut.kerf_mm} mm kerf)`)} />
+                          <SnapshotList title="Paketler" rows={version.packages.flatMap((pack: any) => pack.items.map((item: any) => `P${pack.package_number} · ${item.component_product_id} · ${item.quantity_base_int} ${item.base_uom_code_snapshot}`))} />
+                        </div>
                         <div className="mt-1 font-mono text-[10px] text-text-muted">{version.content_hash}</div>
                       </div>
                     ))}
@@ -472,4 +478,12 @@ function DetailStat({ label, value, subLabel, color }: { label: string, value: R
       {subLabel && <p className="text-xs font-bold text-[#64748B] mt-1">{subLabel}</p>}
     </div>
   );
+}
+
+function moneyMinor(value: number, currency = 'TRY') {
+  return new Intl.NumberFormat('tr-TR', { style: 'currency', currency }).format(Number(value || 0) / 100);
+}
+
+function SnapshotList({ title, rows }: { title: string; rows: string[] }) {
+  return <div><p className="font-black uppercase text-[10px] text-emerald-700">{title}</p><ul className="mt-1 space-y-1 text-text-muted">{rows.map((row, index) => <li key={`${title}-${index}`}>{row}</li>)}</ul></div>;
 }

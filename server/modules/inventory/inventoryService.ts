@@ -113,8 +113,10 @@ export class InventoryService {
 
   getProductAvailability(productIdValue: string) {
     const productId = text(productIdValue, "productId");
-    const product = this.db.prepare("SELECT id,base_uom_code FROM products WHERE id=?").get(productId) as any;
+    const product = this.db.prepare("SELECT id,base_uom_code,catalog_type FROM products WHERE id=?").get(productId) as any;
     if (!product) throw new InventoryValidationError("PRODUCT_NOT_FOUND", "Product was not found.", 404);
+    const remediationReady = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='profile_piece_migration_blocks'").get();
+    if (product.catalog_type === "profile" && remediationReady) new ProfileCutInventoryService(this.db).assertRepresented(productId);
     const balance = this.db.prepare(`SELECT COALESCE(SUM(on_hand_base_int),0) AS on_hand,
       COALESCE(SUM(reserved_base_int),0) AS reserved FROM inventory_lots WHERE product_id=?`).get(productId) as any;
     return {
@@ -169,7 +171,7 @@ export class InventoryService {
         physicalPlans.push(...planned);
       }
       const physicalQuantityByProduct = new Map<string, number>();
-      for (const plan of physicalPlans) physicalQuantityByProduct.set(plan.productId, (physicalQuantityByProduct.get(plan.productId) || 0) + plan.consumedLengthMm);
+      for (const plan of physicalPlans) physicalQuantityByProduct.set(plan.productId, (physicalQuantityByProduct.get(plan.productId) || 0) + plan.cutLengthTotalMm);
       for (const [productId, quantity] of physicalQuantityByProduct) {
         if (lines.find((line) => line.productId === productId)?.quantityBaseInt !== quantity) {
           throw new InventoryValidationError("PROFILE_CUT_PLAN_MISMATCH", `Profile cut plan quantity does not match reservation quantity for ${productId}.`, 409);
@@ -182,20 +184,26 @@ export class InventoryService {
         if (discrepancy) throw new InventoryValidationError("STOCK_DISCREPANCY", `Product ${line.productId} has unresolved physical stock discrepancy.`, 409);
         const physical = physicalPlans.filter((piece) => piece.productId === line.productId);
         if (physical.length > 0) {
-          const byLot = new Map<string, number>();
-          for (const piece of physical) byLot.set(piece.lotId, (byLot.get(piece.lotId) || 0) + piece.consumedLengthMm);
+          const byLot = new Map<string, { deliverable: number; consumed: number }>();
+          for (const piece of physical) {
+            const value = byLot.get(piece.lotId) || { deliverable: 0, consumed: 0 };
+            value.deliverable += piece.cutLengthTotalMm;
+            value.consumed += piece.consumedLengthMm;
+            byLot.set(piece.lotId, value);
+          }
           const allocations = [...byLot].sort(([left], [right]) => left.localeCompare(right))
-            .map(([lotId, quantityBaseInt], fifoSequence) => ({ lotId, quantityBaseInt, fifoSequence }));
+            .map(([lotId, quantity], fifoSequence) => ({ lotId, quantityBaseInt: quantity.deliverable,
+              reservedQuantityBaseInt: quantity.consumed, fifoSequence }));
           return { ...line, baseUomCode: product.base_uom_code as string, allocations };
         }
         const lots = this.db.prepare(`SELECT id,on_hand_base_int,reserved_base_int,received_at FROM inventory_lots
           WHERE product_id=? AND status='USABLE' AND on_hand_base_int>reserved_base_int ORDER BY datetime(received_at),received_at,id`).all(line.productId) as any[];
         let needed = line.quantityBaseInt;
-        const allocations: Array<{ lotId: string; quantityBaseInt: number; fifoSequence: number }> = [];
+        const allocations: Array<{ lotId: string; quantityBaseInt: number; reservedQuantityBaseInt: number; fifoSequence: number }> = [];
         for (const [fifoSequence, lot] of lots.entries()) {
           if (needed === 0) break;
           const quantity = Math.min(needed, Number(lot.on_hand_base_int) - Number(lot.reserved_base_int));
-          if (quantity > 0) allocations.push({ lotId: lot.id, quantityBaseInt: quantity, fifoSequence });
+          if (quantity > 0) allocations.push({ lotId: lot.id, quantityBaseInt: quantity, reservedQuantityBaseInt: quantity, fifoSequence });
           needed -= quantity;
         }
         if (needed > 0) throw new InventoryValidationError("INSUFFICIENT_AVAILABLE_STOCK", `Insufficient available stock for product ${line.productId}.`, 409);
@@ -214,8 +222,9 @@ export class InventoryService {
         const lineId = randomUUID();
         insertLine.run(lineId, reservationId, plan.productId, plan.quantityBaseInt, plan.baseUomCode, createdAt);
         for (const allocation of plan.allocations) {
+          const reservedQuantity = allocation.reservedQuantityBaseInt;
           const changed = this.db.prepare(`UPDATE inventory_lots SET reserved_base_int=reserved_base_int+?,updated_at=?
-            WHERE id=? AND status='USABLE' AND on_hand_base_int-reserved_base_int>=?`).run(allocation.quantityBaseInt, createdAt, allocation.lotId, allocation.quantityBaseInt);
+            WHERE id=? AND status='USABLE' AND on_hand_base_int-reserved_base_int>=?`).run(reservedQuantity, createdAt, allocation.lotId, reservedQuantity);
           if (changed.changes !== 1) throw new InventoryValidationError("INVENTORY_CONCURRENCY_CONFLICT", "Inventory changed during reservation.", 409);
           insertAllocation.run(randomUUID(), reservationId, lineId, plan.productId, allocation.lotId, allocation.quantityBaseInt, allocation.fifoSequence, createdAt);
           allocations.push({ lotId: allocation.lotId, productId: plan.productId, quantityBaseInt: allocation.quantityBaseInt });
@@ -245,8 +254,12 @@ export class InventoryService {
       if (!["ACTIVE", "PICKED", "PACKED", "STOCK_DISCREPANCY"].includes(reservation.status)) throw new InventoryValidationError("RESERVATION_STATE_CONFLICT", "Reservation cannot be released from its current state.", 409);
       const allocations = this.db.prepare("SELECT lot_id,quantity_base_int FROM inventory_reservation_allocations WHERE reservation_id=?").all(reservationId) as any[];
       for (const allocation of allocations) {
+        const activeKerf = Number(this.db.prepare(`SELECT COALESCE(SUM(kerf_total_mm),0) FROM profile_piece_reservations r
+          JOIN profile_inventory_pieces p ON p.id=r.profile_piece_id
+          WHERE r.reservation_id=? AND p.inventory_lot_id=? AND r.status='ACTIVE'`).pluck().get(reservationId, allocation.lot_id));
+        const releaseQuantity = Number(allocation.quantity_base_int) + activeKerf;
         const changed = this.db.prepare(`UPDATE inventory_lots SET reserved_base_int=reserved_base_int-?,updated_at=?
-          WHERE id=? AND reserved_base_int>=?`).run(allocation.quantity_base_int, releasedAt, allocation.lot_id, allocation.quantity_base_int);
+          WHERE id=? AND reserved_base_int>=?`).run(releaseQuantity, releasedAt, allocation.lot_id, releaseQuantity);
         if (changed.changes !== 1) throw new InventoryValidationError("INVENTORY_CONSERVATION_FAILED", "Reservation balance cannot be released safely.", 409);
       }
       new ProfileCutInventoryService(this.db).releaseReservation(reservationId);
@@ -305,6 +318,8 @@ export class InventoryService {
         FROM inventory_reservation_allocations a JOIN inventory_lots l ON l.id=a.lot_id
         WHERE a.reservation_id=? ORDER BY a.fifo_sequence,a.lot_id`).all(reservationId) as any[];
       const products = new Set<string>();
+      const profileCuts = new ProfileCutInventoryService(this.db);
+      profileCuts.markDispatched(reservationId, dispatchedAt);
       for (const allocation of allocations) {
         const changed = this.db.prepare(`UPDATE inventory_lots SET on_hand_base_int=on_hand_base_int-?,reserved_base_int=reserved_base_int-?,updated_at=?
           WHERE id=? AND on_hand_base_int>=? AND reserved_base_int>=? AND status='USABLE'`)
@@ -346,9 +361,8 @@ export class InventoryService {
       }
       this.db.prepare(`UPDATE inventory_reservations SET status='DISPATCHED',dispatch_operation_id=?,shipment_id=?,dispatched_at=?,updated_at=? WHERE id=? AND status='PACKED'`)
         .run(operationId, shipmentId, dispatchedAt, dispatchedAt, reservationId);
-      this.db.prepare("UPDATE profile_piece_reservations SET status='DISPATCHED',updated_at=? WHERE reservation_id=? AND status='EXECUTED'")
-        .run(dispatchedAt, reservationId);
       for (const productId of products) this.syncProjection(productId);
+      profileCuts.assertRepresented();
       return this.getReservation(reservationId);
     }).immediate();
   }

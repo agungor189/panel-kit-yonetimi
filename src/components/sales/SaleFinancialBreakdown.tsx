@@ -77,6 +77,12 @@ export function SaleFinancialBreakdown({ financial }: { financial: any }) {
                 <span className={`ml-2 font-black ${line.kitVersion.current ? 'text-emerald-700' : 'text-amber-700'}`}>{line.kitVersion.current ? 'GÜNCEL' : 'ARTIK GÜNCEL DEĞİL'}</span>
                 <p className="mt-1 text-gray-600">Sürüm kimliği: {line.kitVersion.publishedKitVersionId}</p>
                 <p className="font-mono text-[10px] text-gray-500">{line.kitVersion.contentHash}</p>
+                <div className="mt-3 grid gap-3 md:grid-cols-3">
+                  <RecipeList title="Dondurulmuş BOM" rows={(line.kitVersion.snapshot?.components || []).map((item: any) => `${item.component_sku_snapshot} · ${item.quantity_base_int} ${item.base_uom_code_snapshot}`)} />
+                  <RecipeList title="Dondurulmuş kesimler" rows={(line.kitVersion.snapshot?.cuts || []).map((cut: any) => `${cut.quantity} × ${cut.length_mm} mm (+${cut.kerf_mm} mm kerf)`)} />
+                  <RecipeList title="Dondurulmuş paketler" rows={(line.kitVersion.snapshot?.packages || []).flatMap((pack: any) => pack.items.map((item: any) => `P${pack.package_number} · ${item.component_product_id} · ${item.quantity_base_int} ${item.base_uom_code_snapshot}`))} />
+                </div>
+                <p className="mt-2 font-bold text-gray-700">Maliyet {money(line.kitVersion.snapshot?.version?.canonical_cost_minor, line.kitVersion.snapshot?.version?.currency)} · Satış {money(line.kitVersion.snapshot?.version?.final_sale_price_minor, line.kitVersion.snapshot?.version?.currency)} · Kılavuz {line.kitVersion.snapshot?.version?.installation_guide_version}</p>
               </div>
             ))}
           </div>
@@ -104,4 +110,8 @@ export function SaleFinancialBreakdown({ financial }: { financial: any }) {
       )}
     </section>
   );
+}
+
+function RecipeList({ title, rows }: { title: string; rows: string[] }) {
+  return <div><p className="font-black uppercase text-[10px] text-emerald-700">{title}</p><ul className="mt-1 space-y-1 text-gray-600">{rows.map((row, index) => <li key={`${title}-${index}`}>{row}</li>)}</ul></div>;
 }

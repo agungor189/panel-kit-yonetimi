@@ -12,7 +12,8 @@ const commandError = (error: unknown, res: express.Response) => {
   }
   if (error instanceof CatalogValidationError) {
     const conflict = /conflict/i.test(error.message);
-    return res.status(conflict ? 409 : 400).json({ success: false, error: { code: conflict ? "CATALOG_VERSION_CONFLICT" : "CATALOG_VALIDATION_FAILED", message: error.message } });
+    const code = error.code === "CATALOG_VALIDATION_FAILED" && conflict ? "CATALOG_VERSION_CONFLICT" : error.code;
+    return res.status(error.statusCode || (conflict ? 409 : 400)).json({ success: false, error: { code, message: error.message } });
   }
   if (String((error as { code?: unknown })?.code || "").includes("SQLITE_CONSTRAINT_UNIQUE")) {
     return res.status(409).json({ success: false, error: { code: "CATALOG_IDENTITY_CONFLICT", message: "Catalog ID or SKU already exists." } });

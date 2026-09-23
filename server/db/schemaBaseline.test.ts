@@ -118,6 +118,9 @@ const businessTablesThatMustStartEmpty = [
   "profile_piece_reservation_cuts",
   "profile_cut_executions",
   "profile_cut_outputs",
+  "profile_cut_waste_facts",
+  "profile_return_piece_restorations",
+  "profile_piece_migration_blocks",
 ] as const;
 
 test("fresh production schema is exact, versioned and has zero business history", () => {
@@ -126,7 +129,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 76);
+  assert.equal(manifest.length, 77);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -182,6 +185,9 @@ test("fresh production schema is exact, versioned and has zero business history"
     profile_inventory_pieces: ["current_length_mm", "historical_cost_minor", "inventory_lot_id", "origin_piece_id", "reserved_length_mm", "status"],
     profile_piece_reservations: ["consumed_length_mm", "planned_remnant_length_mm", "profile_piece_id", "reservation_id", "status"],
     profile_cut_executions: ["consumed_cost_minor", "consumed_length_mm", "operation_id", "remnant_cost_minor", "remnant_length_mm", "source_piece_id"],
+    profile_cut_waste_facts: ["execution_id", "inventory_lot_id", "inventory_ledger_event_id", "source_location_id", "waste_length_mm"],
+    profile_return_piece_restorations: ["return_receipt_inventory_allocation_id", "returned_piece_id", "source_delivery_piece_id", "warehouse_package_id"],
+    profile_piece_migration_blocks: ["inventory_lot_id", "product_id", "reason_code"],
     return_requests: ["currency", "financial_snapshot_id", "id", "request_operation_id", "requested_by_actor_id", "sale_id"],
     return_request_lines: ["financial_line_id", "id", "quantity_base_int", "reason_code", "return_id", "sale_line_id"],
     return_financial_reversal_allocations: ["discount_minor", "gross_minor", "net_minor", "quantity_base_int", "return_line_id", "vat_minor"],

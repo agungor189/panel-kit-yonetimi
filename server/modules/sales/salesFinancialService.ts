@@ -339,7 +339,13 @@ export class SalesFinancialService {
         throw new SalesFinancialValidationError("DISPATCH_NOT_FINAL", "COGS can only be finalized for the exact approved dispatch operation.", 409);
       }
       const dispatchedLots = this.db.prepare(`SELECT a.product_id,a.lot_id,a.quantity_base_int,a.fifo_sequence,
-        l.acquisition_cost_snapshot_id,l.base_uom_code_snapshot,c.normalized_cost_numerator,c.normalized_cost_denominator
+        l.acquisition_cost_snapshot_id,l.base_uom_code_snapshot,c.normalized_cost_numerator,c.normalized_cost_denominator,
+        (SELECT SUM(o.historical_cost_minor) FROM profile_piece_reservations r
+          JOIN profile_inventory_pieces source ON source.id=r.profile_piece_id
+          JOIN profile_cut_executions x ON x.profile_piece_reservation_id=r.id
+          JOIN profile_cut_outputs o ON o.execution_id=x.id AND o.output_kind='CUT'
+          WHERE r.reservation_id=a.reservation_id AND r.product_id=a.product_id
+            AND source.inventory_lot_id=a.lot_id) AS exact_profile_delivery_cost
         FROM inventory_reservation_allocations a
         JOIN inventory_lots l ON l.id=a.lot_id
         JOIN acquisition_lot_cost_snapshots c ON c.id=l.acquisition_cost_snapshot_id
@@ -359,17 +365,21 @@ export class SalesFinancialService {
       for (const lot of dispatchedLots) {
         let remaining = Number(lot.quantity_base_int);
         let consumedFromLot = 0;
+        const exactProfileCost = lot.exact_profile_delivery_cost === null ? null : Number(lot.exact_profile_delivery_cost);
         const matching = demands.filter((demand) => demand.component_product_id === lot.product_id && demand.remaining > 0);
         for (const demand of matching) {
           if (remaining === 0) break;
           const quantity = Math.min(remaining, demand.remaining);
-          const priorCost = roundRatio(BigInt(consumedFromLot) * BigInt(lot.normalized_cost_numerator), BigInt(lot.normalized_cost_denominator), "prior lot COGS");
+          const costNumerator = exactProfileCost === null ? BigInt(lot.normalized_cost_numerator) : BigInt(exactProfileCost);
+          const costDenominator = exactProfileCost === null ? BigInt(lot.normalized_cost_denominator) : BigInt(lot.quantity_base_int);
+          const priorCost = roundRatio(BigInt(consumedFromLot) * costNumerator, costDenominator, "prior lot COGS");
           consumedFromLot += quantity;
-          const cumulativeCost = roundRatio(BigInt(consumedFromLot) * BigInt(lot.normalized_cost_numerator), BigInt(lot.normalized_cost_denominator), "lot COGS");
+          const cumulativeCost = roundRatio(BigInt(consumedFromLot) * costNumerator, costDenominator, "lot COGS");
           const cost = cumulativeCost - priorCost;
           insert.run(randomUUID(), snapshot.id, demand.financial_line_id, demand.sale_line_id, lot.product_id, lot.lot_id,
-            lot.acquisition_cost_snapshot_id, quantity, lot.base_uom_code_snapshot, lot.normalized_cost_numerator,
-            lot.normalized_cost_denominator, cost, COGS_FORMULA_VERSION, operationId, actor.id, actor.name, finalizedAt);
+            lot.acquisition_cost_snapshot_id, quantity, lot.base_uom_code_snapshot, Number(costNumerator),
+            Number(costDenominator), cost, exactProfileCost === null ? COGS_FORMULA_VERSION : "dsdst.profile-cut-cogs.v1",
+            operationId, actor.id, actor.name, finalizedAt);
           demand.remaining -= quantity;
           remaining -= quantity;
           totalCogs = safeAdd([totalCogs, cost], "total COGS");

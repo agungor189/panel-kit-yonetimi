@@ -2521,6 +2521,10 @@ async function startServer() {
   app.post("/api/products/bulk-pricing", (req, res) => {
     try {
       const { updates, settings } = req.body;
+      if (!Array.isArray(updates)) return res.status(400).json({ success: false, error: { code: 'INVALID_PRICING_UPDATES', message: 'updates must be an array.' } });
+      const kitMutation = updates.find((update: any) => db.prepare(`SELECT 1 FROM products p
+        LEFT JOIN published_kits k ON k.product_id=p.id WHERE p.id=? AND (p.product_type='kit' OR k.id IS NOT NULL)`).get(update?.id));
+      if (kitMutation) return res.status(409).json({ success: false, error: { code: 'KIT_PUBLICATION_REQUIRED', message: 'KIT price changes require a new canonical published kit version.' } });
       const { exchangeRate, bufferPercentage, profitPercentage } = settings;
       let updatedCount = 0;
       let skippedLockedCount = 0;
@@ -5887,7 +5891,7 @@ async function startServer() {
         // Fetch products that need fixing
         const productsParams = db.prepare(`
            SELECT id, purchase_price_usd, purchase_cost, sale_price, buffer_percentage, profit_percentage, exchange_rate_used, price_locked
-           FROM products
+           FROM products WHERE COALESCE(product_type,'')<>'kit'
         `).all() as any[];
 
         const updateStmt = db.prepare(`

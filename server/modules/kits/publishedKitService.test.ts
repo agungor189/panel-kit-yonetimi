@@ -63,7 +63,7 @@ const proposal = (db: Database.Database, overrides: Partial<KitPublicationPropos
       packages: [{ packageNumber: 1, dimensionsMm: { length: 1850, width: 200, height: 150 }, targetWeightGrams: 5000, items: [
         { productId: "connector", quantityBaseInt: 4 },
         { productId: "cap", quantityBaseInt: 2 },
-        { productId: "profile", quantityBaseInt: 1803 },
+        { productId: "profile", quantityBaseInt: 1800 },
       ] }],
     },
     finalSalePriceMinor: 3000,
@@ -112,8 +112,11 @@ test("valid publication creates a canonical KIT and immutable BOM/cut/package/co
   assert.deepEqual(db.prepare("SELECT component_product_id,quantity_base_int FROM published_kit_version_components WHERE published_kit_version_id=? ORDER BY component_sequence").all(published.versionId), [
     { component_product_id: "cap", quantity_base_int: 2 },
     { component_product_id: "connector", quantity_base_int: 4 },
-    { component_product_id: "profile", quantity_base_int: 1803 },
+    { component_product_id: "profile", quantity_base_int: 1800 },
   ]);
+  assert.deepEqual(db.prepare("SELECT purchase_cost,sale_price,price_locked FROM products WHERE id=?").get(published.productId), {
+    purchase_cost: 23.03, sale_price: 30, price_locked: 1,
+  });
   assert.equal(db.prepare("SELECT installation_guide_version FROM published_kit_versions WHERE id=?").pluck().get(published.versionId), "guide:v4");
   assert.equal(db.prepare("SELECT COUNT(*) FROM published_kit_version_packages WHERE published_kit_version_id=?").pluck().get(published.versionId), 1);
   assert.throws(() => db.prepare("UPDATE published_kit_versions SET title_snapshot='changed' WHERE id=?").run(published.versionId), /immutable/i);

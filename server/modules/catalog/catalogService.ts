@@ -67,7 +67,7 @@ export type CatalogProduct = {
 };
 
 export class CatalogValidationError extends Error {
-  constructor(message: string) {
+  constructor(message: string, public readonly code = "CATALOG_VALIDATION_FAILED", public readonly statusCode = 400) {
     super(message);
     this.name = "CatalogValidationError";
   }
@@ -229,8 +229,11 @@ export class CatalogService {
     return row ? this.mapRow(row) : null;
   }
 
-  createProduct(input: CatalogProductInput): CatalogProduct {
+  createProduct(input: CatalogProductInput, options: { allowPublishedKitMutation?: boolean } = {}): CatalogProduct {
     const normalized = normalizedInput(input);
+    if (normalized.catalogType === "KIT" && !options.allowPublishedKitMutation) {
+      throw new CatalogValidationError("KIT products must be created by canonical kit publication.", "KIT_PUBLICATION_REQUIRED", 409);
+    }
     const id = input.id ? requiredText(input.id, "id", 200) : randomUUID();
     return this.db.transaction(() => {
       this.db.prepare(`INSERT INTO products (
@@ -251,12 +254,15 @@ export class CatalogService {
     }).immediate();
   }
 
-  updateProduct(id: string, expectedVersion: number, input: CatalogProductInput): CatalogProduct {
+  updateProduct(id: string, expectedVersion: number, input: CatalogProductInput, options: { allowPublishedKitMutation?: boolean } = {}): CatalogProduct {
     if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) throw new CatalogValidationError("expected catalog version is invalid.");
     const normalized = normalizedInput(input);
     return this.db.transaction(() => {
-      const current = this.db.prepare("SELECT catalog_version, base_uom_code FROM products WHERE id=?").get(id) as { catalog_version: number; base_uom_code: UomCode } | undefined;
+      const current = this.db.prepare("SELECT catalog_version,base_uom_code,product_type FROM products WHERE id=?").get(id) as { catalog_version: number; base_uom_code: UomCode; product_type: string | null } | undefined;
       if (!current) throw new CatalogValidationError("Catalog product was not found.");
+      if ((current.product_type === "kit" || normalized.catalogType === "KIT") && !options.allowPublishedKitMutation) {
+        throw new CatalogValidationError("KIT products may only change through canonical kit publication.", "KIT_PUBLICATION_REQUIRED", 409);
+      }
       if (current.catalog_version !== expectedVersion) throw new CatalogValidationError("Catalog version conflict.");
       if (current.base_uom_code !== normalized.baseUomCode) {
         throw new CatalogValidationError("Base UOM identity is immutable after product creation; create a new SKU/product identity.");

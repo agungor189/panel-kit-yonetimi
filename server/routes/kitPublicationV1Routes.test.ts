@@ -30,7 +30,7 @@ function proposal(db: Database.Database): KitPublicationProposal {
     workspaceKitId: "workspace-api", workspaceVersionId: "workspace-api-v1", publishedKitId: null,
     sku: "KIT-API", title: "API Kit", components: [{ productId: "connector", catalogVersionRef: ref("connector"), quantityBaseInt: 2, role: "CONNECTOR" }],
     profileCutPlan: { profileProductId: "profile", catalogVersionRef: ref("profile"), cuts: [{ quantity: 1, lengthMm: 1800 }] },
-    packagingPlan: { packageCount: 1, instructionVersion: "packing:v1", installationGuideVersion: "guide:v1", packages: [{ packageNumber: 1, items: [{ productId: "connector", quantityBaseInt: 2 }, { productId: "profile", quantityBaseInt: 1803 }] }] },
+    packagingPlan: { packageCount: 1, instructionVersion: "packing:v1", installationGuideVersion: "guide:v1", packages: [{ packageNumber: 1, items: [{ productId: "connector", quantityBaseInt: 2 }, { productId: "profile", quantityBaseInt: 1800 }] }] },
     finalSalePriceMinor: 4000, currency: "TRY" as const,
   };
   return { ...value, authoredContentHash: authoredKitContentHash(value) };

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { roundRatio } from "../finance/money.js";
 import { WarehouseExecutionService } from "../warehouse/warehouseExecutionService.js";
+import { ProfileCutInventoryService } from "../inventory/profileCutInventoryService.js";
 
 export type ReturnReason = "CUSTOMER_CHANGED_MIND" | "WRONG_PRODUCT" | "DAMAGED" | "MISSING_PART" | "INCOMPATIBLE" | "OTHER";
 export type ReturnDisposition = "SELLABLE" | "DAMAGED" | "MISSING_NOT_RECEIVED";
@@ -277,7 +278,7 @@ export class ReturnsService {
               VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(receiptAllocationId, receiptLineId, allocation.id, productId,
               allocation.inventory_lot_id, allocation.acquisition_cost_snapshot_id, take, cost, raw.disposition, ledgerEventId, receivedAt);
             if (raw.disposition !== "MISSING_NOT_RECEIVED") {
-              warehouse.registerReturnPackage({
+              const registered = warehouse.registerReturnPackage({
                 returnReceiptId: receiptId,
                 returnReceiptInventoryAllocationId: receiptAllocationId,
                 originalInventoryLotId: allocation.inventory_lot_id,
@@ -289,6 +290,20 @@ export class ReturnsService {
                 operationId,
                 occurredAt: receivedAt,
               });
+              const catalogType = this.db.prepare("SELECT catalog_type FROM products WHERE id=?").pluck().get(productId);
+              if (raw.disposition === "SELLABLE" && catalogType === "profile") {
+                try {
+                  new ProfileCutInventoryService(this.db).restoreReturnedPieces({
+                    receiptAllocationId, productId, lotId: allocation.inventory_lot_id,
+                    dispatchOperationId: allocation.original_dispatch_operation_id, quantityBaseInt: take,
+                    historicalCostMinor: cost, locationId: registered.destination.id, packageId: registered.package.id,
+                    operationId, restoredAt: receivedAt,
+                  });
+                } catch (error) {
+                  if (error instanceof Error && "code" in error) throw new ReturnsValidationError(String((error as any).code), error.message, 409);
+                  throw error;
+                }
+              }
             }
             if (raw.disposition === "DAMAGED") {
               this.db.prepare(`INSERT INTO return_quarantine_facts

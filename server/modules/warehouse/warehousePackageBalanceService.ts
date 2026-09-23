@@ -34,6 +34,33 @@ const OPEN_TASK_STATES = "'LOW_WATCH','PREPARE_REPLENISHMENT','CRITICAL_NO_RESER
 export class WarehousePackageBalanceService {
   constructor(private readonly db: Database.Database) {}
 
+  consumeSpecificPicking(input: { packageId: string; lotId: string; locationId: string; quantityBaseInt: number; occurredAt: string; operationId: string }) {
+    const pkg = this.db.prepare(`SELECT id,product_id,inventory_lot_id,current_slot_id,
+        remaining_quantity_base_int,target_quantity_base_int FROM warehouse_execution_packages
+      WHERE id=? AND inventory_lot_id=? AND current_slot_id=? AND disposition='ACCEPTED' AND status='PICKING'`)
+      .get(input.packageId, input.lotId, input.locationId) as PickPackageRow | undefined;
+    if (!pkg || !Number.isSafeInteger(input.quantityBaseInt) || input.quantityBaseInt <= 0
+      || Number(pkg.remaining_quantity_base_int) < input.quantityBaseInt) {
+      throw new WarehousePackageBalanceError(
+        "WAREHOUSE_PACKAGE_BALANCE_CONFLICT",
+        "The proven source package cannot satisfy the physical profile consumption.",
+      );
+    }
+    const changed = this.db.prepare(`UPDATE warehouse_execution_packages
+      SET remaining_quantity_base_int=remaining_quantity_base_int-?,updated_at=?
+      WHERE id=? AND remaining_quantity_base_int>=?`).run(
+        input.quantityBaseInt, input.occurredAt, pkg.id, input.quantityBaseInt,
+      );
+    if (changed.changes !== 1) throw new WarehousePackageBalanceError("WAREHOUSE_PACKAGE_BALANCE_CONFLICT", "Source package changed during profile cutting.");
+    const currentQuantity = Number(pkg.remaining_quantity_base_int) - input.quantityBaseInt;
+    const evaluation = this.evaluatePickPackage({ ...pkg, remaining_quantity_base_int: currentQuantity }, `${input.operationId}:replenishment:${pkg.id}`);
+    if (currentQuantity === 0) {
+      this.db.prepare(`UPDATE warehouse_execution_packages SET current_slot_id=NULL,updated_at=?
+        WHERE id=? AND remaining_quantity_base_int=0`).run(input.occurredAt, pkg.id);
+    }
+    return evaluation;
+  }
+
   consumePicking(input: { lotId: string; locationId: string; quantityBaseInt: number; occurredAt: string; operationId: string }): ReplenishmentEvaluation[] {
     const warehouseManaged = this.db.prepare(`SELECT 1 FROM warehouse_execution_packages
       WHERE inventory_lot_id=? AND disposition='ACCEPTED' LIMIT 1`).get(input.lotId);
