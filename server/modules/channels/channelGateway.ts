@@ -17,7 +17,7 @@ export const CHANNEL_ADAPTERS: Record<ChannelCode, {
   mayMutateCanonicalAuthority: false;
 }> = {
   TRENDYOL: { contract: "dsdst.channel-adapter.trendyol.v1", enabledTransport: true,
-    verifiedTransportScope: "existing-stage-production-order-poll-contract", supportsWebhook: false,
+    verifiedTransportScope: "order-poll,price-inventory,alternative-delivery-tracking-status", supportsWebhook: false,
     supportsPollingReconciliation: true, mayMutateCanonicalAuthority: false },
   HEPSIBURADA: { contract: "dsdst.channel-adapter.hepsiburada.v1", enabledTransport: false,
     verifiedTransportScope: "credential-test-only; order transport disabled pending verified contract", supportsWebhook: false,
@@ -484,24 +484,40 @@ export class ChannelGatewayService {
     return this.commands.execute({ operationId: input.operationId, commandType: "channels.outbound.claim.v1", payload: input,
       actor: { service: { id: input.serviceActorId } }, authorization: { decision: "ALLOW", capability: "channels:publish" } }, () => {
       const leaseExpiresAt = new Date(new Date(input.claimedAt).getTime() + leaseSeconds * 1000).toISOString();
-      const candidates = this.db.prepare(`SELECT j.id FROM channel_outbound_jobs j JOIN channel_accounts a ON a.id=j.account_id
-        WHERE j.state IN ('PENDING','RETRY') AND datetime(j.available_at)<=datetime(?)
-          AND (j.lease_token IS NULL OR datetime(j.lease_expires_at)<=datetime(?)) AND a.channel='TRENDYOL'
-          AND (? IS NULL OR j.account_id=?) ORDER BY datetime(j.available_at),j.created_at,j.id LIMIT ?`)
-        .all(input.claimedAt, input.claimedAt, input.accountId || null, input.accountId || null, limit) as Array<{ id: string }>;
+      const candidates = this.db.prepare(`SELECT id,outbound_type AS outboundType FROM (
+          SELECT j.id,'PRODUCT' AS outbound_type,j.available_at,j.created_at FROM channel_outbound_jobs j
+          JOIN channel_accounts a ON a.id=j.account_id
+          WHERE j.state IN ('PENDING','RETRY') AND datetime(j.available_at)<=datetime(?)
+            AND (j.lease_token IS NULL OR datetime(j.lease_expires_at)<=datetime(?)) AND a.channel='TRENDYOL'
+            AND (? IS NULL OR j.account_id=?)
+          UNION ALL
+          SELECT j.id,'SHIPMENT' AS outbound_type,j.available_at,j.created_at FROM channel_shipment_outbound_jobs j
+          JOIN channel_accounts a ON a.id=j.account_id
+          WHERE j.state IN ('PENDING','RETRY') AND datetime(j.available_at)<=datetime(?)
+            AND (j.lease_token IS NULL OR datetime(j.lease_expires_at)<=datetime(?)) AND a.channel='TRENDYOL'
+            AND (? IS NULL OR j.account_id=?)
+        ) ORDER BY datetime(available_at),created_at,id LIMIT ?`)
+        .all(input.claimedAt, input.claimedAt, input.accountId || null, input.accountId || null,
+          input.claimedAt, input.claimedAt, input.accountId || null, input.accountId || null, limit) as Array<{ id: string; outboundType: "PRODUCT" | "SHIPMENT" }>;
       const claimed: any[] = [];
       for (const candidate of candidates) {
         const leaseToken = randomUUID();
-        const changed = this.db.prepare(`UPDATE channel_outbound_jobs SET lease_token=?,lease_owner=?,lease_expires_at=? WHERE id=?
+        const table = candidate.outboundType === "SHIPMENT" ? "channel_shipment_outbound_jobs" : "channel_outbound_jobs";
+        const changed = this.db.prepare(`UPDATE ${table} SET lease_token=?,lease_owner=?,lease_expires_at=? WHERE id=?
           AND state IN ('PENDING','RETRY') AND (lease_token IS NULL OR datetime(lease_expires_at)<=datetime(?))`)
           .run(leaseToken, input.serviceActorId, leaseExpiresAt, candidate.id, input.claimedAt);
         if (changed.changes !== 1) continue;
-        const job = this.db.prepare(`SELECT j.id,j.account_id AS accountId,j.product_id AS productId,j.job_kind AS kind,j.state,
-          j.payload_json AS payloadJson,j.payload_hash AS payloadHash,j.attempt_count AS attemptCount,j.lease_token AS leaseToken,
-          j.lease_expires_at AS leaseExpiresAt,a.channel,m.external_listing_id AS externalListingId,m.external_sku AS externalSku
-          FROM channel_outbound_jobs j JOIN channel_accounts a ON a.id=j.account_id JOIN channel_product_mappings m ON m.id=j.mapping_id WHERE j.id=?`)
-          .get(candidate.id) as any;
-        claimed.push({ ...job, payload: JSON.parse(job.payloadJson) });
+        const job = candidate.outboundType === "SHIPMENT"
+          ? this.db.prepare(`SELECT j.id,j.account_id AS accountId,j.shipment_id AS shipmentId,j.channel_order_id AS channelOrderId,
+              j.job_kind AS kind,j.state,j.payload_json AS payloadJson,j.payload_hash AS payloadHash,j.attempt_count AS attemptCount,
+              j.lease_token AS leaseToken,j.lease_expires_at AS leaseExpiresAt,a.channel
+              FROM channel_shipment_outbound_jobs j JOIN channel_accounts a ON a.id=j.account_id WHERE j.id=?`).get(candidate.id) as any
+          : this.db.prepare(`SELECT j.id,j.account_id AS accountId,j.product_id AS productId,j.job_kind AS kind,j.state,
+              j.payload_json AS payloadJson,j.payload_hash AS payloadHash,j.attempt_count AS attemptCount,j.lease_token AS leaseToken,
+              j.lease_expires_at AS leaseExpiresAt,a.channel,m.external_listing_id AS externalListingId,m.external_sku AS externalSku
+              FROM channel_outbound_jobs j JOIN channel_accounts a ON a.id=j.account_id
+              JOIN channel_product_mappings m ON m.id=j.mapping_id WHERE j.id=?`).get(candidate.id) as any;
+        claimed.push({ ...job, outboundType: candidate.outboundType, payload: JSON.parse(job.payloadJson) });
       }
       return { statusCode: 200, body: claimed };
     }).result.body;
@@ -511,7 +527,7 @@ export class ChannelGatewayService {
     publish: (job: any) => Promise<unknown> }) {
     const job = this.db.prepare(`SELECT j.*,a.channel,m.external_listing_id,m.external_sku FROM channel_outbound_jobs j
       JOIN channel_accounts a ON a.id=j.account_id JOIN channel_product_mappings m ON m.id=j.mapping_id WHERE j.id=?`).get(input.jobId) as any;
-    if (!job) throw new ChannelGatewayError("OUTBOUND_JOB_NOT_FOUND", "Outbound job was not found.", 404);
+    if (!job) return this.processClaimedShipmentOutboundJob(input);
     if (job.state === "SUCCEEDED") return { id: job.id, state: "SUCCEEDED", replayed: true };
     if (!CHANNEL_ADAPTERS[job.channel as ChannelCode]?.enabledTransport) throw new ChannelGatewayError("ADAPTER_TRANSPORT_DISABLED", "The channel adapter transport is disabled.", 409);
     if (job.lease_token !== input.leaseToken || !job.lease_expires_at || new Date(job.lease_expires_at).getTime() < new Date(input.occurredAt).getTime()) {
@@ -534,6 +550,97 @@ export class ChannelGatewayService {
         operationId: input.operationId, serviceActorId: input.serviceActorId, occurredAt: input.occurredAt });
       throw error;
     }
+  }
+
+  private async processClaimedShipmentOutboundJob(input: { jobId: string; leaseToken: string; operationId: string;
+    serviceActorId: string; occurredAt: string; publish: (job: any) => Promise<unknown> }) {
+    const job = this.db.prepare(`SELECT j.*,a.channel FROM channel_shipment_outbound_jobs j
+      JOIN channel_accounts a ON a.id=j.account_id WHERE j.id=?`).get(input.jobId) as any;
+    if (!job) throw new ChannelGatewayError("OUTBOUND_JOB_NOT_FOUND", "Outbound job was not found.", 404);
+    if (job.state === "SUCCEEDED") return { id: job.id, state: "SUCCEEDED", replayed: true };
+    if (!CHANNEL_ADAPTERS[job.channel as ChannelCode]?.enabledTransport) {
+      throw new ChannelGatewayError("ADAPTER_TRANSPORT_DISABLED", "The channel adapter transport is disabled.", 409);
+    }
+    if (job.lease_token !== input.leaseToken || !job.lease_expires_at
+      || new Date(job.lease_expires_at).getTime() < new Date(input.occurredAt).getTime()) {
+      throw new ChannelGatewayError("OUTBOUND_LEASE_INVALID", "The outbound job lease is missing or expired.", 409);
+    }
+    const attemptNumber = Number(job.attempt_count) + 1;
+    let providerMutationId = `shipment:${job.account_id}:${job.shipment_id}:${job.payload_hash}`;
+    try {
+      const payload = JSON.parse(job.payload_json);
+      if (digest(payload) !== job.payload_hash) {
+        throw new ChannelGatewayError("CHANNEL_SHIPMENT_PAYLOAD_TAMPERED", "Shipment outbound payload hash does not match.", 409);
+      }
+      if (job.job_kind !== "TRACKING_STATUS" || payload?.contract !== "dsdst.channel-shipment-projection.v1"
+        || payload?.status !== "DISPATCHED") {
+        throw new ChannelGatewayError("CHANNEL_SHIPMENT_CONTRACT_INVALID", "Shipment outbound projection is invalid.", 409);
+      }
+      if (!Array.isArray(payload.packages) || payload.packages.length !== 1 || Number(payload.packageCount) !== 1) {
+        throw new ChannelGatewayError("CHANNEL_SHIPMENT_MAPPING_UNVERIFIED",
+          "Marketplace package mapping is required before publishing a multi-package shipment.", 409);
+      }
+      const trackingUrl = typeof payload.packages[0]?.trackingUrl === "string" ? payload.packages[0].trackingUrl.trim() : "";
+      if (!trackingUrl) throw new ChannelGatewayError("CHANNEL_TRACKING_PENDING", "Tracking is not available yet.", 409);
+      let parsedTrackingUrl: URL;
+      try { parsedTrackingUrl = new URL(trackingUrl); } catch {
+        throw new ChannelGatewayError("CHANNEL_TRACKING_URL_INVALID", "Tracking URL is invalid.", 409);
+      }
+      if (!['https:', 'http:'].includes(parsedTrackingUrl.protocol)) {
+        throw new ChannelGatewayError("CHANNEL_TRACKING_URL_INVALID", "Tracking URL protocol is invalid.", 409);
+      }
+      const marketplacePackages = this.db.prepare(`SELECT external_package_id AS externalPackageId
+        FROM channel_order_packages WHERE channel_order_id=? AND package_state='ACTIVE' ORDER BY external_package_id`)
+        .all(job.channel_order_id) as Array<{ externalPackageId: string }>;
+      if (marketplacePackages.length !== 1) {
+        throw new ChannelGatewayError("CHANNEL_SHIPMENT_MAPPING_UNVERIFIED",
+          "Exactly one active marketplace package is required for the verified shipment publication path.", 409);
+      }
+      const externalPackageId = marketplacePackages[0].externalPackageId;
+      providerMutationId = `trendyol:alternative-delivery:${job.account_id}:${externalPackageId}:${job.payload_hash}`;
+      const response = await input.publish({ id: job.id, outboundType: "SHIPMENT", accountId: job.account_id,
+        shipmentId: job.shipment_id, channelOrderId: job.channel_order_id, kind: job.job_kind, payload,
+        payloadHash: job.payload_hash, channel: job.channel, externalPackageId, providerMutationId });
+      return this.recordShipmentOutboundAttempt({ jobId: job.id, providerMutationId, state: "SUCCEEDED", response,
+        operationId: input.operationId, serviceActorId: input.serviceActorId, occurredAt: input.occurredAt });
+    } catch (error: any) {
+      const blocked = ["CHANNEL_TRACKING_PENDING", "CHANNEL_SHIPMENT_MAPPING_UNVERIFIED", "CHANNEL_SHIPMENT_CONTRACT_INVALID",
+        "CHANNEL_SHIPMENT_PAYLOAD_TAMPERED",
+        "CHANNEL_TRACKING_URL_INVALID"].includes(String(error?.code));
+      const rateLimited = Number(error?.statusCode) === 429;
+      const retryAt = blocked ? null : new Date(new Date(input.occurredAt).getTime()
+        + Math.min(15 * 60, 30 * 2 ** Math.min(attemptNumber - 1, 5)) * 1000).toISOString();
+      this.recordShipmentOutboundAttempt({ jobId: job.id, providerMutationId,
+        state: blocked ? "BLOCKED" : rateLimited ? "RATE_LIMITED" : "FAILED", response: error?.body,
+        errorCode: blocked ? String(error.code) : rateLimited ? "RATE_LIMITED" : String(error?.code || "PROVIDER_PUBLISH_FAILED"),
+        retryAt, operationId: input.operationId, serviceActorId: input.serviceActorId, occurredAt: input.occurredAt });
+      throw error;
+    }
+  }
+
+  private recordShipmentOutboundAttempt(input: { jobId: string; providerMutationId: string;
+    state: "SUCCEEDED" | "FAILED" | "RATE_LIMITED" | "BLOCKED"; response?: unknown; errorCode?: string | null;
+    retryAt?: string | null; operationId: string; serviceActorId: string; occurredAt: string }) {
+    const commandPayload = { ...input, response: input.response === undefined ? null : input.response };
+    return this.commands.execute<any>({ operationId: input.operationId, commandType: "channels.shipment-outbound-attempt.record.v1", payload: commandPayload,
+      actor: { service: { id: input.serviceActorId } }, authorization: { decision: "ALLOW", capability: "channels:publish" } }, () => {
+      const current = this.db.prepare("SELECT state,attempt_count FROM channel_shipment_outbound_jobs WHERE id=?").get(input.jobId) as any;
+      if (!current) throw new ChannelGatewayError("OUTBOUND_JOB_NOT_FOUND", "Outbound job was not found.", 404);
+      if (current.state === "SUCCEEDED") return { statusCode: 200, body: { id: input.jobId, state: "SUCCEEDED", replayed: true } };
+      const attemptNumber = Number(current.attempt_count) + 1;
+      const id = randomUUID();
+      this.db.prepare(`INSERT INTO channel_shipment_outbound_attempts
+        (id,job_id,provider_mutation_id,attempt_number,state,response_digest,error_code,retry_at,started_at,completed_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id, input.jobId, input.providerMutationId, attemptNumber, input.state,
+        input.response === undefined ? null : digest(redactProviderPayload(input.response)), input.errorCode || null,
+        input.retryAt || null, input.occurredAt, input.occurredAt);
+      const jobState = input.state === "SUCCEEDED" ? "SUCCEEDED" : input.state === "BLOCKED" ? "BLOCKED" : "RETRY";
+      this.db.prepare(`UPDATE channel_shipment_outbound_jobs SET state=?,attempt_count=attempt_count+1,
+        available_at=COALESCE(?,available_at),last_error_code=?,completed_at=CASE WHEN ? IN ('SUCCEEDED','BLOCKED') THEN ? ELSE NULL END,
+        lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=?`).run(jobState, input.retryAt || null,
+        input.errorCode || null, jobState, input.occurredAt, input.occurredAt, input.jobId);
+      return { statusCode: 200, body: { id, state: input.state, providerMutationId: input.providerMutationId, replayed: false } };
+    }).result.body;
   }
 
   enqueueStockSync(input: { accountId: string; productId: string; sourceVersion: string; operationId: string; actor: Actor }) {

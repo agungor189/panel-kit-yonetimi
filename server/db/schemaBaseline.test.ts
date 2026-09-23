@@ -146,6 +146,7 @@ const businessTablesThatMustStartEmpty = [
   "shipment_cancellations",
   "shipment_actual_charge_facts",
   "channel_shipment_outbound_jobs",
+  "channel_shipment_outbound_attempts",
   "shipment_notification_policies",
   "shipment_recipient_snapshots",
   "geliver_create_jobs",
@@ -167,7 +168,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 82);
+  assert.equal(manifest.length, 83);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -239,6 +240,8 @@ test("fresh production schema is exact, versioned and has zero business history"
     channel_poll_cursors: ["account_id", "checkpoint_value", "checkpoint_version", "cursor_name", "updated_operation_id"],
     channel_outbound_jobs: ["account_id", "attempt_count", "job_kind", "payload_hash", "payload_json", "product_id", "source_version", "state"],
     channel_outbound_attempts: ["attempt_number", "job_id", "provider_mutation_id", "state"],
+    channel_shipment_outbound_jobs: ["account_id", "attempt_count", "channel_order_id", "job_kind", "lease_expires_at", "lease_token", "payload_hash", "shipment_id", "source_version", "state"],
+    channel_shipment_outbound_attempts: ["attempt_number", "job_id", "provider_mutation_id", "state"],
     channel_exceptions: ["account_id", "channel_order_id", "detail_json", "exception_type", "inbound_event_id", "state"],
     return_requests: ["currency", "financial_snapshot_id", "id", "request_operation_id", "requested_by_actor_id", "sale_id"],
     return_request_lines: ["financial_line_id", "id", "quantity_base_int", "reason_code", "return_id", "sale_line_id"],

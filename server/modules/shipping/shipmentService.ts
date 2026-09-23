@@ -626,7 +626,10 @@ export class ShipmentService {
       packageCount: shipment.packageCount, packages: shipment.packages.map((pack: any) => ({ packageNumber: pack.packageNumber,
         trackingNumber: pack.booking.trackingNumber, trackingUrl: pack.booking.trackingUrl })) };
     const payloadHash = digest(payload);
-    const sourceVersion = `shipment:v2:${digest({ operationId, payloadHash })}`;
+    // The canonical projection content, rather than the triggering command, is the
+    // publication version. Handoff and refresh replays therefore converge, while a
+    // later tracking observation produces a distinct version.
+    const sourceVersion = `shipment:v3:${payloadHash}`;
     const id = randomUUID();
     this.db.prepare(`INSERT INTO channel_shipment_outbound_jobs
       (id,account_id,shipment_id,channel_order_id,job_kind,source_version,payload_json,payload_hash,state,created_operation_id,available_at)

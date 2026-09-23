@@ -7,6 +7,8 @@ import { CommandExecutor } from "../commands/commandFoundation.js";
 import { InventoryService } from "../inventory/inventoryService.js";
 import { ProcurementService } from "../procurement/procurementService.js";
 import { SalesFinancialService } from "../sales/salesFinancialService.js";
+import { ChannelGatewayError, ChannelGatewayService } from "../channels/channelGateway.js";
+import { TrendyolGatewayTransport } from "../channels/trendyolGatewayTransport.js";
 import {
   GELIVER_TRANSPORT_CONTRACT,
   ShipmentService,
@@ -86,6 +88,12 @@ const setup = () => {
     (id,account_id,external_order_id,latest_external_version,currency,actual_discount_minor,order_state,sale_id,reservation_id,
      first_event_id,raw_order_digest) VALUES ('channel-order','channel-account','external-order','1','TRY',0,'ACCEPTED','sale',
      'reservation','channel-event',?)`).run("d".repeat(64));
+  db.prepare(`INSERT INTO channel_order_packages
+    (id,channel_order_id,external_package_id,latest_external_version,latest_provider_occurred_at,package_state,currency,
+     package_gross_minor,package_seller_discount_minor,package_ty_discount_minor,package_total_discount_minor,
+     package_total_price_minor,latest_event_id,financial_provenance_json,updated_at)
+    VALUES ('channel-package','channel-order','trendyol-package-1','1','2026-09-23T09:00:00.000Z','ACTIVE','TRY',
+      0,0,0,0,0,'channel-event','{}','2026-09-23T09:00:00.000Z')`).run();
   new SalesFinancialService(db).createOrderSnapshot({
     saleId: "sale", currency: "TRY", sourceChannel: "Trendyol", discountMinor: 0, commissionRatePercent: "0",
     commissionCalculationBasis: "GROSS_BEFORE_DISCOUNT", commissionTerms: { version: "fixture" },
@@ -178,7 +186,7 @@ test("booking replay/retry binds one provider shipment and pre-handoff cancel ne
   db.close();
 });
 
-test("confirmed handoff dispatches once, finalizes FIFO/COGS, routes V2-12 update, notifies once, and records actual charge", () => {
+test("handoff shipment projection is claimed by V2-12 and replay makes one verified Trendyol tracking/status mutation", async () => {
   const { db, inventory } = setup();
   const service = new ShipmentService(db);
   const { shipment } = service.packAndPrepare({ reservationId: "reservation", operationId: "pack", actor });
@@ -204,14 +212,111 @@ test("confirmed handoff dispatches once, finalizes FIFO/COGS, routes V2-12 updat
   assert.equal(db.prepare("SELECT COUNT(*) FROM sale_financial_cogs_finalizations").pluck().get(), 1);
   assert.equal(db.prepare("SELECT state FROM sale_financial_expense_facts WHERE category='SHIPPING' ORDER BY fact_version DESC LIMIT 1").pluck().get(), "KNOWN");
   assert.equal(db.prepare("SELECT COUNT(*) FROM channel_shipment_outbound_jobs").pluck().get(), 1);
+  service.publishV212TrackingRefresh(shipment.id, "2026-09-23T12:00:00.500Z");
+  assert.equal(db.prepare("SELECT COUNT(*) FROM channel_shipment_outbound_jobs").pluck().get(), 1);
   assert.equal(db.prepare("SELECT COUNT(*) FROM command_outbox WHERE event_type='customer.order.shipped.v1'").pluck().get(), 1);
   assert.equal(db.prepare("SELECT COUNT(*) FROM command_outbox WHERE event_type='customer.order.shipped.v1' AND payload_json LIKE '%DS-13%'").pluck().get(), 1);
   assert.equal(db.prepare("SELECT COUNT(*) FROM command_outbox WHERE event_type='customer.order.shipped.v1' AND payload_json LIKE '%package_count%'").pluck().get(), 1);
+  const gateway = new ChannelGatewayService(db);
+  const claimed = gateway.claimReadyOutboundJobs({ accountId: "channel-account", limit: 10, leaseSeconds: 30,
+    operationId: "claim-shipment-projection", serviceActorId: "channel-publisher", claimedAt: "2026-09-23T12:00:01.000Z" }) as any[];
+  assert.equal(claimed.length, 1);
+  assert.equal(claimed[0].outboundType, "SHIPMENT");
+  const requests: Array<{ url: string; options?: RequestInit }> = [];
+  const trendyol = new TrendyolGatewayTransport(gateway, async (url, _headers, options) => {
+    requests.push({ url, options });
+    return { success: true };
+  });
+  const process = () => gateway.processClaimedOutboundJob({ jobId: claimed[0].id, leaseToken: claimed[0].leaseToken,
+    operationId: "publish-shipment-projection", serviceActorId: "channel-publisher", occurredAt: "2026-09-23T12:00:02.000Z",
+    publish: (job) => trendyol.publish(job, { sellerId: "merchant", environment: "stage", headers: { Authorization: "[secret]" } }) });
+  await process();
+  await process();
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].url, /\/shipment-packages\/trendyol-package-1\/alternative-delivery$/);
+  assert.equal(requests[0].options?.method, "PUT");
+  assert.deepEqual(JSON.parse(String(requests[0].options?.body)), { isPhoneNumber: false,
+    trackingInfo: "https://tracking.invalid/1", params: { boxQuantity: 1 } });
+  assert.equal(db.prepare("SELECT COUNT(*) FROM channel_shipment_outbound_attempts WHERE state='SUCCEEDED'").pluck().get(), 1);
+  assert.equal(db.prepare("SELECT COUNT(DISTINCT provider_mutation_id) FROM channel_shipment_outbound_attempts").pluck().get(), 1);
   assert.throws(() => service.cancelBeforeHandoff({ shipmentId: shipment.id, reason: "TOO_LATE", operationId: "cancel-late", actor, transport }),
     (error: unknown) => error instanceof ShipmentValidationError && error.code === "RETURN_FLOW_REQUIRED");
   assert.equal(GELIVER_TRANSPORT_CONTRACT.enabled, false);
   assert.match(GELIVER_TRANSPORT_CONTRACT.disabledReason, /idempotency|100x150/i);
   db.close();
+});
+
+test("tracking absent at dispatch blocks without mutation; later Geliver refresh creates and publishes a new projection version", async () => {
+  const { db, shipping, shipment, transport, geliver } = prepareLiveGeliver();
+  const [createJob] = geliver.prepareCreateJobs({ shipmentId: shipment.id, recipient, operationId: "late-create", actor });
+  const provider = await geliver.processCreateJob(createJob.id);
+  const accept = geliver.selectOffer({ shipmentId: shipment.id, offerId: provider.offers[0].id, operationId: "late-select", actor });
+  await geliver.processAcceptJob(accept.id);
+  shipping.confirmHandoff({ shipmentId: shipment.id, handedOffAt: "2026-09-23T14:00:00.000Z",
+    handoffEvidence: { carrierReceipt: "late-receipt" }, operationId: "late-handoff", actor });
+  assert.equal(db.prepare("SELECT COUNT(*) FROM channel_shipment_outbound_jobs").pluck().get(), 1);
+  const gateway = new ChannelGatewayService(db);
+  const first = gateway.claimReadyOutboundJobs({ accountId: "channel-account", limit: 1, leaseSeconds: 30,
+    operationId: "late-claim-null", serviceActorId: "channel-publisher", claimedAt: "2026-09-23T14:00:01.000Z" }) as any[];
+  let sends = 0;
+  await assert.rejects(() => gateway.processClaimedOutboundJob({ jobId: first[0].id, leaseToken: first[0].leaseToken,
+    operationId: "late-process-null", serviceActorId: "channel-publisher", occurredAt: "2026-09-23T14:00:02.000Z",
+    publish: async () => { sends += 1; return {}; } }),
+  (error: unknown) => error instanceof ChannelGatewayError && error.code === "CHANNEL_TRACKING_PENDING");
+  assert.equal(sends, 0);
+  assert.equal(db.prepare("SELECT state FROM channel_shipment_outbound_jobs").pluck().get(), "BLOCKED");
+
+  transport.publishTracking(provider.providerShipmentId);
+  await geliver.refreshShipment(shipment.id);
+  shipping.publishV212TrackingRefresh(shipment.id, "2026-09-23T14:01:00.000Z");
+  assert.equal(db.prepare("SELECT COUNT(*) FROM channel_shipment_outbound_jobs").pluck().get(), 2);
+  assert.equal(db.prepare("SELECT COUNT(DISTINCT source_version) FROM channel_shipment_outbound_jobs").pluck().get(), 2);
+  const second = gateway.claimReadyOutboundJobs({ accountId: "channel-account", limit: 1, leaseSeconds: 30,
+    operationId: "late-claim-tracking", serviceActorId: "channel-publisher", claimedAt: "2026-09-23T14:01:01.000Z" }) as any[];
+  await gateway.processClaimedOutboundJob({ jobId: second[0].id, leaseToken: second[0].leaseToken,
+    operationId: "late-process-tracking", serviceActorId: "channel-publisher", occurredAt: "2026-09-23T14:01:02.000Z",
+    publish: async (job) => { sends += 1; assert.equal(job.payload.packages[0].trackingNumber, "TRACK-LATER"); return {}; } });
+  assert.equal(sends, 1);
+  assert.deepEqual(db.prepare(`SELECT state,COUNT(*) AS count FROM channel_shipment_outbound_jobs
+    GROUP BY state ORDER BY state`).all(), [{ state: "BLOCKED", count: 1 }, { state: "SUCCEEDED", count: 1 }]);
+  db.close();
+});
+
+test("unverified Hepsiburada, N11, and Shopify shipment adapters cannot publish", async () => {
+  for (const channel of ["HEPSIBURADA", "N11", "SHOPIFY"] as const) {
+    const { db } = setup();
+    const shipping = new ShipmentService(db);
+    const shipment = shipping.packAndPrepare({ reservationId: "reservation", operationId: `disabled-pack-${channel}`, actor }).shipment;
+    const gateway = new ChannelGatewayService(db);
+    gateway.configureAccount({ id: `disabled-${channel}`, channel, merchantAccountId: `merchant-${channel}`, environment: "STAGE",
+      operationId: `disabled-config-${channel}`, actor });
+    db.prepare(`INSERT INTO channel_inbound_events
+      (id,account_id,external_event_id,external_event_version,ingestion_path,event_type,raw_payload_json,raw_payload_digest,
+       received_at,processing_state,sale_id) VALUES (?,?,?,?, 'POLL','ORDER_UPSERT','{}',?,'2026-09-23T15:00:00.000Z','ACCEPTED','sale')`)
+      .run(`disabled-event-${channel}`, `disabled-${channel}`, `event-${channel}`, "1", "e".repeat(64));
+    db.prepare(`INSERT INTO channel_orders
+      (id,account_id,external_order_id,latest_external_version,currency,actual_discount_minor,order_state,sale_id,
+       first_event_id,raw_order_digest) VALUES (?,?,?,'1','TRY',0,'ACCEPTED','sale',?,?)`)
+      .run(`disabled-order-${channel}`, `disabled-${channel}`, `external-${channel}`, `disabled-event-${channel}`, "f".repeat(64));
+    const payload = JSON.stringify({ contract: "dsdst.channel-shipment-projection.v1", shipmentId: shipment.id,
+      orderId: "sale", status: "DISPATCHED", carrier: "GELIVER", service: "STANDARD", packageCount: 1,
+      packages: [{ packageNumber: 1, trackingNumber: "TRACK", trackingUrl: "https://tracking.invalid/TRACK" }] });
+    const payloadHash = "a".repeat(64);
+    db.prepare(`INSERT INTO channel_shipment_outbound_jobs
+      (id,account_id,shipment_id,channel_order_id,job_kind,source_version,payload_json,payload_hash,state,
+       created_operation_id,available_at,lease_token,lease_owner,lease_expires_at)
+      VALUES (?,?,?,?, 'TRACKING_STATUS',?,?,?,?,?,'2026-09-23T15:00:00.000Z','disabled-lease','worker','2026-09-23T15:01:00.000Z')`)
+      .run(`disabled-job-${channel}`, `disabled-${channel}`, shipment.id, `disabled-order-${channel}`, `v-${channel}`,
+        payload, payloadHash, "PENDING", `create-${channel}`);
+    let sends = 0;
+    await assert.rejects(() => gateway.processClaimedOutboundJob({ jobId: `disabled-job-${channel}`, leaseToken: "disabled-lease",
+      operationId: `disabled-process-${channel}`, serviceActorId: "worker", occurredAt: "2026-09-23T15:00:01.000Z",
+      publish: async () => { sends += 1; return {}; } }),
+    (error: unknown) => error instanceof ChannelGatewayError && error.code === "ADAPTER_TRANSPORT_DISABLED");
+    assert.equal(sends, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) FROM channel_shipment_outbound_attempts").pluck().get(), 0);
+    db.close();
+  }
 });
 
 test("COD is rejected", () => {

@@ -236,11 +236,20 @@ export class TrendyolGatewayTransport {
     return summary;
   }
 
-  async publish(job: { kind: string; externalListingId: string; payload: any }, input: {
+  async publish(job: { kind: string; externalListingId?: string; externalPackageId?: string; payload: any }, input: {
     sellerId: string;
     environment: TrendyolEnvironment;
     headers: Record<string, string>;
   }) {
+    if (job.kind === "TRACKING_STATUS") {
+      const packageId = identifier(job.externalPackageId);
+      const trackingUrl = identifier(job.payload?.packages?.[0]?.trackingUrl);
+      if (!packageId) throw new ChannelGatewayError("TRENDYOL_PACKAGE_ID_REQUIRED", "Trendyol shipment publication requires a package id.", 409);
+      if (!trackingUrl) throw new ChannelGatewayError("CHANNEL_TRACKING_PENDING", "Tracking is not available yet.", 409);
+      return this.requestJson(`${trendyolBaseUrl(input.environment)}/integration/order/sellers/${encodeURIComponent(input.sellerId)}`
+        + `/shipment-packages/${encodeURIComponent(packageId)}/alternative-delivery`, input.headers,
+      { method: "PUT", body: JSON.stringify({ isPhoneNumber: false, trackingInfo: trackingUrl, params: { boxQuantity: 1 } }) });
+    }
     if (!job.externalListingId) throw new ChannelGatewayError("TRENDYOL_BARCODE_REQUIRED", "Trendyol publication requires the mapped barcode.", 409);
     let item: any;
     if (job.kind === "STOCK") item = { barcode: job.externalListingId, quantity: Number(job.payload.quantityBaseInt) };
