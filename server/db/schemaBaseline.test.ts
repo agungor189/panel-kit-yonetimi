@@ -133,6 +133,8 @@ const businessTablesThatMustStartEmpty = [
   "channel_outbound_jobs",
   "channel_outbound_attempts",
   "channel_exceptions",
+  "channel_order_packages",
+  "channel_order_package_versions",
 ] as const;
 
 test("fresh production schema is exact, versioned and has zero business history", () => {
@@ -141,7 +143,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 79);
+  assert.equal(manifest.length, 80);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -204,9 +206,11 @@ test("fresh production schema is exact, versioned and has zero business history"
     channel_product_mappings: ["account_id", "category_ref", "external_listing_id", "external_sku", "product_id", "version"],
     channel_commission_terms: ["account_id", "basis", "product_id", "provenance_json", "rate_denominator", "rate_numerator", "state", "version"],
     channel_stock_buffers: ["account_id", "buffer_quantity_base_int", "product_id", "updated_operation_id", "version"],
-    channel_inbound_events: ["account_id", "external_event_id", "external_event_version", "ingestion_path", "processing_state", "raw_payload_digest", "raw_payload_json"],
+    channel_inbound_events: ["account_id", "external_event_id", "external_event_version", "external_order_id", "ingestion_path", "package_versions_json", "processing_state", "raw_payload_digest", "raw_payload_json"],
     channel_orders: ["account_id", "external_order_id", "latest_external_version", "order_state", "reservation_id", "sale_id"],
-    channel_order_lines: ["actual_unit_gross_minor", "channel_order_id", "commission_term_id", "expected_unit_gross_minor", "external_line_id", "product_id", "quantity_base_int"],
+    channel_order_lines: ["actual_unit_gross_minor", "channel_order_id", "commission_term_id", "expected_unit_gross_minor", "external_line_id", "external_package_id", "product_id", "provider_customer_total_minor", "provider_financial_provenance_json", "provider_gross_minor", "provider_seller_discount_minor", "provider_ty_discount_minor", "quantity_base_int"],
+    channel_order_packages: ["channel_order_id", "external_package_id", "latest_external_version", "latest_provider_occurred_at", "package_gross_minor", "package_seller_discount_minor", "package_state", "package_total_discount_minor", "package_total_price_minor", "package_ty_discount_minor"],
+    channel_order_package_versions: ["external_version", "inbound_event_id", "package_gross_minor", "package_id", "package_seller_discount_minor", "package_state", "package_total_discount_minor", "package_total_price_minor", "package_ty_discount_minor", "provider_occurred_at"],
     channel_price_variances: ["actual_channel_price_minor", "channel_order_line_id", "difference_minor", "expected_channel_price_minor", "target_price_minor"],
     channel_poll_cursors: ["account_id", "checkpoint_value", "checkpoint_version", "cursor_name", "updated_operation_id"],
     channel_outbound_jobs: ["account_id", "attempt_count", "job_kind", "payload_hash", "payload_json", "product_id", "source_version", "state"],

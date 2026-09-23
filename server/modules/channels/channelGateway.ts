@@ -91,7 +91,24 @@ const roundedCommission = (amountMinor: number, rate: CommissionRate): number =>
 const gcd = (left: number, right: number): number => right === 0 ? Math.abs(left) : gcd(right, left % right);
 
 type Actor = { id: string; name?: string | null };
-type InboundLine = { externalLineId: string; externalListingId: string; externalSku?: string | null; quantityBaseInt: number; actualUnitGrossMinor: number; vatRateBps: number };
+type InboundLine = { externalLineId: string; externalPackageId?: string | null; externalListingId: string; externalSku?: string | null;
+  quantityBaseInt: number; actualUnitGrossMinor: number; vatRateBps: number; providerGrossMinor?: number;
+  providerSellerDiscountMinor?: number; providerTyDiscountMinor?: number; providerCustomerTotalMinor?: number;
+  providerFinancialProvenance?: unknown };
+type InboundPackage = {
+  externalPackageId: string;
+  externalPackageVersion: string;
+  state: "ACTIVE" | "CANCELLED" | "RETURNED";
+  currency: string;
+  grossMinor: number;
+  sellerDiscountMinor: number;
+  trendyolDiscountMinor: number;
+  totalDiscountMinor: number;
+  customerTotalMinor: number;
+  providerOccurredAt: string;
+  financialProvenance: unknown;
+  lines: InboundLine[];
+};
 type InboundEvent = {
   accountId: string;
   externalEventId: string;
@@ -102,6 +119,8 @@ type InboundEvent = {
   currency: string;
   discountMinor: number;
   lines: InboundLine[];
+  packages?: InboundPackage[];
+  providerFinancial?: unknown;
   rawPayload: unknown;
   providerOccurredAt?: string | null;
   receivedAt: string;
@@ -190,23 +209,46 @@ export class ChannelGatewayService {
       const account = this.db.prepare("SELECT * FROM channel_accounts WHERE id=?").get(event.accountId) as any;
       if (!account) throw new ChannelGatewayError("CHANNEL_ACCOUNT_NOT_FOUND", "Channel account was not found.", 404);
       const existingEvent = this.db.prepare(`SELECT e.*,o.sale_id,o.id AS channel_order_id FROM channel_inbound_events e
-        LEFT JOIN channel_orders o ON o.first_event_id=e.id WHERE e.account_id=? AND e.external_event_id=? AND e.external_event_version=?`)
+        LEFT JOIN channel_orders o ON o.account_id=e.account_id AND (o.first_event_id=e.id OR o.external_order_id=e.external_order_id)
+        WHERE e.account_id=? AND e.external_event_id=? AND e.external_event_version=?`)
         .get(event.accountId, event.externalEventId, event.externalEventVersion) as any;
       if (existingEvent) return { statusCode: 200, body: { state: "DUPLICATE", saleId: existingEvent.sale_id || null, eventId: existingEvent.id } };
       const eventId = randomUUID();
       this.db.prepare(`INSERT INTO channel_inbound_events
         (id,account_id,external_event_id,external_event_version,ingestion_path,event_type,raw_payload_json,raw_payload_digest,
-         provider_occurred_at,received_at,processing_state) VALUES (?,?,?,?,?,?,?,?,?,?, 'RECEIVED')`).run(
+         provider_occurred_at,received_at,processing_state,external_order_id,package_versions_json)
+        VALUES (?,?,?,?,?,?,?,?,?,?, 'RECEIVED',?,?)`).run(
         eventId, event.accountId, event.externalEventId, event.externalEventVersion, event.ingestionPath, event.eventType,
-        stableJson(sanitized), payloadDigest, event.providerOccurredAt || null, event.receivedAt);
+        stableJson(sanitized), payloadDigest, event.providerOccurredAt || null, event.receivedAt, event.externalOrderId,
+        event.packages ? stableJson(event.packages.map((pkg) => ({ externalPackageId: pkg.externalPackageId,
+          externalPackageVersion: pkg.externalPackageVersion }))) : null);
       this.db.prepare(`UPDATE channel_accounts SET ${event.ingestionPath === "WEBHOOK" ? "last_webhook_at" : "last_poll_at"}=?,updated_at=? WHERE id=?`)
         .run(event.receivedAt, event.receivedAt, event.accountId);
 
-      const existingOrder = this.db.prepare("SELECT * FROM channel_orders WHERE account_id=? AND external_order_id=?")
+      let existingOrder = this.db.prepare("SELECT * FROM channel_orders WHERE account_id=? AND external_order_id=?")
         .get(event.accountId, event.externalOrderId) as any;
+      if (event.eventType === "ORDER_UPSERT" && !existingOrder) {
+        if (!Array.isArray(event.lines) || event.lines.length === 0) throw new ChannelGatewayError("CHANNEL_LINES_REQUIRED", "Order lines are required.");
+        const orderId = randomUUID();
+        this.db.prepare(`INSERT INTO channel_orders
+          (id,account_id,external_order_id,latest_external_version,currency,actual_discount_minor,order_state,first_event_id,raw_order_digest)
+          VALUES (?,?,?,?,?,?,'RECEIVED',?,?)`).run(orderId, event.accountId, event.externalOrderId, event.externalEventVersion,
+          event.currency.toUpperCase(), integer(event.discountMinor, "discountMinor"), eventId, payloadDigest);
+        existingOrder = this.db.prepare("SELECT * FROM channel_orders WHERE id=?").get(orderId) as any;
+      }
+      if (existingOrder && event.packages?.length) this.persistInboundPackages(eventId, existingOrder.id, event.receivedAt, event.packages);
+
       if (event.eventType !== "ORDER_UPSERT") {
         if (!existingOrder?.sale_id) return this.recordException(eventId, event.accountId, existingOrder?.id || null,
           "ORDER_VERSION_EXCEPTION", { code: "ORDER_NOT_ACCEPTED", externalOrderId: event.externalOrderId });
+        if (event.packages?.length) {
+          const packageStates = this.currentPackageStates(existingOrder.id);
+          const allCancelled = packageStates.length > 0 && packageStates.every((pkg) => pkg.state === "CANCELLED");
+          const allReturned = packageStates.length > 0 && packageStates.every((pkg) => pkg.state === "RETURNED");
+          if (!allCancelled && !allReturned) return this.recordException(eventId, event.accountId, existingOrder.id,
+            "ORDER_VERSION_EXCEPTION", { code: "PARTIAL_PACKAGE_TRANSITION_REQUIRES_POLICY", externalOrderId: event.externalOrderId,
+              packages: packageStates });
+        }
         const transition = this.sales.applyCancellationOrReturn({ saleId: existingOrder.sale_id, operationId, actor: { id: serviceActorId }, occurredAt: event.receivedAt });
         this.db.prepare("UPDATE channel_orders SET order_state=?,latest_external_version=?,updated_at=? WHERE id=?")
           .run(transition.state, event.externalEventVersion, event.receivedAt, existingOrder.id);
@@ -216,17 +258,24 @@ export class ChannelGatewayService {
         return { statusCode: 200, body: { state: transition.state, saleId: existingOrder.sale_id, eventId } };
       }
       if (existingOrder?.sale_id) {
+        if (event.packages?.length) {
+          const packageStates = this.currentPackageStates(existingOrder.id);
+          if (packageStates.some((pkg) => pkg.state !== "ACTIVE")) return this.recordException(eventId, event.accountId, existingOrder.id,
+            "ORDER_VERSION_EXCEPTION", { code: "PARTIAL_PACKAGE_TRANSITION_REQUIRES_POLICY", externalOrderId: event.externalOrderId,
+              packages: packageStates });
+          const newLines = event.lines.filter((line) => !this.db.prepare(`SELECT 1 FROM channel_order_lines
+            WHERE channel_order_id=? AND external_line_id=?`).get(existingOrder.id, line.externalLineId));
+          if (newLines.length > 0) return this.recordException(eventId, event.accountId, existingOrder.id,
+            "ORDER_VERSION_EXCEPTION", { code: "ACCEPTED_ORDER_NEW_PACKAGE_LINES", externalOrderId: event.externalOrderId,
+              externalLineIds: newLines.map((line) => line.externalLineId) });
+        }
         this.db.prepare("UPDATE channel_inbound_events SET processing_state='DUPLICATE',sale_id=? WHERE id=?").run(existingOrder.sale_id, eventId);
         if (existingOrder.raw_order_digest !== payloadDigest) this.insertException(event.accountId, eventId, existingOrder.id,
           "ORDER_VERSION_EXCEPTION", { externalOrderId: event.externalOrderId, acceptedDigest: existingOrder.raw_order_digest, receivedDigest: payloadDigest });
         return { statusCode: 200, body: { state: "DUPLICATE", saleId: existingOrder.sale_id, eventId } };
       }
       if (!Array.isArray(event.lines) || event.lines.length === 0) throw new ChannelGatewayError("CHANNEL_LINES_REQUIRED", "Order lines are required.");
-      const orderId = existingOrder?.id || randomUUID();
-      if (!existingOrder) this.db.prepare(`INSERT INTO channel_orders
-        (id,account_id,external_order_id,latest_external_version,currency,actual_discount_minor,order_state,first_event_id,raw_order_digest)
-        VALUES (?,?,?,?,?,?,'RECEIVED',?,?)`).run(orderId, event.accountId, event.externalOrderId, event.externalEventVersion,
-        event.currency.toUpperCase(), integer(event.discountMinor, "discountMinor"), eventId, payloadDigest);
+      const orderId = existingOrder.id;
       const acceptedLines: any[] = [];
       const termsSnapshot: any[] = [];
       let totalCommission = 0;
@@ -239,12 +288,19 @@ export class ChannelGatewayService {
           WHERE m.account_id=? AND m.external_listing_id=? AND m.listing_state='ACTIVE'`).get(event.accountId, line.externalListingId) as any;
         const lineDigest = digest(line);
         const lineId = randomUUID();
+        const quantity = integer(line.quantityBaseInt, `lines[${index}].quantityBaseInt`, 1);
+        const actual = integer(line.actualUnitGrossMinor, `lines[${index}].actualUnitGrossMinor`);
+        const vatRateBps = integer(line.vatRateBps, `lines[${index}].vatRateBps`);
+        const providerFinancial = this.providerLineFinancial(line, quantity, actual);
         if (!mapping) {
           this.db.prepare(`INSERT INTO channel_order_lines
-            (id,channel_order_id,external_line_id,external_listing_id,external_sku,quantity_base_int,actual_unit_gross_minor,vat_rate_bps,raw_line_digest)
-            VALUES (?,?,?,?,?,?,?,?,?)`).run(lineId, orderId, line.externalLineId, line.externalListingId, line.externalSku || null,
-            integer(line.quantityBaseInt, `lines[${index}].quantityBaseInt`, 1), integer(line.actualUnitGrossMinor, `lines[${index}].actualUnitGrossMinor`),
-            integer(line.vatRateBps, `lines[${index}].vatRateBps`), lineDigest);
+            (id,channel_order_id,external_line_id,external_package_id,external_listing_id,external_sku,quantity_base_int,
+             actual_unit_gross_minor,vat_rate_bps,raw_line_digest,provider_gross_minor,provider_seller_discount_minor,
+             provider_ty_discount_minor,provider_customer_total_minor,provider_financial_provenance_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(lineId, orderId, line.externalLineId, line.externalPackageId || null,
+            line.externalListingId, line.externalSku || null, quantity, actual, vatRateBps, lineDigest, providerFinancial?.grossMinor ?? null,
+            providerFinancial?.sellerDiscountMinor ?? null, providerFinancial?.tyDiscountMinor ?? null,
+            providerFinancial?.customerTotalMinor ?? null, providerFinancial?.provenanceJson ?? null);
           this.insertException(event.accountId, eventId, orderId, "CHANNEL_MAPPING_EXCEPTION",
             { externalLineId: line.externalLineId, externalListingId: line.externalListingId, externalSku: line.externalSku || null });
           blocking = true;
@@ -253,9 +309,14 @@ export class ChannelGatewayService {
         const term = this.findCommissionTerm(event.accountId, mapping.product_id, mapping.category_ref, event.receivedAt);
         if (!term || term.state !== "KNOWN") {
           this.db.prepare(`INSERT INTO channel_order_lines
-            (id,channel_order_id,external_line_id,external_listing_id,external_sku,mapping_id,product_id,quantity_base_int,actual_unit_gross_minor,vat_rate_bps,raw_line_digest)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(lineId, orderId, line.externalLineId, line.externalListingId, line.externalSku || null,
-            mapping.id, mapping.product_id, integer(line.quantityBaseInt, "quantityBaseInt", 1), integer(line.actualUnitGrossMinor, "actualUnitGrossMinor"), integer(line.vatRateBps, "vatRateBps"), lineDigest);
+            (id,channel_order_id,external_line_id,external_package_id,external_listing_id,external_sku,mapping_id,product_id,
+             quantity_base_int,actual_unit_gross_minor,vat_rate_bps,raw_line_digest,provider_gross_minor,
+             provider_seller_discount_minor,provider_ty_discount_minor,provider_customer_total_minor,provider_financial_provenance_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(lineId, orderId, line.externalLineId, line.externalPackageId || null,
+            line.externalListingId, line.externalSku || null, mapping.id, mapping.product_id, quantity, actual, vatRateBps, lineDigest,
+            providerFinancial?.grossMinor ?? null, providerFinancial?.sellerDiscountMinor ?? null,
+            providerFinancial?.tyDiscountMinor ?? null, providerFinancial?.customerTotalMinor ?? null,
+            providerFinancial?.provenanceJson ?? null);
           this.insertException(event.accountId, eventId, orderId, "COMMISSION_EXCEPTION", { productId: mapping.product_id, state: term?.state || "MISSING" });
           blocking = true;
           continue;
@@ -264,13 +325,15 @@ export class ChannelGatewayService {
         const targetMinor = mapping.kit_price_minor === null || mapping.kit_price_minor === undefined
           ? this.legacyPanelPriceMinor(mapping.sale_price) : Number(mapping.kit_price_minor);
         const expected = calculateInverseCommissionPrice(targetMinor, rate);
-        const quantity = integer(line.quantityBaseInt, "quantityBaseInt", 1);
-        const actual = integer(line.actualUnitGrossMinor, "actualUnitGrossMinor");
         this.db.prepare(`INSERT INTO channel_order_lines
-          (id,channel_order_id,external_line_id,external_listing_id,external_sku,mapping_id,product_id,quantity_base_int,
-           actual_unit_gross_minor,vat_rate_bps,commission_term_id,expected_unit_gross_minor,raw_line_digest)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(lineId, orderId, line.externalLineId, line.externalListingId, line.externalSku || null,
-          mapping.id, mapping.product_id, quantity, actual, integer(line.vatRateBps, "vatRateBps"), term.id, expected, lineDigest);
+          (id,channel_order_id,external_line_id,external_package_id,external_listing_id,external_sku,mapping_id,product_id,quantity_base_int,
+           actual_unit_gross_minor,vat_rate_bps,commission_term_id,expected_unit_gross_minor,raw_line_digest,provider_gross_minor,
+           provider_seller_discount_minor,provider_ty_discount_minor,provider_customer_total_minor,provider_financial_provenance_json)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(lineId, orderId, line.externalLineId, line.externalPackageId || null,
+          line.externalListingId, line.externalSku || null, mapping.id, mapping.product_id, quantity, actual, vatRateBps, term.id, expected,
+          lineDigest, providerFinancial?.grossMinor ?? null, providerFinancial?.sellerDiscountMinor ?? null,
+          providerFinancial?.tyDiscountMinor ?? null, providerFinancial?.customerTotalMinor ?? null,
+          providerFinancial?.provenanceJson ?? null);
         if (actual !== expected) {
           this.db.prepare(`INSERT INTO channel_price_variances
             (id,channel_order_line_id,target_price_minor,expected_channel_price_minor,actual_channel_price_minor,difference_minor,provenance_json)
@@ -279,12 +342,13 @@ export class ChannelGatewayService {
           this.insertException(event.accountId, eventId, orderId, "PRICE_VARIANCE", { externalLineId: line.externalLineId, expected, actual });
         }
         acceptedLines.push({ externalLineId: line.externalLineId, productId: mapping.product_id, quantityBaseInt: quantity,
-          actualUnitGrossMinor: actual, vatRateBps: Number(line.vatRateBps) });
+          actualUnitGrossMinor: actual, vatRateBps, discountAllocationMinor: providerFinancial?.sellerDiscountMinor });
         const lineBasis = actual * quantity;
         commissionBasis += lineBasis;
         totalCommission += roundedCommission(lineBasis, rate);
         termsSnapshot.push({ externalLineId: line.externalLineId, termId: term.id, version: term.version, basis: term.basis,
-          rate, provenance: JSON.parse(term.provenance_json), expectedUnitGrossMinor: expected, actualUnitGrossMinor: actual });
+          rate, provenance: JSON.parse(term.provenance_json), expectedUnitGrossMinor: expected, actualUnitGrossMinor: actual,
+          providerFinancial: providerFinancial ? JSON.parse(providerFinancial.provenanceJson) : null });
       }
       if (blocking) return this.markOrderException(eventId, orderId);
       const divisor = commissionBasis === 0 ? 1 : gcd(totalCommission, commissionBasis);
@@ -293,7 +357,8 @@ export class ChannelGatewayService {
           externalOrderId: event.externalOrderId, currency: event.currency.toUpperCase(), discountMinor: event.discountMinor,
           lines: acceptedLines, commission: { amountMinor: totalCommission, effectiveNumerator: totalCommission / divisor,
             effectiveDenominator: commissionBasis === 0 ? 1 : commissionBasis / divisor,
-            terms: { contract: "dsdst.channel-commission-snapshot.v1", lines: termsSnapshot } },
+            terms: { contract: "dsdst.channel-commission-snapshot.v1", lines: termsSnapshot,
+              providerFinancial: event.providerFinancial || null } },
           operationId, actor: { id: serviceActorId }, acceptedAt: event.receivedAt });
         this.db.prepare(`UPDATE channel_orders SET order_state='ACCEPTED',sale_id=?,reservation_id=?,latest_external_version=?,accepted_at=?,updated_at=? WHERE id=?`)
           .run(accepted.saleId, accepted.reservationId, event.externalEventVersion, event.receivedAt, event.receivedAt, orderId);
@@ -363,12 +428,14 @@ export class ChannelGatewayService {
           VALUES (?,?,?,?,?,?,?)`).run(randomUUID(), line.id, targetMinor, expected, actual, actual - expected,
           stableJson({ source: "PROVIDER_ORDER_REPROCESS", operationId: input.operationId, commissionTermId: term.id }));
         acceptedLines.push({ externalLineId: line.external_line_id, productId: mapping.product_id, quantityBaseInt: quantity,
-          actualUnitGrossMinor: actual, vatRateBps: Number(line.vat_rate_bps) });
+          actualUnitGrossMinor: actual, vatRateBps: Number(line.vat_rate_bps),
+          discountAllocationMinor: line.provider_seller_discount_minor === null ? undefined : Number(line.provider_seller_discount_minor) });
         const lineBasis = actual * quantity;
         commissionBasis += lineBasis;
         totalCommission += roundedCommission(lineBasis, rate);
         termsSnapshot.push({ externalLineId: line.external_line_id, termId: term.id, version: term.version, basis: term.basis,
-          rate, provenance: JSON.parse(term.provenance_json), expectedUnitGrossMinor: expected, actualUnitGrossMinor: actual });
+          rate, provenance: JSON.parse(term.provenance_json), expectedUnitGrossMinor: expected, actualUnitGrossMinor: actual,
+          providerFinancial: line.provider_financial_provenance_json ? JSON.parse(line.provider_financial_provenance_json) : null });
       }
       const divisor = commissionBasis === 0 ? 1 : gcd(totalCommission, commissionBasis);
       try {
@@ -376,7 +443,8 @@ export class ChannelGatewayService {
           externalOrderId: order.external_order_id, currency: order.currency, discountMinor: Number(order.actual_discount_minor), lines: acceptedLines,
           commission: { amountMinor: totalCommission, effectiveNumerator: totalCommission / divisor,
             effectiveDenominator: commissionBasis === 0 ? 1 : commissionBasis / divisor,
-            terms: { contract: "dsdst.channel-commission-snapshot.v1", lines: termsSnapshot, reprocessOperationId: input.operationId } },
+            terms: { contract: "dsdst.channel-commission-snapshot.v1", lines: termsSnapshot, reprocessOperationId: input.operationId,
+              providerFinancial: this.providerOrderFinancial(order.id) } },
           operationId: input.operationId, actor: input.actor, acceptedAt: input.resolvedAt });
         this.db.prepare(`UPDATE channel_orders SET order_state='ACCEPTED',sale_id=?,reservation_id=?,accepted_at=?,updated_at=? WHERE id=? AND sale_id IS NULL`)
           .run(accepted.saleId, accepted.reservationId, input.resolvedAt, input.resolvedAt, order.id);
@@ -564,6 +632,97 @@ export class ChannelGatewayService {
         .get(input.accountId, input.productId, input.kind, input.sourceVersion) as any;
       return { statusCode: 202, body: { id: job.id, state: job.state, payload: JSON.parse(job.payload_json) } };
     }).result.body;
+  }
+
+  private providerLineFinancial(line: InboundLine, quantity: number, actualUnitGrossMinor: number) {
+    const values = [line.providerGrossMinor, line.providerSellerDiscountMinor, line.providerTyDiscountMinor,
+      line.providerCustomerTotalMinor];
+    if (values.every((value) => value === undefined)) return null;
+    if (values.some((value) => value === undefined)) {
+      throw new ChannelGatewayError("CHANNEL_FINANCIAL_RECONCILIATION_FAILED", "Provider financial fields must be supplied together.", 409);
+    }
+    const grossMinor = integer(line.providerGrossMinor, "providerGrossMinor");
+    const sellerDiscountMinor = integer(line.providerSellerDiscountMinor, "providerSellerDiscountMinor");
+    const tyDiscountMinor = integer(line.providerTyDiscountMinor, "providerTyDiscountMinor");
+    const customerTotalMinor = integer(line.providerCustomerTotalMinor, "providerCustomerTotalMinor");
+    const expectedGross = Number(BigInt(actualUnitGrossMinor) * BigInt(quantity));
+    if (!Number.isSafeInteger(expectedGross) || grossMinor !== expectedGross
+      || grossMinor !== sellerDiscountMinor + tyDiscountMinor + customerTotalMinor) {
+      throw new ChannelGatewayError("CHANNEL_FINANCIAL_RECONCILIATION_FAILED",
+        "Provider line gross, seller discount, provider-funded discount, and customer total do not reconcile.", 409);
+    }
+    return { grossMinor, sellerDiscountMinor, tyDiscountMinor, customerTotalMinor,
+      provenanceJson: stableJson(line.providerFinancialProvenance || { source: "PROVIDER_NORMALIZED" }) };
+  }
+
+  private persistInboundPackages(eventId: string, orderId: string, receivedAt: string, packages: InboundPackage[]) {
+    const seen = new Set<string>();
+    for (const pkg of packages) {
+      const externalPackageId = textValue(pkg.externalPackageId, "externalPackageId");
+      if (seen.has(externalPackageId)) throw new ChannelGatewayError("CHANNEL_PACKAGE_DUPLICATE", "An inbound event contains the same package twice.", 409);
+      seen.add(externalPackageId);
+      const externalVersion = textValue(pkg.externalPackageVersion, "externalPackageVersion", 500);
+      const providerOccurredAt = textValue(pkg.providerOccurredAt, "providerOccurredAt", 50);
+      if (!Number.isFinite(Date.parse(providerOccurredAt))) throw new ChannelGatewayError("CHANNEL_VALIDATION_FAILED", "providerOccurredAt is invalid.");
+      const currency = textValue(pkg.currency, "package.currency", 3).toUpperCase();
+      if (!/^[A-Z]{3}$/.test(currency)) throw new ChannelGatewayError("CHANNEL_VALIDATION_FAILED", "package.currency is invalid.");
+      const gross = integer(pkg.grossMinor, "package.grossMinor");
+      const seller = integer(pkg.sellerDiscountMinor, "package.sellerDiscountMinor");
+      const ty = integer(pkg.trendyolDiscountMinor, "package.trendyolDiscountMinor");
+      const totalDiscount = integer(pkg.totalDiscountMinor, "package.totalDiscountMinor");
+      const totalPrice = integer(pkg.customerTotalMinor, "package.customerTotalMinor");
+      if (totalDiscount !== seller + ty || gross !== totalDiscount + totalPrice) {
+        throw new ChannelGatewayError("CHANNEL_FINANCIAL_RECONCILIATION_FAILED", "Package financial totals do not reconcile.", 409);
+      }
+      const provenance = stableJson(pkg.financialProvenance);
+      const proposedId = randomUUID();
+      this.db.prepare(`INSERT INTO channel_order_packages
+        (id,channel_order_id,external_package_id,latest_external_version,latest_provider_occurred_at,package_state,currency,
+         package_gross_minor,package_seller_discount_minor,package_ty_discount_minor,package_total_discount_minor,
+         package_total_price_minor,latest_event_id,financial_provenance_json,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(channel_order_id,external_package_id) DO UPDATE SET
+          latest_external_version=excluded.latest_external_version,
+          latest_provider_occurred_at=excluded.latest_provider_occurred_at,
+          package_state=excluded.package_state,currency=excluded.currency,
+          package_gross_minor=excluded.package_gross_minor,
+          package_seller_discount_minor=excluded.package_seller_discount_minor,
+          package_ty_discount_minor=excluded.package_ty_discount_minor,
+          package_total_discount_minor=excluded.package_total_discount_minor,
+          package_total_price_minor=excluded.package_total_price_minor,
+          latest_event_id=excluded.latest_event_id,
+          financial_provenance_json=excluded.financial_provenance_json,
+          updated_at=excluded.updated_at
+        WHERE datetime(excluded.latest_provider_occurred_at)>=datetime(channel_order_packages.latest_provider_occurred_at)`).run(
+        proposedId, orderId, externalPackageId, externalVersion, providerOccurredAt, pkg.state, currency, gross, seller, ty,
+        totalDiscount, totalPrice, eventId, provenance, receivedAt);
+      const packageId = String(this.db.prepare(`SELECT id FROM channel_order_packages
+        WHERE channel_order_id=? AND external_package_id=?`).pluck().get(orderId, externalPackageId));
+      this.db.prepare(`INSERT INTO channel_order_package_versions
+        (id,package_id,inbound_event_id,external_version,provider_occurred_at,package_state,currency,package_gross_minor,
+         package_seller_discount_minor,package_ty_discount_minor,package_total_discount_minor,package_total_price_minor,
+         financial_provenance_json,recorded_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(package_id,external_version) DO NOTHING`).run(
+        randomUUID(), packageId, eventId, externalVersion, providerOccurredAt, pkg.state, currency, gross, seller, ty,
+        totalDiscount, totalPrice, provenance, receivedAt);
+    }
+  }
+
+  private currentPackageStates(orderId: string) {
+    return this.db.prepare(`SELECT external_package_id AS externalPackageId,package_state AS state
+      FROM channel_order_packages WHERE channel_order_id=? ORDER BY external_package_id`).all(orderId) as Array<{
+        externalPackageId: string; state: "ACTIVE" | "CANCELLED" | "RETURNED" }>;
+  }
+
+  private providerOrderFinancial(orderId: string) {
+    const row = this.db.prepare(`SELECT COALESCE(SUM(package_gross_minor),0) AS grossMinor,
+      COALESCE(SUM(package_seller_discount_minor),0) AS sellerDiscountMinor,
+      COALESCE(SUM(package_ty_discount_minor),0) AS trendyolDiscountMinor,
+      COALESCE(SUM(package_total_price_minor),0) AS customerTotalMinor
+      FROM channel_order_packages WHERE channel_order_id=? AND package_state='ACTIVE'`).get(orderId) as any;
+    return { contract: "dsdst.trendyol-order-financial.v1", grossMinor: Number(row.grossMinor),
+      sellerDiscountMinor: Number(row.sellerDiscountMinor), trendyolDiscountMinor: Number(row.trendyolDiscountMinor),
+      customerTotalMinor: Number(row.customerTotalMinor) };
   }
 
   private findCommissionTerm(accountId: string, productId: string, categoryRef: string | null, at: string) {

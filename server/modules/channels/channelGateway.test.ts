@@ -284,6 +284,59 @@ test("canonical changes auto-enqueue claimable jobs and disabled adapters remain
   db.close();
 });
 
+test("canonical outbound transition identity allows stock and price A-B-A while retrying one transition once", async () => {
+  const { db, gateway, inventory } = setup(5);
+  db.prepare("DELETE FROM channel_outbound_jobs").run();
+
+  gateway.captureCanonicalProductChanges({ productId: "part", kinds: ["STOCK"], operationId: "stock-five-first", actor,
+    occurredAt: "2026-09-23T10:00:00.000Z" });
+  inventory.reserveOrder({ reservationId: "transition-reservation", orderId: "transition-order",
+    lines: [{ productId: "part", quantityBaseInt: 1 }], operationId: "stock-four", createdAt: "2026-09-23T10:01:00.000Z" });
+  inventory.releaseReservation({ reservationId: "transition-reservation", reason: "TRANSITION_TEST",
+    operationId: "stock-five-second", releasedAt: "2026-09-23T10:02:00.000Z" });
+
+  db.prepare("UPDATE products SET sale_price=1000 WHERE id='part'").run();
+  gateway.captureCanonicalProductChanges({ productId: "part", kinds: ["PRICE"], operationId: "price-a-first", actor,
+    occurredAt: "2026-09-23T10:03:00.000Z" });
+  db.prepare("UPDATE products SET sale_price=900 WHERE id='part'").run();
+  gateway.captureCanonicalProductChanges({ productId: "part", kinds: ["PRICE"], operationId: "price-b", actor,
+    occurredAt: "2026-09-23T10:04:00.000Z" });
+  db.prepare("UPDATE products SET sale_price=1000 WHERE id='part'").run();
+  gateway.captureCanonicalProductChanges({ productId: "part", kinds: ["PRICE"], operationId: "price-a-second", actor,
+    occurredAt: "2026-09-23T10:05:00.000Z" });
+  gateway.captureCanonicalProductChanges({ productId: "part", kinds: ["PRICE"], operationId: "price-a-second", actor,
+    occurredAt: "2026-09-23T10:05:00.000Z" });
+
+  assert.deepEqual((db.prepare(`SELECT payload_json FROM channel_outbound_jobs WHERE job_kind='STOCK'
+    ORDER BY datetime(available_at),id`).all() as any[]).map((row) => JSON.parse(row.payload_json).quantityBaseInt), [5, 4, 5]);
+  assert.deepEqual((db.prepare(`SELECT payload_json FROM channel_outbound_jobs WHERE job_kind='PRICE'
+    ORDER BY datetime(available_at),id`).all() as any[]).map((row) => JSON.parse(row.payload_json).channelPriceMinor),
+  [125_000, 112_500, 125_000]);
+  assert.equal(db.prepare("SELECT COUNT(DISTINCT source_version) FROM channel_outbound_jobs").pluck().get(), 6);
+
+  let sends = 0;
+  const provider = { stock: -1, price: -1 };
+  const claimed = gateway.claimReadyOutboundJobs({ limit: 10, leaseSeconds: 30, operationId: "transition-claim",
+    serviceActorId: "publisher", claimedAt: "2026-09-23T11:00:00.000Z" }) as any[];
+  for (const job of claimed) {
+    await gateway.processClaimedOutboundJob({ jobId: job.id, leaseToken: job.leaseToken,
+      operationId: `transition-process:${job.id}`, serviceActorId: "publisher", occurredAt: "2026-09-23T11:00:01.000Z",
+      publish: async (published) => {
+        sends += 1;
+        if (published.kind === "STOCK") provider.stock = published.payload.quantityBaseInt;
+        if (published.kind === "PRICE") provider.price = published.payload.channelPriceMinor;
+        return { batchRequestId: `batch:${published.id}` };
+      } });
+    await gateway.processClaimedOutboundJob({ jobId: job.id, leaseToken: job.leaseToken,
+      operationId: `transition-process:${job.id}`, serviceActorId: "publisher", occurredAt: "2026-09-23T11:00:01.000Z",
+      publish: async () => { sends += 1; return {}; } });
+  }
+  assert.deepEqual(provider, { stock: 5, price: 125_000 });
+  assert.equal(sends, 6);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM channel_outbound_attempts").pluck().get(), 6);
+  db.close();
+});
+
 test("verified Trendyol stream poll enters the gateway and the verified publisher sends stock and price payloads", async () => {
   const { db, gateway } = setup(5);
   const requests: Array<{ url: string; options?: RequestInit }> = [];
@@ -291,7 +344,10 @@ test("verified Trendyol stream poll enters the gateway and the verified publishe
     requests.push({ url, options });
     if (url.includes("/orders/stream")) return { content: [{ shipmentPackageId: "package-1", orderNumber: "trend-order-1",
       status: "Created", currencyCode: "TRY", lastModifiedDate: 1_795_000_000_000,
-      lines: [{ lineId: "trend-line-1", barcode: "listing-part", quantity: 1, discountedPrice: "1250.00", vatRate: 20 }] }],
+      packageGrossAmount: "1250.00", packageSellerDiscount: "0.00", packageTyDiscount: "0.00",
+      packageTotalDiscount: "0.00", packageTotalPrice: "1250.00",
+      lines: [{ lineId: "trend-line-1", barcode: "listing-part", quantity: 1, lineGrossAmount: "1250.00",
+        lineSellerDiscount: "0.00", lineTyDiscount: "0.00", lineTotalDiscount: "0.00", lineUnitPrice: "1250.00", vatRate: 20 }] }],
       hasMore: false };
     return { batchRequestId: "batch-1" };
   });
@@ -316,4 +372,117 @@ test("verified Trendyol stream poll enters the gateway and the verified publishe
   assert.deepEqual(bodies, [{ items: [{ barcode: "listing-part", quantity: 4 }] },
     { items: [{ barcode: "listing-part", salePrice: 1250, listPrice: 1250 }] }]);
   db.close();
+});
+
+test("Trendyol split packages aggregate into one sale and package cancellation cannot cancel an unrelated package", async () => {
+  const { db, gateway, inventory } = setup(5);
+  let response: any = { content: [
+    { shipmentPackageId: "split-package-a", orderNumber: "split-order", status: "Created", currencyCode: "TRY",
+      lastModifiedDate: 1_795_000_000_001, packageGrossAmount: "1250.00", packageSellerDiscount: "0.00",
+      packageTyDiscount: "0.00", packageTotalDiscount: "0.00", packageTotalPrice: "1250.00",
+      lines: [{ lineId: "split-line-a", barcode: "listing-part", quantity: 1, lineGrossAmount: "1250.00",
+        lineSellerDiscount: "0.00", lineTyDiscount: "0.00", lineTotalDiscount: "0.00", lineUnitPrice: "1250.00", vatRate: 20 }] },
+    { shipmentPackageId: "split-package-b", orderNumber: "split-order", status: "Created", currencyCode: "TRY",
+      lastModifiedDate: 1_795_000_000_002, packageGrossAmount: "1250.00", packageSellerDiscount: "0.00",
+      packageTyDiscount: "0.00", packageTotalDiscount: "0.00", packageTotalPrice: "1250.00",
+      lines: [{ lineId: "split-line-b", barcode: "listing-part", quantity: 1, lineGrossAmount: "1250.00",
+        lineSellerDiscount: "0.00", lineTyDiscount: "0.00", lineTotalDiscount: "0.00", lineUnitPrice: "1250.00", vatRate: 20 }] },
+  ], hasMore: false };
+  const transport = new TrendyolGatewayTransport(gateway, async () => response);
+  const poll = (prefix: string, receivedAt: string) => transport.poll({ accountId: "account", sellerId: "merchant", environment: "stage",
+    headers: { Authorization: "[secret]" }, windowStartMs: 1_794_000_000_000, windowEndMs: 1_796_000_000_000,
+    serviceActorId: "trendyol-poller", operationIdPrefix: prefix, receivedAt });
+
+  assert.equal((await poll("split-first", "2026-09-23T12:00:00.000Z")).accepted, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM channel_order_packages").pluck().get(), 2);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM channel_order_lines").pluck().get(), 2);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM sales WHERE platform='TRENDYOL'").pluck().get(), 1);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_reservations").pluck().get(), 1);
+  assert.equal(inventory.getProductAvailability("part").reservedBaseInt, 2);
+  assert.equal((await poll("split-replay", "2026-09-23T12:01:00.000Z")).duplicate, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM sales WHERE platform='TRENDYOL'").pluck().get(), 1);
+
+  response = { content: [{ ...response.content[1], status: "Cancelled", lastModifiedDate: 1_795_000_000_003 }], hasMore: false };
+  const cancelled = await poll("split-cancel-b", "2026-09-23T12:02:00.000Z");
+  assert.equal(cancelled.exception, 1);
+  assert.deepEqual(db.prepare(`SELECT external_package_id AS id,package_state AS state FROM channel_order_packages
+    ORDER BY external_package_id`).all(), [{ id: "split-package-a", state: "ACTIVE" }, { id: "split-package-b", state: "CANCELLED" }]);
+  assert.equal(db.prepare("SELECT status FROM sales WHERE platform='TRENDYOL'").pluck().get(), "Marketplace Received");
+  assert.equal(inventory.getProductAvailability("part").reservedBaseInt, 2);
+
+  response = { content: [{ ...response.content[0], status: "Returned", lastModifiedDate: 1_795_000_000_004 }], hasMore: false };
+  assert.equal((await poll("split-return-b", "2026-09-23T12:03:00.000Z")).exception, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM return_requests").pluck().get(), 0);
+  assert.equal(db.prepare("SELECT status FROM sales WHERE platform='TRENDYOL'").pluck().get(), "Marketplace Received");
+  assert.equal(inventory.getProductAvailability("part").reservedBaseInt, 2);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM channel_order_package_versions").pluck().get(), 4);
+  assert.throws(() => db.prepare("UPDATE channel_order_package_versions SET package_state='ACTIVE'").run(), /immutable/i);
+  db.close();
+});
+
+test("Trendyol financial normalization conserves gross, seller discount, funded coupon, and customer net in minor units", async (t) => {
+  const cases = [
+    { name: "no discount", quantity: 1, gross: 10_000, seller: 0, ty: 0, customer: 10_000 },
+    { name: "seller-funded discount", quantity: 1, gross: 10_000, seller: 1_000, ty: 0, customer: 9_000 },
+    { name: "Trendyol-funded coupon", quantity: 1, gross: 10_000, seller: 0, ty: 2_000, customer: 8_000 },
+    { name: "quantity greater than one", quantity: 2, gross: 20_000, seller: 1_000, ty: 500, customer: 18_500,
+      details: [
+        { lineItemId: "item-1", lineItemPrice: "92.50", lineItemSellerDiscount: "5.00", lineItemTyDiscount: "2.50" },
+        { lineItemId: "item-2", lineItemPrice: "92.50", lineItemSellerDiscount: "5.00", lineItemTyDiscount: "2.50" },
+      ] },
+  ];
+  for (const [index, financial] of cases.entries()) await t.test(financial.name, async () => {
+    const { db, gateway } = setup(5);
+    const unitGross = financial.gross / financial.quantity;
+    const unitSeller = financial.seller / financial.quantity;
+    const unitTy = financial.ty / financial.quantity;
+    const unitCustomer = financial.customer / financial.quantity;
+    const money = (minor: number) => (minor / 100).toFixed(2);
+    const pkg = { shipmentPackageId: `finance-package-${index}`, orderNumber: `finance-order-${index}`, status: "Created",
+      currencyCode: "TRY", lastModifiedDate: 1_795_000_001_000 + index,
+      packageGrossAmount: money(financial.gross), packageSellerDiscount: money(financial.seller),
+      packageTyDiscount: money(financial.ty), packageTotalDiscount: money(financial.seller + financial.ty),
+      packageTotalPrice: money(financial.customer),
+      lines: [{ lineId: `finance-line-${index}`, barcode: "listing-part", quantity: financial.quantity,
+        lineGrossAmount: money(unitGross), lineSellerDiscount: money(unitSeller), lineTyDiscount: money(unitTy),
+        lineTotalDiscount: money(unitSeller + unitTy), lineUnitPrice: money(unitCustomer), vatRate: 20,
+        ...(financial.details ? { discountDetails: financial.details } : {}) }] };
+    const transport = new TrendyolGatewayTransport(gateway, async () => ({ content: [pkg], hasMore: false }));
+    const outcome = await transport.poll({ accountId: "account", sellerId: "merchant", environment: "stage",
+      headers: { Authorization: "[secret]" }, windowStartMs: 1_794_000_000_000, windowEndMs: 1_796_000_000_000,
+      serviceActorId: "trendyol-poller", operationIdPrefix: `finance-${index}`, receivedAt: "2026-09-23T13:00:00.000Z" });
+    assert.equal(outcome.accepted, 1);
+    const snapshot = db.prepare(`SELECT gross_before_discount_minor AS gross,discount_minor AS sellerDiscount,
+      gross_amount_minor AS sellerRevenue,commission_terms_json AS provenance FROM sale_financial_snapshots`).get() as any;
+    assert.equal(snapshot.gross, financial.gross);
+    assert.equal(snapshot.sellerDiscount, financial.seller);
+    assert.equal(snapshot.sellerRevenue, financial.gross - financial.seller);
+    const provenance = JSON.parse(snapshot.provenance);
+    assert.equal(provenance.providerFinancial.grossMinor, financial.gross);
+    assert.equal(provenance.providerFinancial.sellerDiscountMinor, financial.seller);
+    assert.equal(provenance.providerFinancial.trendyolDiscountMinor, financial.ty);
+    assert.equal(provenance.providerFinancial.customerTotalMinor, financial.customer);
+    assert.equal(financial.gross, financial.seller + financial.ty + financial.customer);
+    assert.deepEqual(db.prepare(`SELECT package_gross_minor AS gross,package_seller_discount_minor AS sellerDiscount,
+      package_ty_discount_minor AS trendyolDiscount,package_total_price_minor AS customerTotal FROM channel_order_packages`).get(),
+    { gross: financial.gross, sellerDiscount: financial.seller, trendyolDiscount: financial.ty, customerTotal: financial.customer });
+    db.close();
+  });
+
+  await t.test("unreconciled package fails closed", async () => {
+    const { db, gateway } = setup();
+    const transport = new TrendyolGatewayTransport(gateway, async () => ({ content: [{ shipmentPackageId: "bad-package",
+      orderNumber: "bad-order", status: "Created", currencyCode: "TRY", lastModifiedDate: 1_795_000_009_000,
+      packageGrossAmount: "100.00", packageSellerDiscount: "10.00", packageTyDiscount: "5.00",
+      packageTotalDiscount: "15.00", packageTotalPrice: "90.00",
+      lines: [{ lineId: "bad-line", barcode: "listing-part", quantity: 1, lineGrossAmount: "100.00",
+        lineSellerDiscount: "10.00", lineTyDiscount: "5.00", lineTotalDiscount: "15.00", lineUnitPrice: "85.00", vatRate: 20 }] }],
+      hasMore: false }));
+    await assert.rejects(() => transport.poll({ accountId: "account", sellerId: "merchant", environment: "stage",
+      headers: { Authorization: "[secret]" }, windowStartMs: 1_794_000_000_000, windowEndMs: 1_796_000_000_000,
+      serviceActorId: "trendyol-poller", operationIdPrefix: "bad-finance", receivedAt: "2026-09-23T13:10:00.000Z" }),
+    (error: unknown) => error instanceof ChannelGatewayError && error.code === "TRENDYOL_FINANCIAL_RECONCILIATION_FAILED");
+    assert.equal(db.prepare("SELECT COUNT(*) FROM sales").pluck().get(), 0);
+    db.close();
+  });
 });

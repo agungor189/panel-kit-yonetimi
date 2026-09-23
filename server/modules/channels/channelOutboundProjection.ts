@@ -71,7 +71,8 @@ export const enqueueCanonicalChannelChanges = (db: Database.Database, input: {
       if (!payload) continue;
       const payloadJson = stableJson(payload);
       const payloadHash = createHash("sha256").update(payloadJson).digest("hex");
-      const sourceVersion = `canonical:${payloadHash}`;
+      const transitionHash = createHash("sha256").update(stableJson({ operationId: input.operationId, payloadHash })).digest("hex");
+      const sourceVersion = `canonical:v2:${transitionHash}`;
       const id = randomUUID();
       db.prepare(`INSERT INTO channel_outbound_jobs
         (id,account_id,product_id,mapping_id,job_kind,source_version,payload_json,payload_hash,state,created_operation_id,available_at)

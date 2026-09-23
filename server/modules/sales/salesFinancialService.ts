@@ -124,7 +124,8 @@ export class SalesFinancialService {
     commissionCalculationBasis: CommissionBasis;
     commissionTerms: unknown;
     expenses?: Partial<Record<SaleExpenseCategory, ExpenseFactInput>>;
-    lines: Array<{ saleLineId: string; productId: string; quantity: number; unitGrossMinor: number; vatRateBps: number }>;
+    lines: Array<{ saleLineId: string; productId: string; quantity: number; unitGrossMinor: number; vatRateBps: number;
+      discountAllocationMinor?: number }>;
     operationId: string;
     actor: Actor;
     createdAt?: string;
@@ -173,13 +174,29 @@ export class SalesFinancialService {
           FROM products WHERE id=? AND catalog_version>0`).get(productId) as any;
         if (!product?.sku || !product.catalog_version_ref) throw new SalesFinancialValidationError("CATALOG_SNAPSHOT_REQUIRED", `Product ${productId} has no versioned catalog identity.`, 409);
         const grossBeforeDiscountMinor = safeMultiply(unitGrossMinor, quantity, "line gross");
-        return { lineSequence, saleLineId, product, quantity, unitGrossMinor, vatRateBps: Number(line.vatRateBps), grossBeforeDiscountMinor };
+        const explicitDiscountMinor = line.discountAllocationMinor === undefined ? undefined
+          : integerMoney(line.discountAllocationMinor, `lines[${lineSequence}].discountAllocationMinor`);
+        if (explicitDiscountMinor !== undefined && explicitDiscountMinor > grossBeforeDiscountMinor) {
+          throw new SalesFinancialValidationError("INVALID_DISCOUNT", "Line discount cannot exceed line gross sale amount.");
+        }
+        return { lineSequence, saleLineId, product, quantity, unitGrossMinor, vatRateBps: Number(line.vatRateBps),
+          grossBeforeDiscountMinor, explicitDiscountMinor };
       });
       if (new Set(normalizedLines.map(({ saleLineId }) => saleLineId)).size !== normalizedLines.length) throw new SalesFinancialValidationError("SALE_LINE_MISMATCH", "Sale lines must be unique.");
 
       const grossBeforeDiscountMinor = safeAdd(normalizedLines.map((line) => line.grossBeforeDiscountMinor), "sale gross");
       if (discountMinor > grossBeforeDiscountMinor) throw new SalesFinancialValidationError("INVALID_DISCOUNT", "Discount cannot exceed gross sale amount.");
-      const discountShares = new Map<string, number>(allocate(discountMinor, normalizedLines.map((line) => ({ key: line.saleLineId, weight: line.grossBeforeDiscountMinor })))
+      const explicitDiscounts = normalizedLines.filter((line) => line.explicitDiscountMinor !== undefined);
+      if (explicitDiscounts.length !== 0 && explicitDiscounts.length !== normalizedLines.length) {
+        throw new SalesFinancialValidationError("INVALID_DISCOUNT", "Explicit line discounts must be provided for every line or none.");
+      }
+      if (explicitDiscounts.length === normalizedLines.length
+        && safeAdd(normalizedLines.map((line) => line.explicitDiscountMinor!), "explicit line discounts") !== discountMinor) {
+        throw new SalesFinancialValidationError("INVALID_DISCOUNT", "Explicit line discounts must reconcile to the sale discount.");
+      }
+      const discountShares = new Map<string, number>((explicitDiscounts.length === normalizedLines.length
+        ? normalizedLines.map((line) => ({ key: line.saleLineId, allocated: line.explicitDiscountMinor! }))
+        : allocate(discountMinor, normalizedLines.map((line) => ({ key: line.saleLineId, weight: line.grossBeforeDiscountMinor }))))
         .map((entry): [string, number] => [entry.key, entry.allocated]));
       const lines = normalizedLines.map((line) => {
         const allocatedDiscount = discountShares.get(line.saleLineId)!;

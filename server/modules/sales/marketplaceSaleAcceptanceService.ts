@@ -10,6 +10,7 @@ export type MarketplaceAcceptedLine = {
   quantityBaseInt: number;
   actualUnitGrossMinor: number;
   vatRateBps: number;
+  discountAllocationMinor?: number;
 };
 
 export class MarketplaceSaleAcceptanceService {
@@ -52,13 +53,15 @@ export class MarketplaceSaleAcceptanceService {
       const insertLine = this.db.prepare(`INSERT INTO sale_items
         (id,sale_id,product_id,product_name,quantity,unit_price,purchase_cost,net_profit)
         SELECT ?,?,?,COALESCE(title,name,sku),?,?,NULL,NULL FROM products WHERE id=?`);
-      const financialLines: Array<{ saleLineId: string; productId: string; quantity: number; unitGrossMinor: number; vatRateBps: number }> = [];
+      const financialLines: Array<{ saleLineId: string; productId: string; quantity: number; unitGrossMinor: number;
+        vatRateBps: number; discountAllocationMinor?: number }> = [];
       for (const line of input.lines) {
         const saleLineId = randomUUID();
         const inserted = insertLine.run(saleLineId, saleId, line.productId, line.quantityBaseInt, line.actualUnitGrossMinor / 100, line.productId);
         if (inserted.changes !== 1) throw new Error(`PRODUCT_NOT_FOUND:${line.productId}`);
         financialLines.push({ saleLineId, productId: line.productId, quantity: line.quantityBaseInt,
-          unitGrossMinor: line.actualUnitGrossMinor, vatRateBps: line.vatRateBps });
+          unitGrossMinor: line.actualUnitGrossMinor, vatRateBps: line.vatRateBps,
+          discountAllocationMinor: line.discountAllocationMinor });
       }
       const financial = this.financials.createOrderSnapshot({
         saleId, currency: input.currency, sourceChannel: input.channel, discountMinor: input.discountMinor,
@@ -126,4 +129,3 @@ export class MarketplaceSaleAcceptanceService {
     }).immediate();
   }
 }
-
