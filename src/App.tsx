@@ -52,6 +52,7 @@ import Sales from './components/sales/Sales';
 import ApiKeys from './components/integrations/ApiKeys';
 import PanelApiKeys from './components/integrations/PanelApiKeys';
 import TrendyolIntegration from './components/integrations/TrendyolIntegration';
+import ChannelsIntegration from './components/integrations/ChannelsIntegration';
 
 const APP_VERSION = 'v2.5.5';
 
@@ -66,7 +67,7 @@ function normalizeRole(role: unknown): UserRole {
   return role === 'admin' || role === 'user' || role === 'readonly' ? role : 'admin';
 }
 
-type View = 'dashboard' | 'products' | 'product-detail' | 'product-wizard' | 'stock' | 'income' | 'expense' | 'recurring' | 'analytics' | 'product-analytics' | 'insights' | 'settings' | 'activity-logs' | 'b2b' | 'sales' | 'api-keys' | 'panel-api' | 'trendyol' | 'cash';
+type View = 'dashboard' | 'products' | 'product-detail' | 'product-wizard' | 'stock' | 'income' | 'expense' | 'recurring' | 'analytics' | 'product-analytics' | 'insights' | 'settings' | 'activity-logs' | 'b2b' | 'sales' | 'api-keys' | 'panel-api' | 'trendyol' | 'channels' | 'cash';
 type NavItem = { id: View; label: string; icon: ComponentType<{ className?: string }> };
 
 export default function App() {
@@ -198,7 +199,7 @@ export default function App() {
   ];
   const navItems = [...mainNavItems, ...analyticsNavItems];
   const isReadOnly = userRole === 'readonly';
-  const restrictedReadonlyViews: View[] = ['settings', 'api-keys', 'panel-api', 'trendyol', 'product-wizard', 'b2b'];
+  const restrictedReadonlyViews: View[] = ['settings', 'api-keys', 'panel-api', 'trendyol', 'channels', 'product-wizard', 'b2b'];
   const visibleMainNavItems = mainNavItems.filter(item => !isReadOnly || item.id !== 'b2b');
   const visibleAnalyticsNavItems = analyticsNavItems;
   const primaryNavItems = visibleMainNavItems.filter(item => ['dashboard', 'products', 'sales', 'b2b', 'cash'].includes(item.id));
@@ -220,6 +221,7 @@ export default function App() {
     (currentView === 'api-keys' ? 'API Anahtarları' :
       currentView === 'panel-api' ? 'Panel API' :
         currentView === 'trendyol' ? 'Trendyol' :
+          currentView === 'channels' ? 'Kanallar' :
           currentView === 'settings' ? 'Ayarlar' :
           currentView === 'activity-logs' ? 'Aktivite Logları' :
               'Ürün Detayı');
@@ -337,6 +339,7 @@ export default function App() {
               {renderNavItem({ id: 'api-keys', label: 'API Anahtarları', icon: Key })}
               {renderNavItem({ id: 'panel-api', label: 'Panel API', icon: TerminalSquare }, 'purple')}
               {renderNavItem({ id: 'trendyol', label: 'Trendyol', icon: ShoppingCart }, 'orange')}
+              {renderNavItem({ id: 'channels', label: 'Kanallar', icon: ShoppingCart }, 'orange')}
             </>
           )}
 
@@ -591,6 +594,7 @@ export default function App() {
           {!isReadOnly && currentView === 'api-keys' && <ApiKeys />}
           {!isReadOnly && currentView === 'panel-api' && <PanelApiKeys />}
           {!isReadOnly && currentView === 'trendyol' && <TrendyolIntegration />}
+          {!isReadOnly && currentView === 'channels' && <ChannelsIntegration />}
         </div>
         {showLogoutConfirm && (
           <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200" onClick={handleCancelLogout}>

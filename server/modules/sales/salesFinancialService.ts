@@ -119,6 +119,8 @@ export class SalesFinancialService {
     sourceChannel: string;
     discountMinor: number;
     commissionRatePercent: string | number;
+    commissionRateRational?: { numerator: number; denominator: number };
+    commissionAmountMinorOverride?: number;
     commissionCalculationBasis: CommissionBasis;
     commissionTerms: unknown;
     expenses?: Partial<Record<SaleExpenseCategory, ExpenseFactInput>>;
@@ -139,7 +141,9 @@ export class SalesFinancialService {
       throw new SalesFinancialValidationError("SALE_FINANCIAL_VALIDATION_FAILED", "commissionCalculationBasis is unsupported.");
     }
     const percent = nonNegativeDecimalRatio(input.commissionRatePercent, "commissionRatePercent");
-    const commissionRate = reduceRational(BigInt(percent.numerator), BigInt(percent.denominator) * 100n, "commissionRate");
+    const commissionRate = input.commissionRateRational
+      ? reduceRational(BigInt(input.commissionRateRational.numerator), BigInt(input.commissionRateRational.denominator), "commissionRate")
+      : reduceRational(BigInt(percent.numerator), BigInt(percent.denominator) * 100n, "commissionRate");
     if (commissionRate.numerator > commissionRate.denominator) throw new SalesFinancialValidationError("SALE_FINANCIAL_VALIDATION_FAILED", "commissionRatePercent cannot exceed 100.");
     const commissionTermsJson = stableJson(input.commissionTerms);
     const fx = this.fx.snapshotFor(currency, createdAt);
@@ -197,7 +201,9 @@ export class SalesFinancialService {
       const vatTryMinor = safeAdd(lines.map((line) => line.baseTry.vatMinor), "VAT TRY");
       const netTryMinor = safeAdd(lines.map((line) => line.baseTry.netMinor), "net TRY");
       const commissionBasisMinor = input.commissionCalculationBasis === "GROSS_BEFORE_DISCOUNT" ? grossBeforeDiscountMinor : grossMinor;
-      const commissionMinor = multiplyAndRound(commissionBasisMinor, commissionRate, "commission");
+      const commissionMinor = input.commissionAmountMinorOverride === undefined
+        ? multiplyAndRound(commissionBasisMinor, commissionRate, "commission")
+        : integerMoney(input.commissionAmountMinorOverride, "commissionAmountMinorOverride");
       const commissionTryMinor = multiplyAndRound(commissionMinor, fx, "commission TRY");
       const snapshotId = randomUUID();
       this.db.prepare(`INSERT INTO sale_financial_snapshots (

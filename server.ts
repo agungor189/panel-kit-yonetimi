@@ -33,6 +33,7 @@ import { rejectLegacyCatalogMutation } from "./server/modules/catalog/legacyCata
 import { CommandExecutor, CommandFoundationError } from "./server/modules/commands/commandFoundation.js";
 import { InventoryService, InventoryValidationError } from "./server/modules/inventory/inventoryService.js";
 import { SalesFinancialService, SalesFinancialValidationError } from "./server/modules/sales/salesFinancialService.js";
+import { ChannelGatewayError, ChannelGatewayService } from "./server/modules/channels/channelGateway.js";
 import { PublishedKitService } from "./server/modules/kits/publishedKitService.js";
 import { createPanelApiAuth } from "./server/middleware/panelApiAuth.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
@@ -146,6 +147,7 @@ initializeDatabase(db);
 const inventoryService = new InventoryService(db);
 const saleCommands = new CommandExecutor(db);
 const salesFinancials = new SalesFinancialService(db);
+const channelGateway = new ChannelGatewayService(db);
 const {
   getProductBomComponents,
   getProductStockProfile,
@@ -4776,6 +4778,51 @@ async function startServer() {
     return summary;
   };
 
+  app.get("/api/integrations/channels/dashboard", requireIntegrationsAdmin, apiLimiter, (_req, res) => {
+    try {
+      res.json(channelGateway.getDashboard());
+    } catch (err: any) {
+      res.status(err.statusCode || 500).json({ success: false, error: { code: err.code || "CHANNEL_DASHBOARD_FAILED", message: err.message } });
+    }
+  });
+
+  app.post("/api/integrations/channels/accounts", requireIntegrationsAdmin, apiLimiter, (req, res) => {
+    try {
+      const result = channelGateway.configureAccount({ ...req.body, operationId: saleOperationId(req),
+        actor: { id: req.user!.id, name: req.user!.username } });
+      res.status(201).json(result);
+    } catch (err: any) {
+      res.status(err.statusCode || 400).json({ success: false, error: { code: err.code || "CHANNEL_ACCOUNT_FAILED", message: err.message } });
+    }
+  });
+
+  app.post("/api/integrations/channels/mappings", requireIntegrationsAdmin, apiLimiter, (req, res) => {
+    try {
+      res.status(201).json(channelGateway.mapProduct({ ...req.body, operationId: saleOperationId(req),
+        actor: { id: req.user!.id, name: req.user!.username } }));
+    } catch (err: any) {
+      res.status(err.statusCode || 400).json({ success: false, error: { code: err.code || "CHANNEL_MAPPING_FAILED", message: err.message } });
+    }
+  });
+
+  app.post("/api/integrations/channels/commission-terms", requireIntegrationsAdmin, apiLimiter, (req, res) => {
+    try {
+      res.status(201).json(channelGateway.setCommissionTerm({ ...req.body, operationId: saleOperationId(req),
+        actor: { id: req.user!.id, name: req.user!.username } }));
+    } catch (err: any) {
+      res.status(err.statusCode || 400).json({ success: false, error: { code: err.code || "CHANNEL_COMMISSION_FAILED", message: err.message } });
+    }
+  });
+
+  app.post("/api/integrations/channels/stock-buffers", requireIntegrationsAdmin, apiLimiter, (req, res) => {
+    try {
+      res.status(200).json(channelGateway.setStockBuffer({ ...req.body, operationId: saleOperationId(req),
+        actor: { id: req.user!.id, name: req.user!.username } }));
+    } catch (err: any) {
+      res.status(err.statusCode || 400).json({ success: false, error: { code: err.code || "CHANNEL_BUFFER_FAILED", message: err.message } });
+    }
+  });
+
   app.get("/api/integrations/trendyol/status", requireIntegrationsAdmin, apiLimiter, (req, res) => {
     try {
       const config = getTrendyolConfig();
@@ -5453,6 +5500,37 @@ async function startServer() {
 
   // --- PUBLIC API ROUTES ---
   app.use("/api/public", publicAuthFailedLimiter, publicApiLimiter);
+  app.post("/api/channels/v1/events", publicAuthFailedLimiter, publicApiLimiter, publicApiAuth("channels:ingest"), (req, res) => {
+    try {
+      const operationId = req.headers["x-operation-id"]?.toString().trim();
+      if (!operationId) return res.status(400).json({ success: false, error: { code: "OPERATION_ID_REQUIRED", message: "x-operation-id header is required" } });
+      const outcome = channelGateway.ingest(req.body, operationId, `panel-api:${req.panelApiKey!.id}`);
+      res.status(outcome.result.statusCode).json({ ...outcome.result.body, idempotent: outcome.replayed });
+    } catch (err: any) {
+      const status = err instanceof ChannelGatewayError || err instanceof CommandFoundationError ? err.statusCode : 400;
+      res.status(status).json({ success: false, error: { code: err.code || "CHANNEL_INGEST_FAILED", message: err.message } });
+    }
+  });
+  app.post("/api/channels/v1/poll-cursors", publicAuthFailedLimiter, publicApiLimiter, publicApiAuth("channels:poll"), (req, res) => {
+    try {
+      const operationId = req.headers["x-operation-id"]?.toString().trim();
+      if (!operationId) return res.status(400).json({ success: false, error: { code: "OPERATION_ID_REQUIRED", message: "x-operation-id header is required" } });
+      res.json(channelGateway.updatePollingCursor({ ...req.body, operationId, serviceActorId: `panel-api:${req.panelApiKey!.id}`,
+        updatedAt: req.body.updatedAt || new Date().toISOString() }));
+    } catch (err: any) {
+      res.status(err.statusCode || 400).json({ success: false, error: { code: err.code || "CHANNEL_CURSOR_FAILED", message: err.message } });
+    }
+  });
+  app.post("/api/channels/v1/outbound-attempts", publicAuthFailedLimiter, publicApiLimiter, publicApiAuth("channels:publish"), (req, res) => {
+    try {
+      const operationId = req.headers["x-operation-id"]?.toString().trim();
+      if (!operationId) return res.status(400).json({ success: false, error: { code: "OPERATION_ID_REQUIRED", message: "x-operation-id header is required" } });
+      res.json(channelGateway.recordOutboundAttempt({ ...req.body, operationId, serviceActorId: `panel-api:${req.panelApiKey!.id}`,
+        occurredAt: req.body.occurredAt || new Date().toISOString() }));
+    } catch (err: any) {
+      res.status(err.statusCode || 400).json({ success: false, error: { code: err.code || "CHANNEL_ATTEMPT_FAILED", message: err.message } });
+    }
+  });
   app.use(
     "/api/kit-catalog",
     publicAuthFailedLimiter,

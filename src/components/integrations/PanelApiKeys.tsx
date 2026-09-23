@@ -11,6 +11,7 @@ const AVAILABLE_PERMISSIONS = [
   'expenses:read',
   'dashboard:read', 'movements:read', 'integrations:read',
   'assistant:read',
+  'channels:ingest', 'channels:poll', 'channels:publish',
   'read:warehouse_orders', 'read:products', 'read:bom', 'write:warehouse_status'
 ];
 
