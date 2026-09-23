@@ -56,6 +56,8 @@ export interface Product {
   available_stock?: number;
   physical_stock?: number;
   product_type?: 'simple' | 'assembly' | 'component' | 'accessory';
+  catalog_type?: 'product' | 'profile' | 'connector' | 'cap' | 'wheel' | 'complementary' | 'KIT';
+  published_kit?: { current_version_id: string; versions: Array<{ id: string; version_number: number; current: boolean; published_at: string; content_hash: string; canonical_cost_minor: number; final_sale_price_minor: number; effective_kerf_mm: number; installation_guide_version: string; components: unknown[]; cuts: unknown[]; packages: unknown[] }> } | null;
   is_sellable?: boolean | number;
   visible_in_catalog?: boolean | number;
   exclude_from_analysis?: boolean | number;

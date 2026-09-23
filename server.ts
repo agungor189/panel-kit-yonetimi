@@ -27,11 +27,13 @@ import { createCatalogV1Router } from "./server/routes/catalogV1Routes.js";
 import { createCatalogAdminV1Router } from "./server/routes/catalogAdminV1Routes.js";
 import { createProcurementV1Router } from "./server/routes/procurementV1Routes.js";
 import { createInventoryV1Router } from "./server/routes/inventoryV1Routes.js";
+import { createKitPublicationV1Router } from "./server/routes/kitPublicationV1Routes.js";
 import { createReturnsV1Router } from "./server/routes/returnsV1Routes.js";
 import { rejectLegacyCatalogMutation } from "./server/modules/catalog/legacyCatalogGuard.js";
 import { CommandExecutor, CommandFoundationError } from "./server/modules/commands/commandFoundation.js";
 import { InventoryService, InventoryValidationError } from "./server/modules/inventory/inventoryService.js";
 import { SalesFinancialService, SalesFinancialValidationError } from "./server/modules/sales/salesFinancialService.js";
+import { PublishedKitService } from "./server/modules/kits/publishedKitService.js";
 import { createPanelApiAuth } from "./server/middleware/panelApiAuth.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
 import { restoreUploadEntry } from "./server/utils/restoreUploads.js";
@@ -2371,7 +2373,10 @@ async function startServer() {
       FROM products p
       WHERE ${catalogVisibilityWhere(includeComponents)}
       ORDER BY p.created_at DESC
-    `).all() as any[]).map((product) => hydrateProductStock(product, includeBom));
+    `).all() as any[]).map((product) => ({
+      ...hydrateProductStock(product, includeBom),
+      catalog_type: product.product_type === "kit" ? "KIT" : product.catalog_type,
+    }));
     res.json(products);
   });
 
@@ -2384,7 +2389,13 @@ async function startServer() {
     const logistics = db.prepare("SELECT box_count, units_per_box, box_weight_kg, total_weight_kg FROM product_logistics WHERE product_id = ?").get(req.params.id) || null;
     const reserveLocations = (db.prepare("SELECT location FROM product_reserve_locations WHERE product_id = ? ORDER BY sort_order, created_at").all(req.params.id) as Array<{ location: string }>).map((row) => row.location);
 
-    res.json({ ...hydrateProductStock(product, true), images, platforms, logistics, reserve_locations: reserveLocations, bom_usage: getProductBomUsage(req.params.id) });
+    res.json({
+      ...hydrateProductStock(product, true),
+      catalog_type: product.product_type === "kit" ? "KIT" : product.catalog_type,
+      images, platforms, logistics, reserve_locations: reserveLocations,
+      bom_usage: getProductBomUsage(req.params.id),
+      published_kit: product.product_type === "kit" ? new PublishedKitService(db).getPublishedKit(product.id) : null,
+    });
   });
 
 
@@ -3692,12 +3703,33 @@ async function startServer() {
         movement_type: 'BOM_RESERVATION',
       };
     });
+    const publishedVersion = db.prepare(`SELECT k.id AS published_kit_id,k.current_version_id,v.effective_kerf_mm
+      FROM published_kits k JOIN published_kit_versions v ON v.id=k.current_version_id
+      WHERE k.product_id=?`).get(product.id) as any;
+    const profileCutPlan = publishedVersion ? (() => {
+      const cuts = db.prepare(`SELECT profile_product_id,length_mm,quantity,kerf_mm
+        FROM published_kit_version_cuts WHERE published_kit_version_id=? ORDER BY cut_sequence`).all(publishedVersion.current_version_id) as any[];
+      if (cuts.length === 0) return null;
+      const productIds = new Set(cuts.map((cut) => cut.profile_product_id));
+      const kerfs = new Set(cuts.map((cut) => Number(cut.kerf_mm)));
+      if (productIds.size !== 1 || kerfs.size !== 1) throw new InventoryValidationError("PROFILE_CUT_PLAN_INVALID", "Published kit profile cuts must use one profile identity and kerf policy.", 409);
+      const expandedCuts: Array<{ lengthMm: number }> = [];
+      for (const cut of cuts) for (let index = 0; index < Number(cut.quantity) * quantity; index += 1) expandedCuts.push({ lengthMm: Number(cut.length_mm) });
+      return {
+        publishedKitVersionId: publishedVersion.current_version_id as string,
+        productId: cuts[0].profile_product_id as string,
+        kerfMm: Number(cuts[0].kerf_mm),
+        cuts: expandedCuts,
+      };
+    })() : null;
     return {
       hasBom: true,
       available_stock: Number.isFinite(availableStock) ? Math.max(availableStock, 0) : 0,
       unit_purchase_cost: stockProfile.unit_purchase_cost,
       unit_weight: stockProfile.unit_weight,
       movements,
+      published_kit_version_id: publishedVersion?.current_version_id || null,
+      profile_cut_plan: profileCutPlan,
     };
   };
 
@@ -4081,6 +4113,7 @@ async function startServer() {
         // A sale may contain multiple final SKUs using the same component. Reserve the
         // aggregated base quantity once so the atomic inventory check cannot oversell.
         const reservationByProduct = new Map<string, number>();
+        const profileCutPlans: Array<{ publishedKitVersionId: string; productId: string; kerfMm: number; cuts: Array<{ lengthMm: number }> }> = [];
         for (const item of processedItems) {
           for (const movement of item.stock_plan.movements) {
             const required = Number(movement.quantity_required);
@@ -4093,12 +4126,14 @@ async function startServer() {
             }
             reservationByProduct.set(movement.product_id, aggregated);
           }
+          if (item.stock_plan.profile_cut_plan) profileCutPlans.push(item.stock_plan.profile_cut_plan);
         }
         const reservationId = `sale-reservation:${id}`;
         const reservation = inventoryService.reserveOrder({
           reservationId,
           orderId: id,
           lines: [...reservationByProduct].map(([productId, quantityBaseInt]) => ({ productId, quantityBaseInt })),
+          profileCutPlans,
           operationId: saleOperationId(req),
         });
 
@@ -5422,6 +5457,16 @@ async function startServer() {
       db,
       authenticate: publicApiAuth("kit-catalog:read"),
       logActivity,
+    }),
+  );
+  app.use(
+    "/api/kit-publications/v1",
+    publicAuthFailedLimiter,
+    publicApiLimiter,
+    createKitPublicationV1Router({
+      db,
+      authenticateService: publicApiAuth("kit-publications:write"),
+      authenticateUserToken: (token, servicePrincipalId) => auth.authenticateUserToken(token, servicePrincipalId),
     }),
   );
   app.use(

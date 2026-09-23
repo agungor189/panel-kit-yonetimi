@@ -106,6 +106,18 @@ const businessTablesThatMustStartEmpty = [
   "warehouse_replenishment_tasks",
   "warehouse_stock_discrepancies_v2",
   "warehouse_stock_counts_v2",
+  "published_kits",
+  "published_kit_versions",
+  "published_kit_version_components",
+  "published_kit_version_cuts",
+  "published_kit_version_packages",
+  "published_kit_version_package_items",
+  "sale_kit_version_snapshots",
+  "profile_inventory_pieces",
+  "profile_piece_reservations",
+  "profile_piece_reservation_cuts",
+  "profile_cut_executions",
+  "profile_cut_outputs",
 ] as const;
 
 test("fresh production schema is exact, versioned and has zero business history", () => {
@@ -114,7 +126,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 75);
+  assert.equal(manifest.length, 76);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -161,6 +173,15 @@ test("fresh production schema is exact, versioned and has zero business history"
     sale_financial_expense_facts: ["amount_base_try_minor", "amount_minor", "category", "fact_version", "financial_snapshot_id", "operation_id", "provenance_json", "state"],
     sale_financial_cogs_finalizations: ["dispatch_operation_id", "financial_snapshot_id", "reservation_id", "shipment_id", "total_cogs_base_try_minor"],
     sale_financial_cogs_allocations: ["acquisition_cost_snapshot_id", "cost_base_try_minor", "dispatch_operation_id", "financial_line_id", "inventory_lot_id", "quantity_base_int", "sale_line_id"],
+    published_kits: ["current_version_id", "product_id", "sku", "workspace_kit_id"],
+    published_kit_versions: ["canonical_cost_minor", "content_hash", "core_policy_hash", "effective_kerf_mm", "final_sale_price_minor", "published_kit_id", "version_number"],
+    published_kit_version_components: ["component_catalog_version_ref", "component_product_id", "extended_cost_minor", "quantity_base_int"],
+    published_kit_version_cuts: ["consumed_length_mm", "kerf_mm", "length_mm", "profile_product_id", "quantity"],
+    published_kit_version_packages: ["instruction_version", "package_number", "published_kit_version_id"],
+    sale_kit_version_snapshots: ["content_hash", "financial_line_id", "published_kit_version_id", "snapshot_json", "version_number"],
+    profile_inventory_pieces: ["current_length_mm", "historical_cost_minor", "inventory_lot_id", "origin_piece_id", "reserved_length_mm", "status"],
+    profile_piece_reservations: ["consumed_length_mm", "planned_remnant_length_mm", "profile_piece_id", "reservation_id", "status"],
+    profile_cut_executions: ["consumed_cost_minor", "consumed_length_mm", "operation_id", "remnant_cost_minor", "remnant_length_mm", "source_piece_id"],
     return_requests: ["currency", "financial_snapshot_id", "id", "request_operation_id", "requested_by_actor_id", "sale_id"],
     return_request_lines: ["financial_line_id", "id", "quantity_base_int", "reason_code", "return_id", "sale_line_id"],
     return_financial_reversal_allocations: ["discount_minor", "gross_minor", "net_minor", "quantity_base_int", "return_line_id", "vat_minor"],

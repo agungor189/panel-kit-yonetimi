@@ -33,7 +33,7 @@ const SESSION_COOKIE_OPTIONS = {
   path: "/",
 };
 const isSelfAuthenticatedRoute = (path: string) =>
-  path.startsWith("/auth/") || path.startsWith("/public/") || path.startsWith("/warehouse/") || path.startsWith("/kit-catalog/") || path.startsWith("/catalog/");
+  path.startsWith("/auth/") || path.startsWith("/public/") || path.startsWith("/warehouse/") || path.startsWith("/kit-catalog/") || path.startsWith("/catalog/") || path.startsWith("/kit-publications/");
 const bearerToken = (req: Request) => {
   const header = req.headers.authorization;
   return header?.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";

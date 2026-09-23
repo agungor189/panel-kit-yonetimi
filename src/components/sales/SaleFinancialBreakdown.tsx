@@ -67,6 +67,21 @@ export function SaleFinancialBreakdown({ financial }: { financial: any }) {
           Bilinen giderlerle geçici katkı: {money(totals.provisionalNetContributionTryMinor, 'TRY')}. Bu değer nihai net kâr değildir.
         </p>
       )}
+      {financial.lines?.some((line: any) => line.kitVersion) && (
+        <details className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4" open>
+          <summary className="cursor-pointer text-sm font-black text-emerald-800">Satılan kit sürümü</summary>
+          <div className="mt-3 space-y-2">
+            {financial.lines.map((line: any) => line.kitVersion && (
+              <div key={line.id} className="rounded-lg border border-emerald-100 bg-white p-3 text-xs">
+                <strong>{line.productSku} · v{line.kitVersion.versionNumber}</strong>
+                <span className={`ml-2 font-black ${line.kitVersion.current ? 'text-emerald-700' : 'text-amber-700'}`}>{line.kitVersion.current ? 'GÜNCEL' : 'ARTIK GÜNCEL DEĞİL'}</span>
+                <p className="mt-1 text-gray-600">Sürüm kimliği: {line.kitVersion.publishedKitVersionId}</p>
+                <p className="font-mono text-[10px] text-gray-500">{line.kitVersion.contentHash}</p>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
       {financial.lines?.some((line: any) => line.cogsAllocations?.length > 0) && (
         <details className="mt-4 rounded-xl border border-gray-200 bg-white p-4">
           <summary className="cursor-pointer text-sm font-black text-gray-700">Tüketilen lot / maliyet ayrıntısı</summary>

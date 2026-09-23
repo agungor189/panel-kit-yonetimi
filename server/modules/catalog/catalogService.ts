@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { getUomDefinition, UOM_REGISTRY_VERSION, type UomCode } from "./uom.js";
 
-export type CatalogType = "product" | "profile" | "connector" | "cap" | "wheel" | "complementary";
+export type CatalogType = "product" | "profile" | "connector" | "cap" | "wheel" | "complementary" | "KIT";
 export type ProfileForm = "square" | "rectangular" | "round" | "channel" | "angle" | "flat" | "other";
 export type MaterialBehavior = "continuous_cut";
 
@@ -74,7 +74,7 @@ export class CatalogValidationError extends Error {
 }
 
 const STANDARD_PROFILE_LENGTHS = new Set([1000, 2000, 3000, 6000]);
-const catalogTypes = new Set<CatalogType>(["product", "profile", "connector", "cap", "wheel", "complementary"]);
+const catalogTypes = new Set<CatalogType>(["product", "profile", "connector", "cap", "wheel", "complementary", "KIT"]);
 const profileForms = new Set<ProfileForm>(["square", "rectangular", "round", "channel", "angle", "flat", "other"]);
 
 const requiredText = (value: unknown, field: string, max = 250): string => {
@@ -154,6 +154,7 @@ const normalizedInput = (input: CatalogProductInput) => {
   if (["connector", "cap", "wheel"].includes(input.catalog_type) && baseUomCode !== "piece") {
     throw new CatalogValidationError(`${input.catalog_type} base UOM must be piece.`);
   }
+  if (input.catalog_type === "KIT" && baseUomCode !== "piece") throw new CatalogValidationError("KIT base UOM must be piece.");
   const materialBehavior = input.material_behavior ?? null;
   if (materialBehavior !== null && materialBehavior !== "continuous_cut") {
     throw new CatalogValidationError("material_behavior is unsupported.");
@@ -187,7 +188,11 @@ const productSelect = `
   SELECT p.id, p.sku, p.title, p.name_tr, p.name_en, p.supplier_code, p.material,
     p.form_code, p.tube_type_code, p.size_code, p.size, p.pipe_size, p.model,
     p.normalized_material, p.normalized_size, p.normalized_tube_type, p.normalized_pipe_size,
-    CASE WHEN p.catalog_class='complementary' THEN 'complementary' ELSE p.catalog_type END AS catalog_type,
+    CASE
+      WHEN p.product_type='kit' THEN 'KIT'
+      WHEN p.catalog_class='complementary' THEN 'complementary'
+      ELSE p.catalog_type
+    END AS catalog_type,
     p.catalog_class, p.base_uom_code, p.catalog_version,
     p.catalog_version_ref, p.uom_registry_version, p.length_mm_int, p.width_mm_int,
     p.height_mm_int, p.diameter_mm_int, p.mass_grams_int, p.material_behavior, p.status,
@@ -208,7 +213,13 @@ export class CatalogService {
 
   listProducts(type?: CatalogType): CatalogProduct[] {
     const rows = type
-      ? this.db.prepare(`${productSelect} WHERE p.catalog_version > 0 AND p.sku IS NOT NULL AND ${type === "complementary" ? "p.catalog_class='complementary'" : "p.catalog_type=? AND p.catalog_class IS NULL"} ORDER BY p.sku`).all(...(type === "complementary" ? [] : [type]))
+      ? this.db.prepare(`${productSelect} WHERE p.catalog_version > 0 AND p.sku IS NOT NULL AND ${
+        type === "complementary"
+          ? "p.catalog_class='complementary'"
+          : type === "KIT"
+            ? "p.product_type='kit'"
+            : "p.catalog_type=? AND p.catalog_class IS NULL AND COALESCE(p.product_type,'')<>'kit'"
+      } ORDER BY p.sku`).all(...(type === "complementary" || type === "KIT" ? [] : [type]))
       : this.db.prepare(`${productSelect} WHERE p.catalog_version > 0 AND p.sku IS NOT NULL ORDER BY p.sku`).all();
     return (rows as any[]).map((row) => this.mapRow(row));
   }
@@ -223,13 +234,14 @@ export class CatalogService {
     const id = input.id ? requiredText(input.id, "id", 200) : randomUUID();
     return this.db.transaction(() => {
       this.db.prepare(`INSERT INTO products (
-        id, name, title, sku, status, material, weight_grams, catalog_type, catalog_class, base_uom_code,
+        id, name, title, sku, status, material, weight_grams, product_type, catalog_type, catalog_class, base_uom_code,
         catalog_version, uom_registry_version, length_mm_int, width_mm_int, height_mm_int,
         diameter_mm_int, mass_grams_int, material_behavior
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`)
         .run(id, normalized.title, normalized.title, normalized.sku, normalized.status,
           normalized.profile?.material || null, normalized.massGrams ?? 0,
-          normalized.catalogType === "complementary" ? "product" : normalized.catalogType,
+          normalized.catalogType === "KIT" ? "kit" : null,
+          normalized.catalogType === "complementary" || normalized.catalogType === "KIT" ? "product" : normalized.catalogType,
           normalized.catalogType === "complementary" ? "complementary" : null,
           normalized.baseUomCode, UOM_REGISTRY_VERSION, normalized.dimensions.length_mm,
           normalized.dimensions.width_mm, normalized.dimensions.height_mm, normalized.dimensions.diameter_mm,
@@ -249,11 +261,12 @@ export class CatalogService {
       if (current.base_uom_code !== normalized.baseUomCode) {
         throw new CatalogValidationError("Base UOM identity is immutable after product creation; create a new SKU/product identity.");
       }
-      this.db.prepare(`UPDATE products SET title=?, name=?, sku=?, status=?, material=?, weight_grams=?, catalog_type=?, catalog_class=?,
+      this.db.prepare(`UPDATE products SET title=?, name=?, sku=?, status=?, material=?, weight_grams=?, product_type=?, catalog_type=?, catalog_class=?,
         base_uom_code=?, uom_registry_version=?, length_mm_int=?, width_mm_int=?, height_mm_int=?, diameter_mm_int=?,
         mass_grams_int=?, material_behavior=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND catalog_version=?`)
         .run(normalized.title, normalized.title, normalized.sku, normalized.status, normalized.profile?.material || null,
-          normalized.massGrams ?? 0, normalized.catalogType === "complementary" ? "product" : normalized.catalogType,
+          normalized.massGrams ?? 0, normalized.catalogType === "KIT" ? "kit" : null,
+          normalized.catalogType === "complementary" || normalized.catalogType === "KIT" ? "product" : normalized.catalogType,
           normalized.catalogType === "complementary" ? "complementary" : null,
           normalized.baseUomCode, UOM_REGISTRY_VERSION,
           normalized.dimensions.length_mm, normalized.dimensions.width_mm, normalized.dimensions.height_mm,

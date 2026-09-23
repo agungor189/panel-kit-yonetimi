@@ -224,6 +224,10 @@ export class SalesFinancialService {
         id,financial_line_id,component_sequence,component_product_id,component_sku_snapshot,component_title_snapshot,
         component_catalog_version,component_catalog_version_ref,component_role_snapshot,quantity_base_int,base_uom_code_snapshot,created_at
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+      const insertKitSnapshot = this.db.prepare(`INSERT INTO sale_kit_version_snapshots (
+        id,financial_line_id,sale_line_id,product_id,published_kit_id,published_kit_version_id,
+        version_number,content_hash,is_current_at_sale,snapshot_json,created_at
+      ) VALUES (?,?,?,?,?,?,?,?,1,?,?)`);
       for (const line of lines) {
         const financialLineId = randomUUID();
         insertLine.run(financialLineId, snapshotId, line.saleLineId, line.lineSequence, line.product.id, line.product.sku,
@@ -253,6 +257,25 @@ export class SalesFinancialService {
             component.title || component.name || component.sku, component.catalog_version, component.catalog_version_ref,
             component.component_role || null, componentQuantity, component.base_uom_code, createdAt);
         });
+        const kitVersion = this.db.prepare(`SELECT k.id AS published_kit_id,k.current_version_id,v.*
+          FROM published_kits k JOIN published_kit_versions v ON v.id=k.current_version_id
+          WHERE k.product_id=?`).get(line.product.id) as any;
+        if (kitVersion) {
+          const snapshot = {
+            contract: "dsdst.sale-kit-version-snapshot.v1",
+            soldQuantity: line.quantity,
+            version: kitVersion,
+            components: this.db.prepare("SELECT * FROM published_kit_version_components WHERE published_kit_version_id=? ORDER BY component_sequence").all(kitVersion.id),
+            cuts: this.db.prepare("SELECT * FROM published_kit_version_cuts WHERE published_kit_version_id=? ORDER BY cut_sequence").all(kitVersion.id),
+            packages: (this.db.prepare("SELECT * FROM published_kit_version_packages WHERE published_kit_version_id=? ORDER BY package_number").all(kitVersion.id) as any[]).map((pack) => ({
+              ...pack,
+              items: this.db.prepare("SELECT * FROM published_kit_version_package_items WHERE package_id=? ORDER BY component_product_id").all(pack.id),
+            })),
+          };
+          insertKitSnapshot.run(randomUUID(), financialLineId, line.saleLineId, line.product.id,
+            kitVersion.published_kit_id, kitVersion.id, kitVersion.version_number, kitVersion.content_hash,
+            stableJson(snapshot), createdAt);
+        }
       }
 
       for (const category of categories) {
@@ -402,6 +425,18 @@ export class SalesFinancialService {
       vatRateBps: line.vat_rate_bps,
       vatMinor: line.vat_amount_minor,
       netRevenueMinor: line.net_revenue_minor,
+      kitVersion: (() => {
+        const kit = this.db.prepare(`SELECT s.*,k.current_version_id FROM sale_kit_version_snapshots s
+          JOIN published_kits k ON k.id=s.published_kit_id WHERE s.financial_line_id=?`).get(line.id) as any;
+        return kit ? {
+          publishedKitId: kit.published_kit_id,
+          publishedKitVersionId: kit.published_kit_version_id,
+          versionNumber: kit.version_number,
+          contentHash: kit.content_hash,
+          current: kit.current_version_id === kit.published_kit_version_id,
+          snapshot: JSON.parse(kit.snapshot_json),
+        } : null;
+      })(),
       components: (this.db.prepare("SELECT * FROM sale_financial_line_components WHERE financial_line_id=? ORDER BY component_sequence").all(line.id) as any[]).map((component) => ({
         productId: component.component_product_id,
         sku: component.component_sku_snapshot,

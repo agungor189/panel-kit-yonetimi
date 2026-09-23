@@ -28,6 +28,7 @@ function cn(...inputs: ClassValue[]) {
 }
 
 const productKindStyles: Record<string, string> = {
+  kit: "bg-emerald-50 text-emerald-700 border-emerald-100",
   assembly: "bg-blue-50 text-blue-700 border-blue-100",
   component: "bg-amber-50 text-amber-700 border-amber-100",
   accessory: "bg-violet-50 text-violet-700 border-violet-100",
@@ -35,6 +36,7 @@ const productKindStyles: Record<string, string> = {
 };
 
 function getProductKind(product: Product) {
+  if (product.catalog_type === 'KIT') return { key: 'kit', label: 'KIT' };
   if (product.stock_source === 'bom' || product.product_type === 'assembly') return { key: 'assembly', label: 'Assembly' };
   if (product.product_type === 'component') return { key: 'component', label: 'Component' };
   if (product.product_type === 'accessory') return { key: 'accessory', label: 'Accessory' };
@@ -281,6 +283,24 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
                   color="text-success"
                 />
               </div>
+
+              {product.published_kit && (
+                <div className="rounded-2xl border border-emerald-100 bg-emerald-50/60 p-5 space-y-4">
+                  <div>
+                    <h3 className="text-xs font-black text-emerald-700 uppercase tracking-widest flex items-center gap-2"><History className="w-4 h-4" /> Yayınlanmış Kit Sürümleri</h3>
+                    <p className="text-xs text-emerald-700/80 mt-1">BOM, kesim, paketleme ve kılavuz snapshotları salt okunurdur.</p>
+                  </div>
+                  <div className="space-y-2">
+                    {product.published_kit.versions.map((version) => (
+                      <div key={version.id} className="rounded-xl border border-emerald-100 bg-white p-4 text-xs">
+                        <div className="flex items-center justify-between"><strong>v{version.version_number} · {version.current ? 'GÜNCEL' : 'ESKİ / AKTİF DEĞİL'}</strong><span>{new Date(version.published_at).toLocaleString('tr-TR')}</span></div>
+                        <div className="mt-2 text-text-muted">BOM {version.components.length} · Kesim {version.cuts.length} · Paket {version.packages.length} · Kerf {version.effective_kerf_mm} mm · Kılavuz {version.installation_guide_version}</div>
+                        <div className="mt-1 font-mono text-[10px] text-text-muted">{version.content_hash}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {product.stock_source === 'bom' && product.bom_components && product.bom_components.length > 0 && (
                 <div className="rounded-2xl border border-blue-100 bg-blue-50/60 p-5 space-y-4">

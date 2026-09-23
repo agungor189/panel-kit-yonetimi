@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { WarehousePackageBalanceError, WarehousePackageBalanceService } from "../warehouse/warehousePackageBalanceService.js";
+import { ProfileCutInventoryService, type ProfileCutPlanInput } from "./profileCutInventoryService.js";
 
 type LocationKind = "PICKING" | "RESERVE";
 type ReservationStatus = "ACTIVE" | "PICKED" | "PACKED" | "RELEASED" | "DISPATCHED" | "STOCK_DISCREPANCY";
@@ -90,6 +91,7 @@ export class InventoryService {
         randomUUID(), operationId, snapshot.product_id, lotId, quantity,
         snapshot.base_uom_code_snapshot, receiptId, receivedAt,
       );
+      new ProfileCutInventoryService(this.db).createReceiptPieces(lotId, operationId);
       this.syncProjection(snapshot.product_id);
       return {
         lot: {
@@ -146,6 +148,7 @@ export class InventoryService {
     reservationId: string;
     orderId: string;
     lines: Array<{ productId: string; quantityBaseInt: number }>;
+    profileCutPlans?: ProfileCutPlanInput[];
     operationId: string;
     createdAt?: string;
   }) {
@@ -157,11 +160,34 @@ export class InventoryService {
     const lines = input.lines.map((line) => ({ productId: text(line.productId, "lines.productId"), quantityBaseInt: positiveInteger(line.quantityBaseInt, "lines.quantityBaseInt") }));
     if (new Set(lines.map(({ productId }) => productId)).size !== lines.length) throw new InventoryValidationError("INVENTORY_VALIDATION_FAILED", "Reservation product lines must be unique.");
     return this.db.transaction(() => {
+      const profileCutInventory = new ProfileCutInventoryService(this.db);
+      const physicalPlans = [] as ReturnType<ProfileCutInventoryService["plan"]>;
+      const excludedPieceIds = new Set<string>();
+      for (const cutPlan of input.profileCutPlans || []) {
+        const planned = profileCutInventory.plan(cutPlan, excludedPieceIds);
+        planned.forEach((piece) => excludedPieceIds.add(piece.pieceId));
+        physicalPlans.push(...planned);
+      }
+      const physicalQuantityByProduct = new Map<string, number>();
+      for (const plan of physicalPlans) physicalQuantityByProduct.set(plan.productId, (physicalQuantityByProduct.get(plan.productId) || 0) + plan.consumedLengthMm);
+      for (const [productId, quantity] of physicalQuantityByProduct) {
+        if (lines.find((line) => line.productId === productId)?.quantityBaseInt !== quantity) {
+          throw new InventoryValidationError("PROFILE_CUT_PLAN_MISMATCH", `Profile cut plan quantity does not match reservation quantity for ${productId}.`, 409);
+        }
+      }
       const plans = lines.map((line) => {
         const product = this.db.prepare("SELECT id,base_uom_code FROM products WHERE id=?").get(line.productId) as any;
         if (!product) throw new InventoryValidationError("PRODUCT_NOT_FOUND", `Product ${line.productId} was not found.`, 404);
         const discrepancy = this.db.prepare("SELECT id FROM inventory_lots WHERE product_id=? AND status='STOCK_DISCREPANCY' AND on_hand_base_int>0 ORDER BY received_at,id LIMIT 1").get(line.productId) as any;
         if (discrepancy) throw new InventoryValidationError("STOCK_DISCREPANCY", `Product ${line.productId} has unresolved physical stock discrepancy.`, 409);
+        const physical = physicalPlans.filter((piece) => piece.productId === line.productId);
+        if (physical.length > 0) {
+          const byLot = new Map<string, number>();
+          for (const piece of physical) byLot.set(piece.lotId, (byLot.get(piece.lotId) || 0) + piece.consumedLengthMm);
+          const allocations = [...byLot].sort(([left], [right]) => left.localeCompare(right))
+            .map(([lotId, quantityBaseInt], fifoSequence) => ({ lotId, quantityBaseInt, fifoSequence }));
+          return { ...line, baseUomCode: product.base_uom_code as string, allocations };
+        }
         const lots = this.db.prepare(`SELECT id,on_hand_base_int,reserved_base_int,received_at FROM inventory_lots
           WHERE product_id=? AND status='USABLE' AND on_hand_base_int>reserved_base_int ORDER BY datetime(received_at),received_at,id`).all(line.productId) as any[];
         let needed = line.quantityBaseInt;
@@ -178,6 +204,7 @@ export class InventoryService {
       this.db.prepare(`INSERT INTO inventory_reservations
         (id,order_id,status,reserve_operation_id,created_at,updated_at) VALUES (?,?,'ACTIVE',?,?,?)`)
         .run(reservationId, orderId, operationId, createdAt, createdAt);
+      if (physicalPlans.length > 0) profileCutInventory.persistPlan(reservationId, physicalPlans);
       const insertLine = this.db.prepare(`INSERT INTO inventory_reservation_lines
         (id,reservation_id,product_id,quantity_base_int,base_uom_code_snapshot,created_at) VALUES (?,?,?,?,?,?)`);
       const insertAllocation = this.db.prepare(`INSERT INTO inventory_reservation_allocations
@@ -222,6 +249,7 @@ export class InventoryService {
           WHERE id=? AND reserved_base_int>=?`).run(allocation.quantity_base_int, releasedAt, allocation.lot_id, allocation.quantity_base_int);
         if (changed.changes !== 1) throw new InventoryValidationError("INVENTORY_CONSERVATION_FAILED", "Reservation balance cannot be released safely.", 409);
       }
+      new ProfileCutInventoryService(this.db).releaseReservation(reservationId);
       this.db.prepare(`UPDATE inventory_reservations SET status='RELEASED',release_operation_id=?,release_reason=?,released_at=?,updated_at=? WHERE id=?`)
         .run(operationId, reason, releasedAt, releasedAt, reservationId);
       return this.getReservation(reservationId);
@@ -239,6 +267,8 @@ export class InventoryService {
 
   markPicked(input: { reservationId: string; operationId: string; pickedAt?: string }) {
     text(input.operationId, "operationId");
+    const unexecutedCuts = Number(this.db.prepare("SELECT COUNT(*) FROM profile_piece_reservations WHERE reservation_id=? AND status='ACTIVE'").pluck().get(input.reservationId));
+    if (unexecutedCuts > 0) throw new InventoryValidationError("PROFILE_CUT_EXECUTION_REQUIRED", "Reserved profile cuts must be executed before picking.", 409);
     const fulfillment = this.getFulfillmentState(input.reservationId);
     if (fulfillment.status === "STOCK_DISCREPANCY") throw new InventoryValidationError("STOCK_DISCREPANCY", "Physical stock discrepancy blocks picking.", 409);
     if (fulfillment.requirements.some((item) => item.state === "REPLENISH_SAME_LOT")) {
@@ -316,6 +346,8 @@ export class InventoryService {
       }
       this.db.prepare(`UPDATE inventory_reservations SET status='DISPATCHED',dispatch_operation_id=?,shipment_id=?,dispatched_at=?,updated_at=? WHERE id=? AND status='PACKED'`)
         .run(operationId, shipmentId, dispatchedAt, dispatchedAt, reservationId);
+      this.db.prepare("UPDATE profile_piece_reservations SET status='DISPATCHED',updated_at=? WHERE reservation_id=? AND status='EXECUTED'")
+        .run(dispatchedAt, reservationId);
       for (const productId of products) this.syncProjection(productId);
       return this.getReservation(reservationId);
     }).immediate();

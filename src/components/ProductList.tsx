@@ -35,6 +35,7 @@ function cn(...inputs: ClassValue[]) {
 }
 
 const PRODUCT_KIND_STYLE: Record<string, string> = {
+  kit: "bg-emerald-50 text-emerald-700 border-emerald-100",
   assembly: "bg-blue-50 text-blue-700 border-blue-100",
   component: "bg-amber-50 text-amber-700 border-amber-100",
   accessory: "bg-violet-50 text-violet-700 border-violet-100",
@@ -42,6 +43,9 @@ const PRODUCT_KIND_STYLE: Record<string, string> = {
 };
 
 function getProductKind(product: Product) {
+  if (product.catalog_type === 'KIT') {
+    return { key: 'kit', label: 'KIT' };
+  }
   if (product.stock_source === 'bom' || product.product_type === 'assembly') {
     return { key: 'assembly', label: 'Assembly' };
   }

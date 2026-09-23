@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import express, { type RequestHandler } from "express";
 import { CommandExecutor, CommandFoundationError } from "../modules/commands/commandFoundation.js";
 import { InventoryService, InventoryValidationError } from "../modules/inventory/inventoryService.js";
+import { ProfileCutInventoryService } from "../modules/inventory/profileCutInventoryService.js";
 import { SalesFinancialService, SalesFinancialValidationError } from "../modules/sales/salesFinancialService.js";
 
 type Dependencies = {
@@ -30,6 +31,7 @@ const sendError = (error: unknown, res: express.Response) => {
 export function createInventoryV1Router(dependencies: Dependencies) {
   const router = express.Router();
   const inventory = new InventoryService(dependencies.db);
+  const profileCuts = new ProfileCutInventoryService(dependencies.db);
   const salesFinancials = new SalesFinancialService(dependencies.db);
   const commands = new CommandExecutor(dependencies.db);
   const execute = (req: express.Request, capability: string, commandType: string, payload: unknown, handler: Parameters<CommandExecutor["execute"]>[1]) => commands.execute({
@@ -75,11 +77,23 @@ export function createInventoryV1Router(dependencies: Dependencies) {
 
   router.post("/orders/:orderId/reservation", dependencies.authorizeReserve, (req, res) => {
     try {
-      const payload = { orderId: req.params.orderId, reservationId: req.body?.reservationId ?? null, lines: req.body?.lines ?? null, createdAt: req.body?.createdAt ?? null };
+      const payload = { orderId: req.params.orderId, reservationId: req.body?.reservationId ?? null, lines: req.body?.lines ?? null, profileCutPlans: req.body?.profileCutPlans ?? null, createdAt: req.body?.createdAt ?? null };
       const outcome = execute(req, "inventory:reserve", "inventory.order.reserve.v1", payload, (context) => {
         const data = inventory.reserveOrder({ ...payload, operationId: operationId(req) });
         context.addOutbox({ topic: "inventory", eventType: "inventory.order.reserved.v1", aggregateType: "reservation", aggregateId: data.id, payload: { reservation_id: data.id, order_id: data.orderId } });
         return { statusCode: 201, body: { success: true, contract: "dsdst.inventory-reservation.v1", data } };
+      });
+      return send(res, outcome);
+    } catch (error) { return sendError(error, res); }
+  });
+
+  router.post("/reservations/:id/profile-cuts/execute", dependencies.authorizeWarehouse, (req, res) => {
+    try {
+      const payload = { reservationId: req.params.id, executedAt: req.body?.executedAt ?? null };
+      const outcome = execute(req, "warehouse:pick_orders", "inventory.profile-cuts.execute.v1", payload, (context) => {
+        const data = profileCuts.executeReservationCuts({ reservationId: req.params.id, operationId: operationId(req), actorId: req.user!.id, executedAt: req.body?.executedAt });
+        context.addOutbox({ topic: "inventory", eventType: "inventory.profile-cuts.executed.v1", aggregateType: "reservation", aggregateId: req.params.id, payload: { reservation_id: req.params.id, execution_count: data.executions.length } });
+        return { statusCode: 200, body: { success: true, contract: "dsdst.profile-cut-execution.v1", data } };
       });
       return send(res, outcome);
     } catch (error) { return sendError(error, res); }
