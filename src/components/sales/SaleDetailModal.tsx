@@ -4,6 +4,7 @@ import { useCurrency } from '../../CurrencyContext';
 import { api, createRetryOperation } from '../../lib/api';
 import { useAuth } from '../../App';
 import { SaleFinancialBreakdown } from './SaleFinancialBreakdown';
+import { SaleReturnsPanel } from './SaleReturnsPanel';
 
 type SaleDetailFormData = {
   customer_name: string;
@@ -408,6 +409,8 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
           </div>
 
           <SaleFinancialBreakdown financial={currentSale.financial} />
+
+          <SaleReturnsPanel sale={currentSale} readOnly={isReadOnly} />
 
           {!isReadOnly && currentSale.financial?.snapshot && currentSale.financial?.state !== 'LEGACY_UNSNAPSHOTTED' && (
             <section className="rounded-2xl border border-gray-200 bg-white p-5" data-testid="sale-expense-editor">

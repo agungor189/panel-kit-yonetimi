@@ -7,6 +7,7 @@ import { PROCUREMENT_SCHEMA_V67 } from "../db/procurementSchema.js";
 import { PROCUREMENT_REMEDIATION_SCHEMA_V68 } from "../db/procurementRemediationSchema.js";
 import { INVENTORY_SCHEMA_V69 } from "../db/inventorySchema.js";
 import { SALES_FINANCIAL_SCHEMA_V74 } from "../db/salesFinancialSchema.js";
+import { RETURNS_SCHEMA_V75 } from "../db/returnsSchema.js";
 import { WAREHOUSE_EXECUTION_SCHEMA_V71, WAREHOUSE_REPLENISHMENT_RUNTIME_SCHEMA_V73 } from "../db/warehouseExecutionSchema.js";
 
 interface Migration {
@@ -2827,9 +2828,16 @@ const migrations: Migration[] = [
       db.exec(SALES_FINANCIAL_SCHEMA_V74);
     },
   },
+  {
+    version: 75,
+    name: "add_returns_refunds_financial_reversals",
+    up(db) {
+      db.exec(RETURNS_SCHEMA_V75);
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 74;
+export const CURRENT_SCHEMA_VERSION = 75;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),
@@ -2844,7 +2852,7 @@ export type MigrationManifestEntry = {
 };
 
 const checksumFor = (migration: Migration): string => createHash("sha256")
-  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}${migration.version === 69 ? `\0${INVENTORY_SCHEMA_V69}` : ""}${migration.version === 71 ? `\0${WAREHOUSE_EXECUTION_SCHEMA_V71}` : ""}${migration.version === 74 ? `\0${SALES_FINANCIAL_SCHEMA_V74}` : ""}`)
+  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}${migration.version === 69 ? `\0${INVENTORY_SCHEMA_V69}` : ""}${migration.version === 71 ? `\0${WAREHOUSE_EXECUTION_SCHEMA_V71}` : ""}${migration.version === 74 ? `\0${SALES_FINANCIAL_SCHEMA_V74}` : ""}${migration.version === 75 ? `\0${RETURNS_SCHEMA_V75}` : ""}`)
   .digest("hex");
 
 export function getMigrationManifest(): MigrationManifestEntry[] {
@@ -3102,7 +3110,7 @@ function assertV68ProcurementSchemaDefinitions(actual: Database.Database): void 
   }
 }
 
-function assertV69InventorySchemaDefinitions(actual: Database.Database): void {
+function assertV69InventorySchemaDefinitions(actual: Database.Database, maxVersion = CURRENT_SCHEMA_VERSION): void {
   const reference = new Database(":memory:");
   try {
     reference.exec("CREATE TABLE products (id TEXT PRIMARY KEY, central_stock INTEGER); CREATE TABLE acquisition_lot_cost_snapshots (id TEXT PRIMARY KEY);");
@@ -3112,6 +3120,16 @@ function assertV69InventorySchemaDefinitions(actual: Database.Database): void {
         || object.name === "trg_inventory_central_stock_projection_guard"
         || object.name === "trg_inventory_central_stock_insert_guard");
     for (const object of expected) {
+      // V2-10 v75 deliberately widens the immutable inventory event enum with
+      // RETURN and recreates only this table's indexes/triggers. All other v69
+      // definitions remain byte-for-byte pinned here.
+      if (maxVersion >= 75 && (
+        object.tbl_name === "inventory_ledger_events"
+        || object.name === "idx_inventory_ledger_product"
+        || object.name === "idx_inventory_ledger_lot"
+        || object.name === "trg_inventory_ledger_immutable_update"
+        || object.name === "trg_inventory_ledger_immutable_delete"
+      )) continue;
       const found = actual.prepare("SELECT type,name,sql FROM sqlite_master WHERE type=? AND name=? AND sql IS NOT NULL")
         .get(object.type, object.name) as SchemaDefinition | undefined;
       if (!found || canonicalSchemaDefinition(found.sql) !== canonicalSchemaDefinition(object.sql)) {
@@ -3249,7 +3267,7 @@ function validateAppliedMigrations(db: Database.Database, manifest: MigrationMan
     if (maxVersion >= 66) assertV66CatalogSchemaDefinitions(db);
     if (maxVersion === 67) assertV67ProcurementSchemaDefinitions(db);
     if (maxVersion >= 68) assertV68ProcurementSchemaDefinitions(db);
-    if (maxVersion >= 69) assertV69InventorySchemaDefinitions(db);
+    if (maxVersion >= 69) assertV69InventorySchemaDefinitions(db, maxVersion);
     if (maxVersion >= 70) assertV70LegacyInventoryRepresented(db);
     if (maxVersion >= 71) assertV71WarehouseSchemaDefinitions(db, maxVersion);
   }

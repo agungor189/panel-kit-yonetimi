@@ -250,7 +250,8 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
     assert.equal(inspect.prepare("SELECT COUNT(*) FROM sale_financial_expense_facts WHERE financial_snapshot_id=(SELECT id FROM sale_financial_snapshots WHERE sale_id=?) AND category='ADVERTISING'").pluck().get(dispatchedSaleId), 0);
 
     const returned = await request(`/api/sales/${dispatchedSaleId}/status`, "sale-return-2", { status: "İade Edildi" }, "PATCH");
-    assert.equal(returned.status, 200, await returned.text());
+    assert.equal(returned.status, 409, await returned.clone().text());
+    assert.equal((await returned.json() as any).error.code, "RETURN_WORKFLOW_REQUIRED");
     assert.deepEqual(inspect.prepare("SELECT on_hand_base_int AS onHand,reserved_base_int AS reserved FROM inventory_lots WHERE product_id='component'").get(), { onHand: 8, reserved: 0 });
     assert.equal(inspect.prepare("SELECT COUNT(*) FROM inventory_ledger_events WHERE event_type='DISPATCH'").pluck().get(), 1);
 
@@ -258,8 +259,8 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
     assert.equal(legacyAdjust.status, 409, await legacyAdjust.clone().text());
     assert.equal((await legacyAdjust.json() as any).error.code, "STOCK_ADJUSTMENT_REQUIRES_LOT_CORRECTION");
     assert.equal(inspect.prepare("SELECT central_stock FROM products WHERE id='component'").pluck().get(), 8);
-    assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_audit_log WHERE operation_id IN (?,?,?,'sale-create-2','sale-return-2')").pluck().get(createOperationId, updateOperation.idFor(updatePayload), cancellationOperation.idFor(cancellationPayload)), 5);
-    assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_outbox WHERE operation_record_id IN (SELECT id FROM command_operations WHERE operation_id IN (?,?,?,'sale-create-2','sale-return-2'))").pluck().get(createOperationId, updateOperation.idFor(updatePayload), cancellationOperation.idFor(cancellationPayload)), 10);
+    assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_audit_log WHERE operation_id IN (?,?,?,'sale-create-2','sale-return-2')").pluck().get(createOperationId, updateOperation.idFor(updatePayload), cancellationOperation.idFor(cancellationPayload)), 4);
+    assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_outbox WHERE operation_record_id IN (SELECT id FROM command_operations WHERE operation_id IN (?,?,?,'sale-create-2','sale-return-2'))").pluck().get(createOperationId, updateOperation.idFor(updatePayload), cancellationOperation.idFor(cancellationPayload)), 9);
     assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_audit_log WHERE operation_id IN ('sale-2-dispatch',?,'sale-2-packaging','sale-2-other')").pluck().get(expenseOperationId), 4);
     assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_outbox WHERE operation_record_id IN (SELECT id FROM command_operations WHERE operation_id IN ('sale-2-dispatch',?,'sale-2-packaging','sale-2-other'))").pluck().get(expenseOperationId), 5);
     inspect.close();

@@ -27,6 +27,7 @@ import { createCatalogV1Router } from "./server/routes/catalogV1Routes.js";
 import { createCatalogAdminV1Router } from "./server/routes/catalogAdminV1Routes.js";
 import { createProcurementV1Router } from "./server/routes/procurementV1Routes.js";
 import { createInventoryV1Router } from "./server/routes/inventoryV1Routes.js";
+import { createReturnsV1Router } from "./server/routes/returnsV1Routes.js";
 import { rejectLegacyCatalogMutation } from "./server/modules/catalog/legacyCatalogGuard.js";
 import { CommandExecutor, CommandFoundationError } from "./server/modules/commands/commandFoundation.js";
 import { InventoryService, InventoryValidationError } from "./server/modules/inventory/inventoryService.js";
@@ -3792,6 +3793,12 @@ async function startServer() {
       const isBecomingFinal = willBeFinal && !wasFinal;
       if (isBecomingFinal) {
         const reservation = db.prepare("SELECT status FROM inventory_reservations WHERE id=?").get(reservationId) as { status: string } | undefined;
+        if (targetStatus === "İade Edildi") {
+          throw new SalesFinancialValidationError("RETURN_WORKFLOW_REQUIRED", "Post-dispatch returns must use the V2-10 return workflow; the legacy direct status shortcut is closed.", 409);
+        }
+        if (targetStatus === "İptal Edildi" && reservation?.status === "DISPATCHED") {
+          throw new SalesFinancialValidationError("POST_DISPATCH_RETURN_REQUIRED", "A dispatched sale cannot be cancelled; use the V2-10 return workflow.", 409);
+        }
         if (reservation && ["ACTIVE", "PICKED", "PACKED", "STOCK_DISCREPANCY"].includes(reservation.status)) {
           inventoryService.releaseReservation({
             reservationId,
@@ -5448,6 +5455,15 @@ async function startServer() {
       authorizeWarehouse: auth.requireCapability("warehouse:pick_orders"),
       authorizeDispatch: auth.requireCapability("shipping:dispatch"),
       authorizeCorrection: auth.requireCapability("inventory:correct"),
+    }),
+  );
+  app.use(
+    "/api/returns/v1",
+    createReturnsV1Router({
+      db,
+      authorizeRead: auth.requireCapability("panel:read"),
+      authorizeCreate: auth.requireCapability("returns:create"),
+      authorizeRefund: auth.requireCapability("returns:approve_refund"),
     }),
   );
   mountWarehouseModule({

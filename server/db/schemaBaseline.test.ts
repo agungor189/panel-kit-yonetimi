@@ -79,6 +79,21 @@ const businessTablesThatMustStartEmpty = [
   "sale_financial_expense_facts",
   "sale_financial_cogs_finalizations",
   "sale_financial_cogs_allocations",
+  "return_requests",
+  "return_request_lines",
+  "return_financial_reversal_allocations",
+  "return_cogs_reversal_allocations",
+  "customer_shipping_refund_facts",
+  "marketplace_commission_reversal_facts",
+  "return_receipts",
+  "return_receipt_lines",
+  "return_receipt_inventory_allocations",
+  "return_quarantine_facts",
+  "return_loss_facts",
+  "refund_approvals",
+  "refund_payments",
+  "refund_cash_postings",
+  "refund_settlement_postings",
   "warehouse_topologies",
   "warehouse_rack_configs",
   "warehouse_level_configs",
@@ -99,7 +114,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 73);
+  assert.equal(manifest.length, 74);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -146,6 +161,18 @@ test("fresh production schema is exact, versioned and has zero business history"
     sale_financial_expense_facts: ["amount_base_try_minor", "amount_minor", "category", "fact_version", "financial_snapshot_id", "operation_id", "provenance_json", "state"],
     sale_financial_cogs_finalizations: ["dispatch_operation_id", "financial_snapshot_id", "reservation_id", "shipment_id", "total_cogs_base_try_minor"],
     sale_financial_cogs_allocations: ["acquisition_cost_snapshot_id", "cost_base_try_minor", "dispatch_operation_id", "financial_line_id", "inventory_lot_id", "quantity_base_int", "sale_line_id"],
+    return_requests: ["currency", "financial_snapshot_id", "id", "request_operation_id", "requested_by_actor_id", "sale_id"],
+    return_request_lines: ["financial_line_id", "id", "quantity_base_int", "reason_code", "return_id", "sale_line_id"],
+    return_financial_reversal_allocations: ["discount_minor", "gross_minor", "net_minor", "quantity_base_int", "return_line_id", "vat_minor"],
+    return_cogs_reversal_allocations: ["acquisition_cost_snapshot_id", "cost_base_try_minor", "inventory_lot_id", "original_cogs_allocation_id", "quantity_base_int", "return_line_id"],
+    return_receipts: ["id", "receipt_operation_id", "received_by_actor_id", "return_id"],
+    return_receipt_lines: ["disposition", "location_id", "quantity_base_int", "receipt_id", "return_line_id"],
+    return_receipt_inventory_allocations: ["cost_base_try_minor", "disposition", "inventory_ledger_event_id", "original_inventory_lot_id", "quantity_base_int"],
+    return_loss_facts: ["amount_base_try_minor", "original_acquisition_cost_snapshot_id", "original_cogs_allocation_id", "return_id"],
+    refund_approvals: ["amount_minor", "approval_operation_id", "approval_reference", "approved_by_actor_id", "return_id"],
+    refund_payments: ["amount_minor", "payment_mode", "payment_operation_id", "return_id"],
+    refund_cash_postings: ["amount_minor", "cash_account_id", "direction", "refund_payment_id"],
+    refund_settlement_postings: ["amount_minor", "refund_payment_id", "state"],
     warehouse_topologies: ["code_template", "config_hash", "config_json", "id", "name"],
     warehouse_rack_configs: ["allow_mixed_lot", "allow_mixed_sku", "depth_count", "level_count", "placement_priority", "position_count", "rack_code", "role", "topology_id"],
     warehouse_level_configs: ["heavy_penalty", "level_number", "rack_code", "role", "topology_id"],

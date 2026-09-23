@@ -53,5 +53,8 @@ test("Sale Detail offers append-only facts for shipping, packaging and other wit
   assert.match(html, /Paketleme/);
   assert.match(html, /Diğer giderler/);
   assert.match(html, /0 geçerli bir gerçek tutardır/);
+  assert.match(html, /V2-10 İade ve para iadesi/);
+  assert.match(html, /Müşteri kargo ücretini ayrıca iade et/);
+  assert.match(html, /İade oluştur/);
   assert.doesNotMatch(html, /Reklam gideri ekle|data-expense-category="advertising"/);
 });

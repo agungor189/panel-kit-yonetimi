@@ -8,6 +8,7 @@ import { CatalogService } from "../modules/catalog/catalogService.js";
 import { UOM_DEFINITIONS, UOM_REGISTRY_VERSION } from "../modules/catalog/uom.js";
 import { InventoryService, InventoryValidationError } from "../modules/inventory/inventoryService.js";
 import { SalesFinancialService, SalesFinancialValidationError } from "../modules/sales/salesFinancialService.js";
+import { ReturnsService, ReturnsValidationError } from "../modules/returns/returnsService.js";
 import { WarehouseExecutionError, WarehouseExecutionService, type WarehouseTopologyInput } from "../modules/warehouse/warehouseExecutionService.js";
 
 type WarehouseUser = WarehousePicker & {
@@ -67,6 +68,7 @@ export function createWarehouseRouter({
   const catalogService = new CatalogService(db);
   const inventoryService = new InventoryService(db);
   const salesFinancials = new SalesFinancialService(db);
+  const returnsService = new ReturnsService(db);
   const executionService = new WarehouseExecutionService(db);
 
   const authenticate = (requiredPermissions: string | string[]) => (
@@ -217,6 +219,9 @@ export function createWarehouseRouter({
       return errorResponse(res, error.statusCode, error.code, error.message);
     }
     if (error instanceof SalesFinancialValidationError) {
+      return errorResponse(res, error.statusCode, error.code, error.message);
+    }
+    if (error instanceof ReturnsValidationError) {
       return errorResponse(res, error.statusCode, error.code, error.message);
     }
     if (error instanceof WarehouseExecutionError) {
@@ -527,6 +532,34 @@ export function createWarehouseRouter({
           const data = inventoryService.reportStockDiscrepancy({ ...payload, operationId: operationIdFromRequest(req) } as any);
           context.addOutbox({ topic: "inventory", eventType: "inventory.stock-discrepancy.reported.v1", aggregateType: "reservation", aggregateId: req.params.id, payload: { reservation_id: req.params.id, lot_id: payload.lotId } });
           return { statusCode: 200, body: { success: true, contract: "dsdst.inventory-fulfillment.v1", data } };
+        });
+        return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
+      } catch (error) { return handleServiceError(res, error); }
+    });
+
+  router.get("/returns", authenticate("read:warehouse_orders"), requireWarehouseUser,
+    requireWarehousePermission("warehouse:accept_returns"), (req, res) => {
+      auditRead(req);
+      return res.json({ success: true, contract: "dsdst.warehouse-return-acceptance.v1", data: returnsService.listApprovedReturns() });
+    });
+
+  router.get("/returns/:id", authenticate("read:warehouse_orders"), requireWarehouseUser,
+    requireWarehousePermission("warehouse:accept_returns"), (req, res) => {
+      try {
+        auditRead(req);
+        return res.json({ success: true, contract: "dsdst.warehouse-return-acceptance.v1", data: returnsService.getReturn(req.params.id) });
+      } catch (error) { return handleServiceError(res, error); }
+    });
+
+  router.post("/returns/:id/receipts", authenticate("write:warehouse_status"), requireWarehouseUser,
+    requireWarehousePermission("warehouse:accept_returns"), (req, res) => {
+      const payload = { returnId: req.params.id, lines: req.body?.lines ?? null, receivedAt: req.body?.receivedAt ?? null };
+      try {
+        const outcome = commandExecutor.execute(commandRequest(req, res, "returns.receipt.inspect.v1", "warehouse:accept_returns", payload), (context) => {
+          const data = returnsService.receiveReturn({ ...payload, operationId: operationIdFromRequest(req), actor: { id: actor(res).id, name: actor(res).username } } as any);
+          context.addOutbox({ topic: "returns", eventType: "returns.receipt.inspected.v1", aggregateType: "return", aggregateId: data.id,
+            payload: { return_id: data.id, inspection_complete: data.inspection.complete, return_loss_try_minor: data.returnLossTryMinor } });
+          return { statusCode: 201, body: { success: true, contract: "dsdst.warehouse-return-acceptance.v1", data } };
         });
         return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
       } catch (error) { return handleServiceError(res, error); }
