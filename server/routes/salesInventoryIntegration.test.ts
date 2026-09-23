@@ -125,12 +125,19 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
       customer_name: "Inventory customer", total_quantity: 2, cash_account_id: "cash", platform: "Satış Sistemi",
       currency: "TRY", discount_minor: 0, commission_rate: 10,
       commission_calculation_basis: "GROSS_BEFORE_DISCOUNT", commission_terms: { source: "test" },
-      expenses: Object.fromEntries(["shipping", "packaging", "advertising", "other"].map((category) => [category, { state: "KNOWN", amountMinor: 0, currency: "TRY", provenance: { source: "test", category } }])),
+      expenses: Object.fromEntries(["shipping", "packaging", "other"].map((category) => [category, { state: "UNKNOWN", provenance: { source: "test", category } }])),
       items: [
         { product_id: "kit-a", product_name: "Kit A", quantity: 1, unit_gross_minor: 5_000, vat_rate_bps: 2_000 },
         { product_id: "kit-b", product_name: "Kit B", quantity: 1, unit_gross_minor: 5_000, vat_rate_bps: 2_000 },
       ],
     };
+
+    const rejectedAdvertisingSale = await request("/api/sales", "sale-advertising-not-allowed", {
+      ...saleBody,
+      expenses: { ...saleBody.expenses, advertising: { state: "KNOWN", amountMinor: 25, currency: "TRY", provenance: { source: "marketing-invoice" } } },
+    });
+    assert.equal(rejectedAdvertisingSale.status, 400, await rejectedAdvertisingSale.clone().text());
+    assert.equal((await rejectedAdvertisingSale.json() as any).error.code, "SALE_ADVERTISING_NOT_SALE_EXPENSE");
 
     const createOperation = createRetryOperation("sale-create");
     const createOperationId = createOperation.idFor(saleBody);
@@ -143,6 +150,8 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
     assert.deepEqual(inspect.prepare("SELECT on_hand_base_int AS onHand,reserved_base_int AS reserved FROM inventory_lots WHERE product_id='component'").get(), { onHand: 10, reserved: 5 });
     assert.deepEqual(inspect.prepare("SELECT product_id AS productId,quantity_base_int AS quantity FROM inventory_reservation_lines WHERE reservation_id=?").all(reservationId), [{ productId: "component", quantity: 5 }]);
     assert.equal(inspect.prepare("SELECT central_stock FROM products WHERE id='component'").pluck().get(), 10);
+    assert.equal(inspect.prepare("SELECT COUNT(*) FROM sale_financial_expense_facts WHERE financial_snapshot_id=(SELECT id FROM sale_financial_snapshots WHERE sale_id=?) AND category='ADVERTISING'").pluck().get(saleId), 0);
+    assert.equal(inspect.prepare("SELECT ad_spend FROM sales WHERE id=?").pluck().get(saleId), null);
 
     const replay = await api.post("/sales", saleBody, { operationId: createOperation.idFor(saleBody) }) as any;
     assert.equal(replay.idempotent, true);
@@ -186,13 +195,59 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
     settingsWriter.close();
     assert.deepEqual(inspect.prepare("SELECT commission_rate_numerator AS numerator,commission_rate_denominator AS denominator FROM sale_financial_snapshots WHERE sale_id=?").get(dispatchedSaleId), frozenCommission);
 
-    const expensePayload = { category: "shipping", state: "KNOWN", amountMinor: 25, currency: "TRY", provenance: { source: "carrier-invoice", id: "SHIP-1" } };
-    const expense = await request(`/api/sales/${dispatchedSaleId}/financial-expenses`, "sale-2-shipping", expensePayload);
+    const beforeExpenseFacts = inspect.prepare(`SELECT category,fact_version AS version,state,amount_base_try_minor AS amount
+      FROM sale_financial_expense_facts WHERE financial_snapshot_id=(SELECT id FROM sale_financial_snapshots WHERE sale_id=?)
+      ORDER BY category,fact_version`).all(dispatchedSaleId);
+    assert.deepEqual(beforeExpenseFacts, [
+      { category: "OTHER", version: 1, state: "UNKNOWN", amount: null },
+      { category: "PACKAGING", version: 1, state: "UNKNOWN", amount: null },
+      { category: "SHIPPING", version: 1, state: "UNKNOWN", amount: null },
+    ]);
+    assert.equal((await api.get(`/sales/${dispatchedSaleId}/financial`) as any).data.state, "PROVISIONAL");
+
+    const panelProvenance = { source: "PANEL_SALE_DETAIL", entryPoint: "SALE_FINANCIAL_EXPENSE_EDITOR", scope: "SALE" };
+    const expensePayload = { category: "shipping", state: "KNOWN", amountMinor: 25, currency: "TRY", provenance: panelProvenance };
+    const expenseOperation = createRetryOperation("sale-expense-shipping");
+    const expenseOperationId = expenseOperation.idFor(expensePayload);
+    const expense = await request(`/api/sales/${dispatchedSaleId}/financial-expenses`, expenseOperationId, expensePayload);
     assert.equal(expense.status, 201, await expense.clone().text());
-    const expenseReplay = await request(`/api/sales/${dispatchedSaleId}/financial-expenses`, "sale-2-shipping", expensePayload);
+    assert.equal(expenseOperation.idFor(expensePayload), expenseOperationId);
+    const expenseReplay = await request(`/api/sales/${dispatchedSaleId}/financial-expenses`, expenseOperation.idFor(expensePayload), expensePayload);
     assert.equal(expenseReplay.status, 201, await expenseReplay.clone().text());
     assert.equal((await expenseReplay.json() as any).idempotent, true);
+    expenseOperation.complete(expenseOperationId);
     assert.equal(inspect.prepare("SELECT COUNT(*) FROM sale_financial_expense_facts WHERE financial_snapshot_id=(SELECT id FROM sale_financial_snapshots WHERE sale_id=?) AND category='SHIPPING'").pluck().get(dispatchedSaleId), 2);
+
+    for (const category of ["packaging", "other"]) {
+      const zeroExpense = await request(`/api/sales/${dispatchedSaleId}/financial-expenses`, `sale-2-${category}`, {
+        category, state: "KNOWN", amountMinor: 0, currency: "TRY", provenance: panelProvenance,
+      });
+      assert.equal(zeroExpense.status, 201, await zeroExpense.clone().text());
+    }
+    const completedFinancial = (await api.get(`/sales/${dispatchedSaleId}/financial`) as any).data;
+    assert.equal(completedFinancial.state, "FINAL");
+    assert.equal(completedFinancial.expenses.packaging.amountTryMinor, 0);
+    assert.equal(completedFinancial.expenses.other.amountTryMinor, 0);
+    assert.equal(completedFinancial.totals.knownExpenseTryMinor, 25);
+    assert.equal(completedFinancial.totals.netContributionTryMinor, 7_108);
+    assert.deepEqual(inspect.prepare(`SELECT category,fact_version AS version,state,amount_base_try_minor AS amount
+      FROM sale_financial_expense_facts WHERE financial_snapshot_id=(SELECT id FROM sale_financial_snapshots WHERE sale_id=?)
+      ORDER BY category,fact_version`).all(dispatchedSaleId), [
+      { category: "OTHER", version: 1, state: "UNKNOWN", amount: null },
+      { category: "OTHER", version: 2, state: "KNOWN", amount: 0 },
+      { category: "PACKAGING", version: 1, state: "UNKNOWN", amount: null },
+      { category: "PACKAGING", version: 2, state: "KNOWN", amount: 0 },
+      { category: "SHIPPING", version: 1, state: "UNKNOWN", amount: null },
+      { category: "SHIPPING", version: 2, state: "KNOWN", amount: 25 },
+    ]);
+    assert.match(inspect.prepare("SELECT provenance_json FROM sale_financial_expense_facts WHERE financial_snapshot_id=(SELECT id FROM sale_financial_snapshots WHERE sale_id=?) AND category='SHIPPING' AND fact_version=2").pluck().get(dispatchedSaleId) as string, /PANEL_SALE_DETAIL/);
+
+    const advertisingExpense = await request(`/api/sales/${dispatchedSaleId}/financial-expenses`, "sale-2-advertising", {
+      category: "advertising", state: "KNOWN", amountMinor: 25, currency: "TRY", provenance: { source: "marketing-invoice" },
+    });
+    assert.equal(advertisingExpense.status, 400, await advertisingExpense.clone().text());
+    assert.equal((await advertisingExpense.json() as any).error.code, "SALE_ADVERTISING_NOT_SALE_EXPENSE");
+    assert.equal(inspect.prepare("SELECT COUNT(*) FROM sale_financial_expense_facts WHERE financial_snapshot_id=(SELECT id FROM sale_financial_snapshots WHERE sale_id=?) AND category='ADVERTISING'").pluck().get(dispatchedSaleId), 0);
 
     const returned = await request(`/api/sales/${dispatchedSaleId}/status`, "sale-return-2", { status: "İade Edildi" }, "PATCH");
     assert.equal(returned.status, 200, await returned.text());
@@ -205,8 +260,8 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
     assert.equal(inspect.prepare("SELECT central_stock FROM products WHERE id='component'").pluck().get(), 8);
     assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_audit_log WHERE operation_id IN (?,?,?,'sale-create-2','sale-return-2')").pluck().get(createOperationId, updateOperation.idFor(updatePayload), cancellationOperation.idFor(cancellationPayload)), 5);
     assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_outbox WHERE operation_record_id IN (SELECT id FROM command_operations WHERE operation_id IN (?,?,?,'sale-create-2','sale-return-2'))").pluck().get(createOperationId, updateOperation.idFor(updatePayload), cancellationOperation.idFor(cancellationPayload)), 10);
-    assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_audit_log WHERE operation_id IN ('sale-2-dispatch','sale-2-shipping')").pluck().get(), 2);
-    assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_outbox WHERE operation_record_id IN (SELECT id FROM command_operations WHERE operation_id IN ('sale-2-dispatch','sale-2-shipping'))").pluck().get(), 3);
+    assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_audit_log WHERE operation_id IN ('sale-2-dispatch',?,'sale-2-packaging','sale-2-other')").pluck().get(expenseOperationId), 4);
+    assert.equal(inspect.prepare("SELECT COUNT(*) FROM command_outbox WHERE operation_record_id IN (SELECT id FROM command_operations WHERE operation_id IN ('sale-2-dispatch',?,'sale-2-packaging','sale-2-other'))").pluck().get(expenseOperationId), 5);
     inspect.close();
   } finally {
     if (browserClientInstalled) globalThis.fetch = nativeFetch;

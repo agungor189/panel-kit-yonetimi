@@ -3,12 +3,21 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SaleFinancialBreakdown } from "../../src/components/sales/SaleFinancialBreakdown.js";
+import SalesForm from "../../src/components/sales/SalesForm.js";
+import SaleDetailModal from "../../src/components/sales/SaleDetailModal.js";
+
+test("new sale form excludes sale advertising and routes marketing to operating expenses", () => {
+  const html = renderToStaticMarkup(React.createElement(SalesForm, { onBack() {} }));
+  assert.doesNotMatch(html, /advertising_cost|Reklam \(boş = Bilinmiyor\)/);
+  assert.match(html, /Marketing/);
+  assert.match(html, /Gider Yönetimi/);
+});
 
 test("real Panel sale financial detail renders UNKNOWN and finalized lot values without fake zero profit", () => {
   const provisional = renderToStaticMarkup(React.createElement(SaleFinancialBreakdown, { financial: {
     state: "PROVISIONAL", currency: "TRY",
     totals: { grossMinor: 12000, vatMinor: 2000, netRevenueMinor: 10000, commissionMinor: 1000, actualCogsTryMinor: 5000, grossProfitTryMinor: 5000, provisionalNetContributionTryMinor: 4000, netContributionTryMinor: null },
-    expenses: { shipping: { state: "UNKNOWN" }, packaging: { state: "UNKNOWN" }, advertising: { state: "UNKNOWN" }, other: { state: "UNKNOWN" } },
+    expenses: { shipping: { state: "UNKNOWN" }, packaging: { state: "UNKNOWN" }, other: { state: "UNKNOWN" } },
     lines: [],
   } }));
   assert.match(provisional, /Bilinmiyor/);
@@ -22,6 +31,27 @@ test("real Panel sale financial detail renders UNKNOWN and finalized lot values 
     lines: [{ id: "line", productSku: "SKU", productTitle: "Product", cogsAllocations: [{ inventoryLotId: "LOT-1", quantityBaseInt: 2, baseUomCode: "piece", costTryMinor: 5000 }] }],
   } }));
   assert.match(finalized, /Kesinleşti/);
+  assert.match(finalized, /Reklam \(eski kayıt, katkıya dahil değil\)/);
   assert.match(finalized, /LOT-1/);
   assert.match(finalized, /₺36,00/);
+});
+
+test("Sale Detail offers append-only facts for shipping, packaging and other without advertising", () => {
+  const html = renderToStaticMarkup(React.createElement(SaleDetailModal, {
+    sale: {
+      id: "sale-1", order_code: "DS-1", customer_name: "Customer", status: "Hazırlanıyor", platform: "Satış Sistemi", items: [],
+      financial: {
+        state: "PROVISIONAL", currency: "TRY", snapshot: { id: "snapshot-1" },
+        totals: { grossMinor: 12000, vatMinor: 2000, netRevenueMinor: 10000, commissionMinor: 1000, actualCogsTryMinor: 5000, grossProfitTryMinor: 5000, provisionalNetContributionTryMinor: 4000, netContributionTryMinor: null },
+        expenses: { shipping: { state: "UNKNOWN" }, packaging: { state: "UNKNOWN" }, other: { state: "UNKNOWN" } }, lines: [],
+      },
+    },
+    onClose() {},
+  }));
+  assert.match(html, /Gerçek satış gideri ekle/);
+  assert.match(html, /Kargo/);
+  assert.match(html, /Paketleme/);
+  assert.match(html, /Diğer giderler/);
+  assert.match(html, /0 geçerli bir gerçek tutardır/);
+  assert.doesNotMatch(html, /Reklam gideri ekle|data-expense-category="advertising"/);
 });

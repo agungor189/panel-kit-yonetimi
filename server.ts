@@ -3994,9 +3994,8 @@ async function startServer() {
     expenses: z.object({
       shipping: z.object({ state: z.enum(['KNOWN', 'UNKNOWN']), amountMinor: z.number().int().nonnegative().optional(), currency: z.string().regex(/^[A-Z]{3}$/).optional(), provenance: z.unknown().optional() }),
       packaging: z.object({ state: z.enum(['KNOWN', 'UNKNOWN']), amountMinor: z.number().int().nonnegative().optional(), currency: z.string().regex(/^[A-Z]{3}$/).optional(), provenance: z.unknown().optional() }),
-      advertising: z.object({ state: z.enum(['KNOWN', 'UNKNOWN']), amountMinor: z.number().int().nonnegative().optional(), currency: z.string().regex(/^[A-Z]{3}$/).optional(), provenance: z.unknown().optional() }),
       other: z.object({ state: z.enum(['KNOWN', 'UNKNOWN']), amountMinor: z.number().int().nonnegative().optional(), currency: z.string().regex(/^[A-Z]{3}$/).optional(), provenance: z.unknown().optional() }),
-    }),
+    }).strict(),
     items: z.array(z.object({
       quantity: z.coerce.number().int('Satış miktarı tam sayı olmalıdır').positive('Satış miktarı 0 dan büyük olmalıdır').max(Number.MAX_SAFE_INTEGER),
       unit_gross_minor: z.number().int().nonnegative(),
@@ -4006,6 +4005,9 @@ async function startServer() {
 
   app.post("/api/sales", requireInventoryReserve, (req, res) => {
     try {
+      if (Object.prototype.hasOwnProperty.call(req.body?.expenses || {}, 'advertising')) {
+        throw new SalesFinancialValidationError('SALE_ADVERTISING_NOT_SALE_EXPENSE', 'Reklam genel Marketing işletme gideridir; /api/expenses üzerinden kaydedilmelidir.');
+      }
       const parsedSale = saleSchema.parse(req.body);
       const {
         customer_name, customer_phone, customer_address,
@@ -4156,7 +4158,7 @@ async function startServer() {
           expenses?.shipping?.state === 'KNOWN' ? Number(expenses.shipping.amountMinor) / 100 : null,
           Number(discount_minor) / 100,
           expenses?.packaging?.state === 'KNOWN' ? Number(expenses.packaging.amountMinor) / 100 : null,
-          expenses?.advertising?.state === 'KNOWN' ? Number(expenses.advertising.amountMinor) / 100 : null,
+          null,
           expenses?.other?.state === 'KNOWN' ? Number(expenses.other.amountMinor) / 100 : null,
           grossMinor / 100, null, null, finalCashAccountId, 1);
 

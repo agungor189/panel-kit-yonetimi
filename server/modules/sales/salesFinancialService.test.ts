@@ -60,7 +60,7 @@ test("order snapshot freezes VAT-included economics, commission, FX, catalog and
   assert.deepEqual(snapshot.lines[0].components.map((item) => ({ productId: item.productId, quantityBaseInt: item.quantityBaseInt })), [{ productId: "part", quantityBaseInt: 4 }]);
   assert.equal(snapshot.expenses.shipping.state, "KNOWN");
   assert.equal(snapshot.expenses.packaging.state, "UNKNOWN");
-  assert.equal(snapshot.expenses.advertising.state, "UNKNOWN");
+  assert.equal(Object.hasOwn(snapshot.expenses, "advertising"), false);
   assert.equal(snapshot.expenses.other.state, "UNKNOWN");
 
   new ExchangeRateService(fixture.db).recordCurrentUsdTry({ rate: "50", source: "OWNER", changedAt: "2026-09-20T10:00:00.000Z", actorId: actor.id });
@@ -106,13 +106,30 @@ test("dispatch binds exact multi-lot BOM FIFO costs once and expense versions go
   new ExchangeRateService(fixture.db).recordCurrentUsdTry({ rate: "9", source: "OWNER", changedAt: "2026-09-20T13:00:00.000Z", actorId: actor.id });
   assert.equal(fixture.finance.getSaleFinancial("sale")?.totals.grossProfitTryMinor, 3_450);
 
-  for (const [index, category] of ["shipping", "packaging", "advertising", "other"].entries()) {
+  const financialSnapshotId = fixture.db.prepare("SELECT id FROM sale_financial_snapshots WHERE sale_id='sale'").pluck().get() as string;
+  fixture.db.prepare(`INSERT INTO sale_financial_expense_facts
+    (id,financial_snapshot_id,category,fact_version,state,provenance_json,operation_id,actor_id,recorded_at)
+    VALUES ('legacy-ad-unknown',?,'ADVERTISING',1,'UNKNOWN','{"source":"LEGACY"}','legacy-ad-unknown','legacy','2026-09-20T12:30:00.000Z')`).run(financialSnapshotId);
+
+  for (const [index, category] of ["shipping", "packaging", "other"].entries()) {
     fixture.finance.recordExpenseFact({ saleId: "sale", category: category as any, state: "KNOWN", amountMinor: index + 1, currency: "TRY", provenance: { source: "invoice", index }, operationId: `expense-${category}`, actor });
   }
   const complete = fixture.finance.getSaleFinancial("sale");
   assert.equal(complete?.state, "FINAL");
-  assert.equal(complete?.totals.netContributionTryMinor, 2_960);
-  assert.equal(fixture.db.prepare("SELECT COUNT(*) FROM sale_financial_expense_facts").pluck().get(), 8);
+  assert.equal(complete?.totals.netContributionTryMinor, 2_964);
+  assert.equal(complete?.totals.knownExpenseTryMinor, 6);
+  assert.equal(fixture.db.prepare("SELECT COUNT(*) FROM sale_financial_expense_facts").pluck().get(), 7);
+
+  fixture.db.prepare(`INSERT INTO sale_financial_expense_facts
+    (id,financial_snapshot_id,category,fact_version,state,amount_minor,currency,amount_base_try_minor,
+     fx_rate_numerator,fx_rate_denominator,fx_source,fx_observed_at,fx_direction,provenance_json,operation_id,actor_id,recorded_at)
+    VALUES ('legacy-ad-known',?,'ADVERTISING',2,'KNOWN',999,'TRY',999,1,1,'BASE_CURRENCY','2026-09-20T13:00:00.000Z','TRY_TO_TRY',
+      '{"source":"LEGACY"}','legacy-ad-known','legacy','2026-09-20T13:00:00.000Z')`).run(financialSnapshotId);
+  const withKnownLegacyAdvertising = fixture.finance.getSaleFinancial("sale");
+  assert.equal(withKnownLegacyAdvertising?.expenses.advertising.amountTryMinor, 999);
+  assert.equal(withKnownLegacyAdvertising?.state, "FINAL");
+  assert.equal(withKnownLegacyAdvertising?.totals.knownExpenseTryMinor, 6);
+  assert.equal(withKnownLegacyAdvertising?.totals.netContributionTryMinor, 2_964);
   fixture.db.close();
 });
 

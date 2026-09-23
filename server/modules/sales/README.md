@@ -4,7 +4,7 @@
 
 ## Contracts
 
-- `POST /api/sales` requires currency, integer-minor-unit line prices, per-line VAT basis points, frozen commission terms/basis, discount minor units, and explicit `KNOWN`/`UNKNOWN` expense facts.
+- `POST /api/sales` requires currency, integer-minor-unit line prices, per-line VAT basis points, frozen commission terms/basis, discount minor units, and explicit `KNOWN`/`UNKNOWN` shipping, packaging, and other expense facts.
 - `GET /api/sales/:id/financial` returns `dsdst.sale-financial.v1` with `COGS_PENDING`, `PROVISIONAL`, `FINAL`, or `LEGACY_UNSNAPSHOTTED` state.
 - `POST /api/sales/:id/financial-expenses` appends a new versioned expense fact through `CommandExecutor`; it never overwrites a prior fact.
 - Approved inventory dispatch finalizes COGS from the exact V2-07 FIFO reservation allocations and each lot's V2-06 acquisition-cost snapshot in the same command transaction.
@@ -13,6 +13,8 @@ The authoritative tables are `sale_financial_snapshots`, `sale_financial_lines`,
 `sale_financial_line_components`, `sale_financial_expense_facts`,
 `sale_financial_cogs_finalizations`, and `sale_financial_cogs_allocations`.
 All snapshot/allocation rows are protected by immutable triggers.
+
+Advertising is a general DSDST operating/marketing expense, not a sale or product expense. New sale commands reject an `advertising` expense fact and record advertising through the normal `/api/expenses` flow with the `Marketing` category. The V2-09 schema and legacy `ADVERTISING`/`sales.ad_spend` fields remain unchanged solely for historical compatibility; new sales leave them unused. Legacy advertising remains readable but is excluded from known sale expenses, completeness/finality, and net contribution. Existing immutable facts are not rewritten, and a future return/refund flow must not reverse advertising expense.
 
 ## Migration and rollback
 

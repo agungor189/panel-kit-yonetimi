@@ -28,6 +28,25 @@ const buildFormData = (sale: any): SaleDetailFormData => ({
 const finalStatuses = ['İptal Edildi', 'İade Edildi'];
 const statusOptions = ['Hazırlanıyor', 'Gönderildi', 'Tamamlandı', 'İptal Edildi', 'İade Edildi'];
 const DIRECT_SALES_CHANNELS = ['Satış Sistemi', 'Website'];
+const saleExpenseDefinitions = [
+  { category: 'shipping', label: 'Kargo' },
+  { category: 'packaging', label: 'Paketleme' },
+  { category: 'other', label: 'Diğer giderler' },
+] as const;
+type EditableSaleExpenseCategory = typeof saleExpenseDefinitions[number]['category'];
+
+const saleExpenseMajorToMinor = (value: string) => {
+  const source = value.trim().replace(',', '.');
+  const match = /^(0|[1-9]\d*)(?:\.(\d{1,2}))?$/.exec(source);
+  if (!match) throw new Error('Tutar en fazla iki ondalık basamaklı ve negatif olmayan bir sayı olmalıdır.');
+  const result = Number(match[1]) * 100 + Number((match[2] || '').padEnd(2, '0'));
+  if (!Number.isSafeInteger(result)) throw new Error('Tutar güvenli para sınırını aşıyor.');
+  return result;
+};
+
+const formatMinorTry = (value: number | null | undefined) => value === null || value === undefined
+  ? 'Bilinmiyor'
+  : new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY' }).format(value / 100);
 
 const requiresPlatformOrderNumber = (platform?: string) => {
   const normalized = String(platform || '').trim().toLocaleLowerCase('tr-TR');
@@ -53,6 +72,11 @@ const getSaleStatusClass = (status?: string) => {
 
 export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: any, onClose: () => void, onUpdated?: (sale: any) => void }) {
   const updateSaleOperation = useRef(createRetryOperation('sale-update'));
+  const expenseOperations = useRef({
+    shipping: createRetryOperation('sale-expense-shipping'),
+    packaging: createRetryOperation('sale-expense-packaging'),
+    other: createRetryOperation('sale-expense-other'),
+  });
   const { isReadOnly } = useAuth();
   const { FormatAmount } = useCurrency();
   const [isEditing, setIsEditing] = useState(false);
@@ -61,6 +85,9 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
   const [formData, setFormData] = useState<SaleDetailFormData>(() => buildFormData(sale));
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
+  const [expenseDrafts, setExpenseDrafts] = useState<Record<EditableSaleExpenseCategory, string>>({ shipping: '', packaging: '', other: '' });
+  const [expenseSaving, setExpenseSaving] = useState<EditableSaleExpenseCategory | null>(null);
+  const [expenseFeedback, setExpenseFeedback] = useState<{ kind: 'error' | 'success', message: string } | null>(null);
   const displayOrderCode = currentSale?.order_code || currentSale?.id?.slice(0, 8)?.toUpperCase();
 
   useEffect(() => {
@@ -69,6 +96,9 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
     setError('');
     setSaved(false);
     setIsEditing(false);
+    setExpenseDrafts({ shipping: '', packaging: '', other: '' });
+    setExpenseSaving(null);
+    setExpenseFeedback(null);
   }, [sale]);
 
   const isFinalStatus = finalStatuses.includes(currentSale?.status);
@@ -133,6 +163,40 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
       setError(err.message || 'Satış güncellenirken hata oluştu.');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleExpenseSave = async (category: EditableSaleExpenseCategory, label: string) => {
+    if (isReadOnly || expenseSaving) return;
+    let amountMinor: number;
+    try {
+      amountMinor = saleExpenseMajorToMinor(expenseDrafts[category]);
+    } catch (err: any) {
+      setExpenseFeedback({ kind: 'error', message: err.message || 'Gider tutarı geçersiz.' });
+      return;
+    }
+    const payload = {
+      category,
+      state: 'KNOWN',
+      amountMinor,
+      currency: 'TRY',
+      provenance: { source: 'PANEL_SALE_DETAIL', entryPoint: 'SALE_FINANCIAL_EXPENSE_EDITOR', scope: 'SALE' },
+    };
+    const operationId = expenseOperations.current[category].idFor(payload);
+    setExpenseSaving(category);
+    setExpenseFeedback(null);
+    try {
+      const response = await api.post(`/sales/${currentSale.id}/financial-expenses`, payload, { operationId });
+      expenseOperations.current[category].complete(operationId);
+      const updatedSale = { ...currentSale, financial: response.data };
+      setCurrentSale(updatedSale);
+      setExpenseDrafts((previous) => ({ ...previous, [category]: '' }));
+      setExpenseFeedback({ kind: 'success', message: `${label} gideri yeni bir finansal fact sürümü olarak kaydedildi.` });
+      onUpdated?.(updatedSale);
+    } catch (err: any) {
+      setExpenseFeedback({ kind: 'error', message: err.message || 'Satış gideri kaydedilemedi.' });
+    } finally {
+      setExpenseSaving(null);
     }
   };
 
@@ -344,6 +408,61 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
           </div>
 
           <SaleFinancialBreakdown financial={currentSale.financial} />
+
+          {!isReadOnly && currentSale.financial?.snapshot && currentSale.financial?.state !== 'LEGACY_UNSNAPSHOTTED' && (
+            <section className="rounded-2xl border border-gray-200 bg-white p-5" data-testid="sale-expense-editor">
+              <h3 className="text-xs font-black uppercase tracking-widest text-gray-600">Gerçek satış gideri ekle</h3>
+              <p className="mt-1 text-xs font-semibold text-gray-500">
+                Her kayıt yeni bir sürüm ekler; önceki fact değişmez. 0 geçerli bir gerçek tutardır ve Bilinmiyor durumundan farklıdır.
+              </p>
+              <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+                {saleExpenseDefinitions.map(({ category, label }) => {
+                  const currentExpense = currentSale.financial?.expenses?.[category];
+                  const isSavingCategory = expenseSaving === category;
+                  return (
+                    <div key={category} data-expense-category={category} className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <label htmlFor={`sale-expense-${category}`} className="text-xs font-black text-gray-700">{label}</label>
+                        <span className="text-[10px] font-bold text-gray-500">
+                          {currentExpense?.state === 'KNOWN' ? formatMinorTry(currentExpense.amountTryMinor) : 'Bilinmiyor'}
+                        </span>
+                      </div>
+                      <div className="mt-2 flex gap-2">
+                        <input
+                          id={`sale-expense-${category}`}
+                          type="text"
+                          inputMode="decimal"
+                          value={expenseDrafts[category]}
+                          onChange={(event) => {
+                            setExpenseDrafts((previous) => ({ ...previous, [category]: event.target.value }));
+                            setExpenseFeedback(null);
+                          }}
+                          placeholder="0,00"
+                          className="min-w-0 flex-1 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-semibold outline-none focus:border-primary"
+                        />
+                        <button
+                          type="button"
+                          disabled={expenseSaving !== null || expenseDrafts[category].trim() === ''}
+                          onClick={() => handleExpenseSave(category, label)}
+                          className="rounded-lg bg-primary px-3 py-2 text-xs font-black text-white disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {isSavingCategory ? '...' : 'Kaydet'}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {expenseFeedback && (
+                <p className={`mt-3 text-xs font-bold ${expenseFeedback.kind === 'error' ? 'text-red-600' : 'text-emerald-600'}`}>
+                  {expenseFeedback.message}
+                </p>
+              )}
+              <p className="mt-3 text-xs font-semibold text-gray-500">
+                Reklam satış gideri değildir; Gider Yönetimi’nde Marketing kategorisiyle işletme gideri olarak kaydedilir.
+              </p>
+            </section>
+          )}
         </div>
       </div>
     </div>

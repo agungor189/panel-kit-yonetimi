@@ -20,7 +20,6 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
     vat_rate_percent: '',
     shipping_cost: '',
     packaging_cost: '',
-    advertising_cost: '',
     other_expenses: '',
     discount: '0',
     cash_account_id: ''
@@ -293,7 +292,6 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
       expenses: {
         shipping: expenseFact(formData.shipping_cost, 'Kargo gideri'),
         packaging: expenseFact(formData.packaging_cost, 'Paketleme gideri'),
-        advertising: expenseFact(formData.advertising_cost, 'Reklam gideri'),
         other: expenseFact(formData.other_expenses, 'Diğer gider'),
       },
       items: selectedItems.map(item => ({
@@ -498,7 +496,6 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
               </div>
               {[
                 ['packaging_cost', 'Paketleme (boş = Bilinmiyor)'],
-                ['advertising_cost', 'Reklam (boş = Bilinmiyor)'],
                 ['other_expenses', 'Diğer Gider (boş = Bilinmiyor)'],
               ].map(([field, label]) => (
                 <div key={field}>
@@ -508,6 +505,9 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
                     className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-semibold outline-none focus:ring-2 focus:border-primary" />
                 </div>
               ))}
+              <p className="md:col-span-4 text-xs font-semibold text-gray-500">
+                Reklam giderleri satışa bağlanmaz; Gider Yönetimi’nde <strong>Marketing</strong> kategorisiyle işletme gideri olarak kaydedilir.
+              </p>
               <div>
                 <label className="block text-xs font-semibold text-gray-500 mb-1">İndirim Tutarı (₺)</label>
                 <input 

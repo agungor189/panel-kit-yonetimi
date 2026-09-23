@@ -8,7 +8,6 @@ const money = (minor: number | null | undefined, currency = 'TRY') => {
 const expenseLabels: Record<string, string> = {
   shipping: 'Kargo',
   packaging: 'Paketleme',
-  advertising: 'Reklam',
   other: 'Diğer giderler',
 };
 
@@ -31,13 +30,15 @@ export function SaleFinancialBreakdown({ financial }: { financial: any }) {
 
   const totals = financial.totals;
   const currency = financial.currency || 'TRY';
+  const expenseEntries = Object.entries(expenseLabels);
+  if (financial.expenses?.advertising) expenseEntries.splice(2, 0, ['advertising', 'Reklam (eski kayıt, katkıya dahil değil)']);
   const rows = [
     ['Brüt satış', money(totals.grossMinor, currency)],
     ['KDV', money(totals.vatMinor, currency)],
     ['KDV hariç net gelir', money(totals.netRevenueMinor, currency)],
     ['Komisyon', money(totals.commissionMinor, currency)],
     ['Gerçek FIFO maliyeti', money(totals.actualCogsTryMinor, 'TRY')],
-    ...Object.entries(expenseLabels).map(([key, label]) => {
+    ...expenseEntries.map(([key, label]) => {
       const expense = financial.expenses?.[key];
       return [label, expense?.state === 'KNOWN' ? money(expense.amountTryMinor, 'TRY') : 'Bilinmiyor'];
     }),

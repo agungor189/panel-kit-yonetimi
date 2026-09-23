@@ -3,7 +3,7 @@ import type Database from "better-sqlite3";
 import { ExchangeRateService, type FxSnapshot } from "../finance/exchangeRates.js";
 import { integerMoney, multiplyAndRound, reduceRational, roundRatio, splitVat, type Rational } from "../finance/money.js";
 
-export type SaleExpenseCategory = "shipping" | "packaging" | "advertising" | "other";
+export type SaleExpenseCategory = "shipping" | "packaging" | "other";
 export type ExpenseFactInput = {
   state: "KNOWN" | "UNKNOWN";
   amountMinor?: number;
@@ -23,11 +23,10 @@ export class SalesFinancialValidationError extends Error {
 
 const FORMULA_VERSION = "dsdst.sale-financial.v1";
 const COGS_FORMULA_VERSION = "dsdst.sale-fifo-cogs.v1";
-const categories = ["SHIPPING", "PACKAGING", "ADVERTISING", "OTHER"] as const;
+const categories = ["SHIPPING", "PACKAGING", "OTHER"] as const;
 const inputCategory = {
   shipping: "SHIPPING",
   packaging: "PACKAGING",
-  advertising: "ADVERTISING",
   other: "OTHER",
 } as const;
 
@@ -277,6 +276,9 @@ export class SalesFinancialService {
     recordedAt?: string;
   }) {
     const saleId = text(input.saleId, "saleId");
+    if ((input as { category: unknown }).category === "advertising") {
+      throw new SalesFinancialValidationError("SALE_ADVERTISING_NOT_SALE_EXPENSE", "Advertising is a general Marketing operating expense; record it through /api/expenses.");
+    }
     const category = inputCategory[input.category];
     if (!category) throw new SalesFinancialValidationError("SALE_FINANCIAL_VALIDATION_FAILED", "Expense category is unsupported.");
     const operationId = text(input.operationId, "operationId");
@@ -421,8 +423,9 @@ export class SalesFinancialService {
         operationId: allocation.dispatch_operation_id,
       })),
     }));
-    const knownExpenseTryMinor = safeAdd(expenseRows.filter((row) => row.state === "KNOWN").map((row) => Number(row.amount_base_try_minor)), "known expenses");
-    const unknownExpense = expenseRows.some((row) => row.state === "UNKNOWN");
+    const contributionExpenseRows = expenseRows.filter((row) => row.category !== "ADVERTISING");
+    const knownExpenseTryMinor = safeAdd(contributionExpenseRows.filter((row) => row.state === "KNOWN").map((row) => Number(row.amount_base_try_minor)), "known expenses");
+    const unknownExpense = contributionExpenseRows.some((row) => row.state === "UNKNOWN");
     const actualCogsTryMinor = finalization ? Number(finalization.total_cogs_base_try_minor) : null;
     const grossProfitTryMinor = actualCogsTryMinor === null ? null : Number(snapshot.net_revenue_base_try_minor) - actualCogsTryMinor;
     const provisionalNetContributionTryMinor = grossProfitTryMinor === null ? null
