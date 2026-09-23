@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { roundRatio } from "../finance/money.js";
+import { WarehouseExecutionService } from "../warehouse/warehouseExecutionService.js";
 
 export type ReturnReason = "CUSTOMER_CHANGED_MIND" | "WRONG_PRODUCT" | "DAMAGED" | "MISSING_PART" | "INCOMPATIBLE" | "OTHER";
 export type ReturnDisposition = "SELLABLE" | "DAMAGED" | "MISSING_NOT_RECEIVED";
@@ -216,6 +217,7 @@ export class ReturnsService {
         (id,return_id,receipt_operation_id,received_by_actor_id,received_by_actor_name,received_at) VALUES (?,?,?,?,?,?)`)
         .run(receiptId, returnId, operationId, actor.id, actor.name, receivedAt);
       const products = new Set<string>();
+      const warehouse = new WarehouseExecutionService(this.db);
 
       for (const [index, raw] of input.lines.entries()) {
         const returnLineId = text(raw.returnLineId, `lines[${index}].returnLineId`);
@@ -230,10 +232,8 @@ export class ReturnsService {
         let location: any = null;
         const locationId = raw.disposition === "MISSING_NOT_RECEIVED" ? null : text(raw.locationId, `lines[${index}].locationId`);
         if (locationId) {
-          location = this.db.prepare("SELECT id,role FROM warehouse_location_slots WHERE (id=? OR code=?) AND active=1").get(locationId, locationId) as any;
-          if (!location) throw new ReturnsValidationError("RETURN_LOCATION_INVALID", "Return destination must be an active warehouse location.", 409);
-          if (raw.disposition === "DAMAGED" && location.role !== "QUARANTINE") throw new ReturnsValidationError("RETURN_QUARANTINE_REQUIRED", "DAMAGED returns must be placed in a QUARANTINE location.", 409);
-          if (raw.disposition === "SELLABLE" && location.role === "QUARANTINE") throw new ReturnsValidationError("RETURN_SELLABLE_LOCATION_INVALID", "SELLABLE returns require a non-quarantine active location.", 409);
+          location = this.db.prepare("SELECT id,code FROM warehouse_location_slots WHERE id=? OR code=?").get(locationId, locationId) as any;
+          if (!location) throw new ReturnsValidationError("RETURN_LOCATION_INVALID", "Return destination must be a configured warehouse location.", 409);
         }
 
         const receiptLineId = randomUUID();
@@ -263,13 +263,6 @@ export class ReturnsService {
               const changed = this.db.prepare("UPDATE inventory_lots SET on_hand_base_int=on_hand_base_int+?,status='USABLE',updated_at=? WHERE id=?")
                 .run(take, receivedAt, allocation.inventory_lot_id);
               if (changed.changes !== 1) throw new ReturnsValidationError("ORIGINAL_INVENTORY_LOT_NOT_FOUND", "Original dispatched lot is unavailable.", 409);
-              const locationKind = location.role === "PICKING" || location.role === "MIXED" ? "PICKING" : "RESERVE";
-              this.db.prepare(`INSERT INTO inventory_lot_location_balances
-                (id,lot_id,location_id,location_kind,quantity_base_int,active,physical_state,updated_at)
-                VALUES (?,?,?,?,?,1,'CONFIRMED',?)
-                ON CONFLICT(lot_id,location_id) DO UPDATE SET quantity_base_int=quantity_base_int+excluded.quantity_base_int,
-                  active=1,physical_state='CONFIRMED',updated_at=excluded.updated_at`)
-                .run(randomUUID(), allocation.inventory_lot_id, location.id, locationKind, take, receivedAt);
               this.db.prepare(`INSERT INTO inventory_ledger_events
                 (id,operation_id,event_type,product_id,lot_id,order_id,quantity_delta_base_int,base_uom_code_snapshot,
                  reason_code,reference_type,reference_id,occurred_at)
@@ -283,6 +276,20 @@ export class ReturnsService {
                original_acquisition_cost_snapshot_id,quantity_base_int,cost_base_try_minor,disposition,inventory_ledger_event_id,created_at)
               VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(receiptAllocationId, receiptLineId, allocation.id, productId,
               allocation.inventory_lot_id, allocation.acquisition_cost_snapshot_id, take, cost, raw.disposition, ledgerEventId, receivedAt);
+            if (raw.disposition !== "MISSING_NOT_RECEIVED") {
+              warehouse.registerReturnPackage({
+                returnReceiptId: receiptId,
+                returnReceiptInventoryAllocationId: receiptAllocationId,
+                originalInventoryLotId: allocation.inventory_lot_id,
+                productId,
+                acquisitionCostSnapshotId: allocation.acquisition_cost_snapshot_id,
+                quantityBaseInt: take,
+                disposition: raw.disposition === "SELLABLE" ? "ACCEPTED" : "DAMAGED",
+                destinationIdOrCode: location.code,
+                operationId,
+                occurredAt: receivedAt,
+              });
+            }
             if (raw.disposition === "DAMAGED") {
               this.db.prepare(`INSERT INTO return_quarantine_facts
                 (id,receipt_inventory_allocation_id,location_id,quantity_base_int,quarantined_at) VALUES (?,?,?,?,?)`)

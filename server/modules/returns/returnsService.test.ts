@@ -7,6 +7,8 @@ import { CatalogService } from "../catalog/catalogService.js";
 import { InventoryService } from "../inventory/inventoryService.js";
 import { ProcurementService } from "../procurement/procurementService.js";
 import { SalesFinancialService } from "../sales/salesFinancialService.js";
+import { CommandExecutor } from "../commands/commandFoundation.js";
+import { WarehouseExecutionError, WarehouseExecutionService } from "../warehouse/warehouseExecutionService.js";
 import { ReturnsService, ReturnsValidationError } from "./returnsService.js";
 import { createReturnsV1Router } from "../../routes/returnsV1Routes.js";
 
@@ -96,10 +98,10 @@ test("partial BOM returns conserve original money/FIFO and receipt dispositions 
   assert.equal(sellable.lines[0].cogs.reduce((sum: number, row: any) => sum + row.costTryMinor, 0), 200);
   assert.equal(sellable.financialReversal.netMinor + sellable.financialReversal.vatMinor, sellable.financialReversal.grossMinor);
 
-  const damaged = create("damaged", "DAMAGED");
   const missing = create("missing", "MISSING_PART");
-  assert.equal(damaged.lines[0].cogs.reduce((sum: number, row: any) => sum + row.costTryMinor, 0), 350);
-  assert.equal(missing.lines[0].cogs.reduce((sum: number, row: any) => sum + row.costTryMinor, 0), 500);
+  const damaged = create("damaged", "DAMAGED");
+  assert.equal(missing.lines[0].cogs.reduce((sum: number, row: any) => sum + row.costTryMinor, 0), 350);
+  assert.equal(damaged.lines[0].cogs.reduce((sum: number, row: any) => sum + row.costTryMinor, 0), 500);
   const conserved = [sellable, damaged, missing].reduce((totals, item) => ({
     grossBeforeDiscountMinor: totals.grossBeforeDiscountMinor + item.financialReversal.grossBeforeDiscountMinor,
     discountMinor: totals.discountMinor + item.financialReversal.discountMinor,
@@ -113,17 +115,44 @@ test("partial BOM returns conserve original money/FIFO and receipt dispositions 
   assert.throws(() => create("over"), (error: any) => error instanceof ReturnsValidationError && error.code === "RETURN_QUANTITY_EXCEEDED");
 
   db.prepare("UPDATE products SET purchase_cost=99999 WHERE id='part-sale'").run();
-  service.receiveReturn({ returnId: sellable.id, lines: [{ returnLineId: sellable.lines[0].id, quantityBaseInt: 1, disposition: "SELLABLE", locationId: "SELL-sale" }], operationId: "receive-sellable", actor });
+  const receiptPayload = { returnId: sellable.id, lines: [{ returnLineId: sellable.lines[0].id, quantityBaseInt: 1, disposition: "SELLABLE" as const, locationId: "SELL-sale" }], operationId: "receive-sellable", actor };
+  const command = new CommandExecutor(db);
+  const receiptCommand = { operationId: "receive-sellable", commandType: "returns.receipt.inspect.v1", payload: receiptPayload,
+    actor: { human: actor }, authorization: { decision: "ALLOW" as const, capability: "warehouse:accept_returns" } };
+  const received = command.execute(receiptCommand, () => ({ statusCode: 201, body: service.receiveReturn(receiptPayload) })).result.body as any;
+  const replay = command.execute(receiptCommand, () => { throw new Error("return receipt replay executed"); });
+  assert.deepEqual(replay.result.body, received);
   const afterSellable = Number(db.prepare("SELECT SUM(on_hand_base_int) FROM inventory_lots WHERE product_id='part-sale'").pluck().get());
   assert.equal(afterSellable, Number(originalOnHand) + 2);
   assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_ledger_events WHERE event_type='RETURN'").pluck().get(), 1);
-
-  const damagedResult = service.receiveReturn({ returnId: damaged.id, lines: [{ returnLineId: damaged.lines[0].id, quantityBaseInt: 1, disposition: "DAMAGED", locationId: "QUAR-sale" }], operationId: "receive-damaged", actor });
-  assert.equal(damagedResult.returnLossTryMinor, 350);
-  assert.equal(db.prepare("SELECT COUNT(*) FROM return_quarantine_facts").pluck().get(), 2);
-  assert.equal(Number(db.prepare("SELECT SUM(on_hand_base_int) FROM inventory_lots WHERE product_id='part-sale'").pluck().get()), afterSellable);
+  const returnPackage = db.prepare(`SELECT origin_type,receipt_id,return_receipt_id,return_receipt_inventory_allocation_id,
+    origin_inventory_lot_id,inventory_lot_id,acquisition_cost_snapshot_id,remaining_quantity_base_int,disposition,status,current_slot_id
+    FROM warehouse_execution_packages WHERE origin_type='RETURN_RECEIPT' AND disposition='ACCEPTED'`).get() as any;
+  assert.equal(returnPackage.receipt_id, null);
+  assert.equal(returnPackage.origin_inventory_lot_id, returnPackage.inventory_lot_id);
+  assert.equal(returnPackage.remaining_quantity_base_int, 2);
+  assert.equal(returnPackage.current_slot_id, "SELL-sale");
+  assert.equal(db.prepare("SELECT COUNT(*) FROM warehouse_execution_packages WHERE origin_type='RETURN_RECEIPT' AND disposition='ACCEPTED'").pluck().get(), 1);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM warehouse_package_movements_v2 WHERE package_id LIKE 'return-package:%'").pluck().get(), 1);
+  assert.deepEqual(new WarehouseExecutionService(db).getReconciliation("part-sale"), {
+    productId: "part-sale", lotOnHandBaseInt: 2, ledgerOnHandBaseInt: 2, locationOnHandBaseInt: 2,
+    packageOnHandBaseInt: 2, centralStockProjectionBaseInt: 2, reconciled: true,
+  });
 
   service.receiveReturn({ returnId: missing.id, lines: [{ returnLineId: missing.lines[0].id, quantityBaseInt: 1, disposition: "MISSING_NOT_RECEIVED" }], operationId: "receive-missing", actor });
+  const damagedResult = service.receiveReturn({ returnId: damaged.id, lines: [{ returnLineId: damaged.lines[0].id, quantityBaseInt: 1, disposition: "DAMAGED", locationId: "QUAR-sale" }], operationId: "receive-damaged", actor });
+  assert.equal(damagedResult.returnLossTryMinor, 500);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM return_quarantine_facts").pluck().get(), 1);
+  assert.deepEqual(db.prepare(`SELECT disposition,status,current_slot_id,inventory_lot_id,origin_inventory_lot_id,
+    acquisition_cost_snapshot_id,remaining_quantity_base_int FROM warehouse_execution_packages
+    WHERE origin_type='RETURN_RECEIPT' AND disposition='DAMAGED'`).get(), {
+    disposition: "DAMAGED", status: "QUARANTINE", current_slot_id: "QUAR-sale", inventory_lot_id: null,
+    origin_inventory_lot_id: damaged.lines[0].cogs[0].inventoryLotId,
+    acquisition_cost_snapshot_id: damaged.lines[0].cogs[0].acquisitionCostSnapshotId,
+    remaining_quantity_base_int: 2,
+  });
+  assert.equal(Number(db.prepare("SELECT SUM(on_hand_base_int) FROM inventory_lots WHERE product_id='part-sale'").pluck().get()), afterSellable);
+  assert.equal(new WarehouseExecutionService(db).getReconciliation("part-sale").reconciled, true);
   assert.equal(Number(db.prepare("SELECT SUM(on_hand_base_int) FROM inventory_lots WHERE product_id='part-sale'").pluck().get()), afterSellable);
   assert.equal(db.prepare("SELECT COUNT(*) FROM sale_financial_expense_facts WHERE category='SHIPPING'").pluck().get(), originalSellerShipping);
   assert.equal(db.prepare("SELECT COUNT(*) FROM sale_financial_expense_facts WHERE category='ADVERTISING'").pluck().get(), 0);
@@ -138,6 +167,56 @@ test("partial BOM returns conserve original money/FIFO and receipt dispositions 
   assert.equal(db.prepare("SELECT COUNT(*) FROM refund_cash_postings").pluck().get(), 2);
   assert.equal(db.prepare("SELECT COUNT(*) FROM cash_transactions WHERE source_type='v2_return_refund_projection'").pluck().get(), 2);
   assert.equal(db.prepare("SELECT COUNT(*) FROM marketplace_commission_reversal_facts WHERE state='PENDING_SETTLEMENT'").pluck().get(), 0);
+  db.close();
+});
+
+test("SELLABLE return placement rejects inactive, full, and mixed-lot destinations atomically", () => {
+  const { db, service, financialLineId } = setup("Direct", "policy");
+  db.prepare("UPDATE warehouse_location_slots SET allow_mixed_lot=0 WHERE id='SELL-policy'").run();
+  db.prepare("UPDATE warehouse_position_configs SET allow_mixed_lot=0 WHERE id='position-S'").run();
+  db.prepare(`INSERT INTO warehouse_location_slots
+    (id,topology_id,code,rack_code,level_number,position_number,depth_code,depth_index,is_front,role,
+     allow_mixed_sku,allow_mixed_lot,placement_priority)
+    VALUES ('SELL-policy-REAR','returns','SELL-policy-REAR','S',1,1,'B',1,0,'PICKING',1,0,1)`).run();
+  const request = (suffix: string) => service.createReturnRequest({
+    saleId: "policy", lines: [{ financialLineId, quantityBaseInt: 1, reasonCode: "WRONG_PRODUCT" }],
+    operationId: `policy-request-${suffix}`, actor,
+  });
+  const first = request("first");
+  const middle = request("middle");
+  const last = request("last");
+  const receiveSellable = (item: any, locationId: string, operationId: string) => service.receiveReturn({
+    returnId: item.id,
+    lines: [{ returnLineId: item.lines[0].id, quantityBaseInt: 1, disposition: "SELLABLE", locationId }],
+    operationId,
+    actor,
+  });
+  const before = new WarehouseExecutionService(db).getReconciliation("part-policy");
+
+  db.prepare("UPDATE warehouse_location_slots SET active=0 WHERE id='SELL-policy'").run();
+  assert.throws(() => receiveSellable(first, "SELL-policy", "policy-inactive"),
+    (error: any) => error instanceof WarehouseExecutionError && error.code === "LOCATION_POLICY_VIOLATION");
+  assert.deepEqual(new WarehouseExecutionService(db).getReconciliation("part-policy"), before);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM return_receipts").pluck().get(), 0);
+  db.prepare("UPDATE warehouse_location_slots SET active=1 WHERE id='SELL-policy'").run();
+
+  receiveSellable(first, "SELL-policy", "policy-first");
+  const afterFirst = new WarehouseExecutionService(db).getReconciliation("part-policy");
+  assert.equal(afterFirst.reconciled, true);
+  assert.throws(() => receiveSellable(middle, "SELL-policy", "policy-full"),
+    (error: any) => error instanceof WarehouseExecutionError && error.code === "LOCATION_POLICY_VIOLATION");
+  assert.deepEqual(new WarehouseExecutionService(db).getReconciliation("part-policy"), afterFirst);
+
+  service.receiveReturn({
+    returnId: middle.id,
+    lines: [{ returnLineId: middle.lines[0].id, quantityBaseInt: 1, disposition: "MISSING_NOT_RECEIVED" }],
+    operationId: "policy-middle-missing",
+    actor,
+  });
+  assert.throws(() => receiveSellable(last, "SELL-policy-REAR", "policy-mixed-lot"),
+    (error: any) => error instanceof WarehouseExecutionError && error.code === "LOCATION_POLICY_VIOLATION");
+  assert.deepEqual(new WarehouseExecutionService(db).getReconciliation("part-policy"), afterFirst);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM warehouse_execution_packages WHERE origin_type='RETURN_RECEIPT'").pluck().get(), 1);
   db.close();
 });
 

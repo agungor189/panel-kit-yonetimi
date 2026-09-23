@@ -114,7 +114,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 74);
+  assert.equal(manifest.length, 75);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -180,7 +180,7 @@ test("fresh production schema is exact, versioned and has zero business history"
     warehouse_location_slots: ["code", "depth_code", "depth_index", "is_front", "level_number", "position_number", "rack_code", "role", "topology_id"],
     warehouse_execution_settings: ["heavy_package_threshold_grams", "prepare_threshold_pct", "watch_threshold_pct"],
     warehouse_goods_receipts: ["accepted_quantity_base_int", "acquisition_cost_snapshot_id", "damaged_quantity_base_int", "excess_quantity_base_int", "inventory_lot_id", "is_final", "receipt_series_id", "shortage_quantity_base_int", "stage_index", "variance_quantity_base_int"],
-    warehouse_execution_packages: ["acquisition_cost_snapshot_id", "current_slot_id", "disposition", "inventory_lot_id", "label_identity", "package_code", "product_id", "remaining_quantity_base_int", "supplier_lot_code"],
+    warehouse_execution_packages: ["acquisition_cost_snapshot_id", "current_slot_id", "disposition", "inventory_lot_id", "label_identity", "origin_inventory_lot_id", "origin_type", "package_code", "product_id", "receipt_id", "remaining_quantity_base_int", "return_receipt_id", "return_receipt_inventory_allocation_id", "supplier_lot_code"],
     warehouse_package_movements_v2: ["from_location_id", "inventory_lot_id", "movement_type", "operation_id", "package_id", "to_location_id"],
     warehouse_replenishment_tasks: ["current_pct", "inventory_lot_id", "source_package_id", "status", "target_slot_id", "threshold_pct"],
     warehouse_stock_discrepancies_v2: ["inventory_lot_id", "operation_id", "reason", "status"],

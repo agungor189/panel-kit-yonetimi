@@ -105,6 +105,7 @@ const slotCode = (template: string, values: { rack: string; level: number; posit
 
 type SlotRow = {
   id: string;
+  topology_id: string;
   code: string;
   rack_code: string;
   level_number: number;
@@ -430,12 +431,13 @@ export class WarehouseExecutionService {
       );
       if (approvalId) this.db.prepare("UPDATE warehouse_excess_approvals SET receipt_id=? WHERE id=?").run(receiptId, approvalId);
       const insertPackage = this.db.prepare(`INSERT INTO warehouse_execution_packages (
-        id,package_code,receipt_id,inventory_lot_id,product_id,supplier_lot_code,purchase_order_id,purchase_line_id,
+        id,package_code,origin_type,receipt_id,origin_inventory_lot_id,inventory_lot_id,product_id,supplier_lot_code,purchase_order_id,purchase_line_id,
         acquisition_cost_snapshot_id,base_uom_code_snapshot,initial_quantity_base_int,remaining_quantity_base_int,
         target_quantity_base_int,weight_grams,disposition,status,updated_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      ) VALUES (?,?,'GOODS_RECEIPT',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       for (const item of packages) {
         insertPackage.run(item.id, item.code, receiptId, item.disposition === "ACCEPTED" ? inventoryLotId : null,
+          item.disposition === "ACCEPTED" ? inventoryLotId : null,
           snapshot.product_id, supplierLotCode, snapshot.purchase_order_id, snapshot.purchase_line_id, snapshot.id,
           snapshot.base_uom_code_snapshot, item.quantityBaseInt, item.quantityBaseInt, item.targetQuantityBaseInt,
           item.weightGrams, item.disposition, item.disposition === "DAMAGED" ? "QUARANTINE" : "RECEIVED", receivedAt);
@@ -449,6 +451,83 @@ export class WarehouseExecutionService {
         packages: packages.map(({ id }) => this.getPackage(id)),
       };
     }).immediate();
+  }
+
+  registerReturnPackage(input: {
+    returnReceiptId: string;
+    returnReceiptInventoryAllocationId: string;
+    originalInventoryLotId: string;
+    productId: string;
+    acquisitionCostSnapshotId: string;
+    quantityBaseInt: number;
+    disposition: PackageDisposition;
+    destinationIdOrCode: string;
+    operationId: string;
+    occurredAt: string;
+  }) {
+    const returnReceiptId = requiredText(input.returnReceiptId, "returnReceiptId");
+    const allocationId = requiredText(input.returnReceiptInventoryAllocationId, "returnReceiptInventoryAllocationId");
+    const originalLotId = requiredText(input.originalInventoryLotId, "originalInventoryLotId");
+    const productId = requiredText(input.productId, "productId");
+    const snapshotId = requiredText(input.acquisitionCostSnapshotId, "acquisitionCostSnapshotId");
+    const quantity = positiveInteger(input.quantityBaseInt, "quantityBaseInt");
+    const occurredAt = timestamp(input.occurredAt, "occurredAt");
+    if (!(["ACCEPTED", "DAMAGED"] as string[]).includes(input.disposition)) {
+      throw new WarehouseExecutionError("WAREHOUSE_VALIDATION_FAILED", "Return package disposition is invalid.");
+    }
+    const source = this.db.prepare(`SELECT l.id,l.product_id,l.purchase_order_id,l.purchase_line_id,
+        l.acquisition_cost_snapshot_id,l.base_uom_code_snapshot,COALESCE(p.mass_grams_int,0) AS mass_grams,
+        COALESCE((SELECT supplier_lot_code FROM warehouse_goods_receipts r WHERE r.inventory_lot_id=l.id), 'ORIGINAL-LOT:' || l.id) AS supplier_lot_code
+      FROM inventory_lots l JOIN products p ON p.id=l.product_id
+      WHERE l.id=? AND l.product_id=? AND l.acquisition_cost_snapshot_id=?`).get(originalLotId, productId, snapshotId) as any;
+    if (!source) {
+      throw new WarehouseExecutionError("RETURN_PACKAGE_PROVENANCE_INVALID", "Return package must preserve the original lot and acquisition-cost provenance.", 409);
+    }
+    const destinationValue = requiredText(input.destinationIdOrCode, "destinationIdOrCode");
+    const destinationCode = this.db.prepare("SELECT code FROM warehouse_location_slots WHERE id=? OR UPPER(code)=UPPER(?)")
+      .pluck().get(destinationValue, destinationValue) as string | undefined;
+    if (!destinationCode) throw new WarehouseExecutionError("LOCATION_POLICY_VIOLATION", "Return destination is not a configured warehouse slot.", 409);
+    const packageId = `return-package:${allocationId}`;
+    const packageCode = `RETURN-${allocationId}`.toUpperCase();
+    const labelIdentity = `RETURN:${allocationId}`;
+    const weightGrams = Number(source.mass_grams) * quantity;
+    if (!Number.isSafeInteger(weightGrams) || weightGrams < 0) {
+      throw new WarehouseExecutionError("WAREHOUSE_VALIDATION_FAILED", "Return package weight is outside the supported integer range.");
+    }
+    this.db.prepare(`INSERT INTO warehouse_execution_packages (
+      id,package_code,origin_type,receipt_id,return_receipt_id,return_receipt_inventory_allocation_id,
+      origin_inventory_lot_id,inventory_lot_id,product_id,supplier_lot_code,purchase_order_id,purchase_line_id,
+      acquisition_cost_snapshot_id,base_uom_code_snapshot,initial_quantity_base_int,remaining_quantity_base_int,
+      target_quantity_base_int,weight_grams,disposition,label_identity,status,current_slot_id,created_at,updated_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      packageId, packageCode, "RETURN_RECEIPT", null, returnReceiptId, allocationId, originalLotId,
+      input.disposition === "ACCEPTED" ? originalLotId : null, productId, source.supplier_lot_code,
+      source.purchase_order_id, source.purchase_line_id, snapshotId, source.base_uom_code_snapshot,
+      quantity, quantity, quantity, weightGrams, input.disposition, labelIdentity,
+      input.disposition === "ACCEPTED" ? "LABELED" : "QUARANTINE", null, occurredAt, occurredAt,
+    );
+
+    const destination = input.disposition === "ACCEPTED"
+      ? this.validatedDestination(packageId, destinationCode, destinationCode)
+      : this.validatedQuarantineDestination(packageId, destinationCode);
+    if (input.disposition === "ACCEPTED") {
+      const locationKind = destination.isFront && ["PICKING", "MIXED"].includes(destination.role) ? "PICKING" : "RESERVE";
+      this.db.prepare(`INSERT INTO inventory_lot_location_balances
+        (id,lot_id,location_id,location_kind,quantity_base_int,active,physical_state,updated_at)
+        VALUES (?,?,?,?,?,1,'CONFIRMED',?)
+        ON CONFLICT(lot_id,location_id) DO UPDATE SET quantity_base_int=quantity_base_int+excluded.quantity_base_int,
+          location_kind=excluded.location_kind,active=1,physical_state='CONFIRMED',updated_at=excluded.updated_at`)
+        .run(randomUUID(), originalLotId, destination.id, locationKind, quantity, occurredAt);
+      const status = locationKind === "PICKING" ? "PICKING" : "RESERVE";
+      this.db.prepare("UPDATE warehouse_execution_packages SET current_slot_id=?,status=?,updated_at=? WHERE id=?")
+        .run(destination.id, status, occurredAt, packageId);
+      this.insertMovement(`${requiredText(input.operationId, "operationId")}:package:${allocationId}`, "PLACEMENT",
+        this.packageRow(packageId), `RETURN_RECEIVING:${returnReceiptId}`, destination.id, occurredAt);
+    } else {
+      this.db.prepare("UPDATE warehouse_execution_packages SET current_slot_id=?,status='QUARANTINE',updated_at=? WHERE id=?")
+        .run(destination.id, occurredAt, packageId);
+    }
+    return { package: this.getPackage(packageId), destination };
   }
 
   identifyPackage(input: { packageId: string; labelIdentity: string }) {
@@ -470,7 +549,9 @@ export class WarehouseExecutionService {
       ? (this.db.prepare("SELECT code FROM warehouse_location_slots WHERE id=?").pluck().get(row.current_slot_id) as string | undefined) ?? null
       : null;
     return {
-      id: row.id, code: row.package_code, receiptId: row.receipt_id, inventoryLotId: row.inventory_lot_id,
+      id: row.id, code: row.package_code, originType: row.origin_type, receiptId: row.receipt_id,
+      returnReceiptId: row.return_receipt_id, returnReceiptInventoryAllocationId: row.return_receipt_inventory_allocation_id,
+      originInventoryLotId: row.origin_inventory_lot_id, inventoryLotId: row.inventory_lot_id,
       productId: row.product_id, supplierLotCode: row.supplier_lot_code, purchaseOrderId: row.purchase_order_id,
       purchaseLineId: row.purchase_line_id, costSnapshotId: row.acquisition_cost_snapshot_id,
       baseUomCode: row.base_uom_code_snapshot, initialQuantityBaseInt: Number(row.initial_quantity_base_int),
@@ -805,9 +886,33 @@ export class WarehouseExecutionService {
     const destinationCode = requiredText(destinationCodeValue, "destinationCode").toUpperCase();
     const scannedCode = requiredText(scannedCodeValue, "scannedDestinationCode").toUpperCase();
     if (destinationCode !== scannedCode) throw new WarehouseExecutionError("DESTINATION_SCAN_MISMATCH", "Scanned destination does not match the selected location.", 409);
-    const destination = this.listAvailableLocations(packageId).find(({ code }) => code === destinationCode);
+    const destination = this.listAvailableLocations(packageId).find(({ code }) => code.toUpperCase() === destinationCode);
     if (!destination) throw new WarehouseExecutionError("LOCATION_POLICY_VIOLATION", "Destination is occupied or violates configured placement policy.", 409);
     return destination;
+  }
+
+  private validatedQuarantineDestination(packageId: string, destinationCodeValue: string) {
+    const destinationCode = requiredText(destinationCodeValue, "destinationCode").toUpperCase();
+    const pkg = this.packageRow(packageId);
+    const row = this.db.prepare(`SELECT s.* FROM warehouse_location_slots s
+      JOIN warehouse_topologies t ON t.id=s.topology_id AND t.active=1
+      WHERE UPPER(s.code)=? AND s.active=1 AND s.role='QUARANTINE'
+        AND NOT EXISTS (SELECT 1 FROM warehouse_execution_packages p
+          WHERE p.current_slot_id=s.id AND p.id<>? AND p.remaining_quantity_base_int>0)`).get(destinationCode, packageId) as SlotRow | undefined;
+    if (!row || (row.max_weight_grams !== null && Number(pkg.weight_grams) > Number(row.max_weight_grams))) {
+      throw new WarehouseExecutionError("RETURN_QUARANTINE_REQUIRED", "DAMAGED returns require an available policy-valid QUARANTINE slot.", 409);
+    }
+    const peers = this.db.prepare(`SELECT p.product_id,COALESCE(p.inventory_lot_id,p.origin_inventory_lot_id) AS lot_id
+      FROM warehouse_execution_packages p JOIN warehouse_location_slots s ON s.id=p.current_slot_id
+      WHERE s.topology_id=? AND s.rack_code=? AND s.level_number=? AND s.position_number=? AND p.id<>?
+        AND p.remaining_quantity_base_int>0`).all(row.topology_id, row.rack_code, row.level_number, row.position_number, packageId) as any[];
+    if (!row.allow_mixed_sku && peers.some((peer) => peer.product_id !== pkg.product_id)) {
+      throw new WarehouseExecutionError("LOCATION_POLICY_VIOLATION", "Return quarantine destination forbids mixed SKU packages.", 409);
+    }
+    if (!row.allow_mixed_lot && peers.some((peer) => peer.lot_id !== pkg.origin_inventory_lot_id)) {
+      throw new WarehouseExecutionError("LOCATION_POLICY_VIOLATION", "Return quarantine destination forbids mixed lot packages.", 409);
+    }
+    return mapSlot(row);
   }
 
   private transferBalance(lotId: string, fromLocationId: string, toLocationId: string, quantityValue: number, destination: ReturnType<typeof mapSlot>) {

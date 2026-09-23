@@ -229,6 +229,10 @@ test("goods receipt preserves V2-06 facts, records shortage, gates excess, quara
   assert.equal(shortage.expectedQuantityBaseInt, 10);
   assert.equal(shortage.varianceQuantityBaseInt, -2);
   assert.equal(shortage.shortageQuantityBaseInt, 2);
+  assert.equal(shortage.packages[0].originType, "GOODS_RECEIPT");
+  assert.equal(shortage.packages[0].receiptId, "receipt-shortage");
+  assert.equal(shortage.packages[0].returnReceiptId, null);
+  assert.equal(shortage.packages[0].originInventoryLotId, shortage.inventoryLotId);
   assert.deepEqual(db.prepare("SELECT * FROM acquisition_lot_cost_snapshots WHERE id=?").get(shortageLot.id), costBefore);
 
   const excessLot = costed(procurement, "p2", "excess", 10);

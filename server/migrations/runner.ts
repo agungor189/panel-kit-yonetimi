@@ -8,12 +8,14 @@ import { PROCUREMENT_REMEDIATION_SCHEMA_V68 } from "../db/procurementRemediation
 import { INVENTORY_SCHEMA_V69 } from "../db/inventorySchema.js";
 import { SALES_FINANCIAL_SCHEMA_V74 } from "../db/salesFinancialSchema.js";
 import { RETURNS_SCHEMA_V75 } from "../db/returnsSchema.js";
+import { WAREHOUSE_PACKAGE_ORIGIN_SCHEMA_V76 } from "../db/warehousePackageOriginSchema.js";
 import { WAREHOUSE_EXECUTION_SCHEMA_V71, WAREHOUSE_REPLENISHMENT_RUNTIME_SCHEMA_V73 } from "../db/warehouseExecutionSchema.js";
 
 interface Migration {
   version: number;
   name: string;
   up(db: Database.Database): void;
+  requiresForeignKeysOff?: boolean;
 }
 
 // Each migration runs exactly once. Never modify an existing migration — add a new one.
@@ -2835,9 +2837,17 @@ const migrations: Migration[] = [
       db.exec(RETURNS_SCHEMA_V75);
     },
   },
+  {
+    version: 76,
+    name: "generalize_warehouse_package_return_origin",
+    requiresForeignKeysOff: true,
+    up(db) {
+      db.exec(WAREHOUSE_PACKAGE_ORIGIN_SCHEMA_V76);
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 75;
+export const CURRENT_SCHEMA_VERSION = 76;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),
@@ -2852,7 +2862,7 @@ export type MigrationManifestEntry = {
 };
 
 const checksumFor = (migration: Migration): string => createHash("sha256")
-  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}${migration.version === 69 ? `\0${INVENTORY_SCHEMA_V69}` : ""}${migration.version === 71 ? `\0${WAREHOUSE_EXECUTION_SCHEMA_V71}` : ""}${migration.version === 74 ? `\0${SALES_FINANCIAL_SCHEMA_V74}` : ""}${migration.version === 75 ? `\0${RETURNS_SCHEMA_V75}` : ""}`)
+  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}${migration.version === 69 ? `\0${INVENTORY_SCHEMA_V69}` : ""}${migration.version === 71 ? `\0${WAREHOUSE_EXECUTION_SCHEMA_V71}` : ""}${migration.version === 74 ? `\0${SALES_FINANCIAL_SCHEMA_V74}` : ""}${migration.version === 75 ? `\0${RETURNS_SCHEMA_V75}` : ""}${migration.version === 76 ? `\0${WAREHOUSE_PACKAGE_ORIGIN_SCHEMA_V76}` : ""}`)
   .digest("hex");
 
 export function getMigrationManifest(): MigrationManifestEntry[] {
@@ -3172,6 +3182,9 @@ function assertV71WarehouseSchemaDefinitions(actual: Database.Database, maxVersi
     const expected = (reference.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE sql IS NOT NULL").all() as Array<SchemaDefinition & { tbl_name: string }>)
       .filter((object) => V71_WAREHOUSE_TABLES.has(object.tbl_name));
     for (const object of expected) {
+      // V2-10 v76 generalizes only the package origin while preserving the
+      // accepted V2-08 topology, receipt, movement and replenishment model.
+      if (maxVersion >= 76 && (object.tbl_name === "warehouse_execution_packages" || object.name === "idx_warehouse_packages_product_lot")) continue;
       const found = actual.prepare("SELECT type,name,sql FROM sqlite_master WHERE type=? AND name=? AND sql IS NOT NULL")
         .get(object.type, object.name) as SchemaDefinition | undefined;
       if (!found || canonicalSchemaDefinition(found.sql) !== canonicalSchemaDefinition(object.sql)) {
@@ -3309,8 +3322,12 @@ export function runMigrations(
     if (migration.version > targetVersion) continue;
     if (applied.has(migration.version)) continue;
 
-    db.transaction(() => {
+    const apply = () => db.transaction(() => {
       migration.up(db);
+      if (migration.requiresForeignKeysOff) {
+        const violation = db.prepare("PRAGMA foreign_key_check").get();
+        if (violation) throw new Error(`Migration v${migration.version} produced a foreign-key violation`);
+      }
       if (migration.version === 63) assertV63CommandSchemaDefinitions(db);
       if (migration.version === 64) assertV64CatalogSchemaDefinitions(db);
       if (migration.version === 66) assertV66CatalogSchemaDefinitions(db);
@@ -3321,6 +3338,14 @@ export function runMigrations(
       if (migration.version === 71) assertV71WarehouseSchemaDefinitions(db);
       insertMigration.run(migration.version, migration.name, checksumFor(migration));
     })();
+
+    if (migration.requiresForeignKeysOff) {
+      const foreignKeysEnabled = Number(db.pragma("foreign_keys", { simple: true })) === 1;
+      if (foreignKeysEnabled) db.pragma("foreign_keys = OFF");
+      try { apply(); } finally { if (foreignKeysEnabled) db.pragma("foreign_keys = ON"); }
+    } else {
+      apply();
+    }
 
     console.log(`[Migration] Applied v${migration.version}: ${migration.name}`);
     applied_count++;
