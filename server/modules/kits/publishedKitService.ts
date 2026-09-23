@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
+import { enqueueCanonicalChannelChanges } from "../channels/channelOutboundProjection.js";
 import { CatalogService } from "../catalog/catalogService.js";
 
 export type KitPublicationComponent = {
@@ -364,6 +365,7 @@ export class PublishedKitService {
       this.db.prepare(`UPDATE products SET purchase_cost=?,sale_price=?,price_locked=1,updated_at=? WHERE id=?`).run(
         preview.cost.canonicalCostMinor / 100, input.proposal.finalSalePriceMinor / 100, publishedAt, product.id,
       );
+      enqueueCanonicalChannelChanges(this.db, { productId: product.id, kinds: ["PRICE", "VISIBILITY"], operationId, occurredAt: publishedAt });
       return { publishedKitId: kit.id as string, productId: product.id, versionId, versionNumber, contentHash: preview.contentHash, corePolicyHash: preview.corePolicyHash };
     }).immediate();
   }

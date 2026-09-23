@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { WarehousePackageBalanceError, WarehousePackageBalanceService } from "../warehouse/warehousePackageBalanceService.js";
 import { ProfileCutInventoryService, type ProfileCutPlanInput } from "./profileCutInventoryService.js";
+import { enqueueCanonicalChannelChanges } from "../channels/channelOutboundProjection.js";
 
 type LocationKind = "PICKING" | "RESERVE";
 type ReservationStatus = "ACTIVE" | "PICKED" | "PACKED" | "RELEASED" | "DISPATCHED" | "STOCK_DISCREPANCY";
@@ -93,6 +94,7 @@ export class InventoryService {
       );
       new ProfileCutInventoryService(this.db).createReceiptPieces(lotId, operationId);
       this.syncProjection(snapshot.product_id);
+      enqueueCanonicalChannelChanges(this.db, { productId: snapshot.product_id, kinds: ["STOCK"], operationId, occurredAt: receivedAt });
       return {
         lot: {
           id: lotId,
@@ -230,6 +232,9 @@ export class InventoryService {
           allocations.push({ lotId: allocation.lotId, productId: plan.productId, quantityBaseInt: allocation.quantityBaseInt });
         }
       }
+      for (const productId of new Set(plans.map((plan) => plan.productId))) {
+        enqueueCanonicalChannelChanges(this.db, { productId, kinds: ["STOCK"], operationId, occurredAt: createdAt });
+      }
       return { id: reservationId, orderId, status: "ACTIVE" as ReservationStatus, allocations };
     }).immediate();
   }
@@ -265,6 +270,9 @@ export class InventoryService {
       new ProfileCutInventoryService(this.db).releaseReservation(reservationId);
       this.db.prepare(`UPDATE inventory_reservations SET status='RELEASED',release_operation_id=?,release_reason=?,released_at=?,updated_at=? WHERE id=?`)
         .run(operationId, reason, releasedAt, releasedAt, reservationId);
+      const products = this.db.prepare("SELECT DISTINCT product_id FROM inventory_reservation_allocations WHERE reservation_id=?")
+        .all(reservationId) as Array<{ product_id: string }>;
+      for (const product of products) enqueueCanonicalChannelChanges(this.db, { productId: product.product_id, kinds: ["STOCK"], operationId, occurredAt: releasedAt });
       return this.getReservation(reservationId);
     }).immediate();
   }
@@ -361,7 +369,10 @@ export class InventoryService {
       }
       this.db.prepare(`UPDATE inventory_reservations SET status='DISPATCHED',dispatch_operation_id=?,shipment_id=?,dispatched_at=?,updated_at=? WHERE id=? AND status='PACKED'`)
         .run(operationId, shipmentId, dispatchedAt, dispatchedAt, reservationId);
-      for (const productId of products) this.syncProjection(productId);
+      for (const productId of products) {
+        this.syncProjection(productId);
+        enqueueCanonicalChannelChanges(this.db, { productId, kinds: ["STOCK"], operationId, occurredAt: dispatchedAt });
+      }
       profileCuts.assertRepresented();
       return this.getReservation(reservationId);
     }).immediate();
@@ -461,6 +472,7 @@ export class InventoryService {
         reason, approvalReference, correctedAt,
       );
       this.syncProjection(lot.product_id);
+      enqueueCanonicalChannelChanges(this.db, { productId: lot.product_id, kinds: ["STOCK"], operationId, occurredAt: correctedAt });
       return { lotId, expectedOnHandBaseInt: expected, observedOnHandBaseInt: observed, deltaBaseInt: delta, approvalReference };
     }).immediate();
   }

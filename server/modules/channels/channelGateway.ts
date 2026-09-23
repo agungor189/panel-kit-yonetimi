@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import { CommandExecutor } from "../commands/commandFoundation.js";
 import { InventoryService, InventoryValidationError } from "../inventory/inventoryService.js";
 import { MarketplaceSaleAcceptanceService } from "../sales/marketplaceSaleAcceptanceService.js";
+import { enqueueCanonicalChannelChanges, type ChannelProjectionKind } from "./channelOutboundProjection.js";
 
 export type ChannelCode = "TRENDYOL" | "HEPSIBURADA" | "N11" | "SHOPIFY";
 export type CommissionRate = { numerator: number; denominator: number };
@@ -156,6 +157,14 @@ export class ChannelGatewayService {
         (id,account_id,product_id,category_ref,state,rate_numerator,rate_denominator,provenance_json,version,effective_from)
         VALUES (?,?,?,?,?,?,?,?,?,?)`).run(input.id, input.accountId, input.productId || null, input.categoryRef || null,
         input.state, input.rate?.numerator ?? null, input.rate?.denominator ?? null, stableJson(input.provenance), input.version, input.effectiveFrom);
+      if (input.productId) enqueueCanonicalChannelChanges(this.db, { productId: input.productId, kinds: ["PRICE"], operationId: input.operationId,
+        occurredAt: input.effectiveFrom });
+      else {
+        const products = this.db.prepare(`SELECT DISTINCT product_id FROM channel_product_mappings WHERE account_id=?
+          AND (? IS NULL OR category_ref=?)`).all(input.accountId, input.categoryRef || null, input.categoryRef || null) as Array<{ product_id: string }>;
+        for (const product of products) enqueueCanonicalChannelChanges(this.db, { productId: product.product_id, kinds: ["PRICE"], operationId: input.operationId,
+          occurredAt: input.effectiveFrom });
+      }
       return { statusCode: 201, body: { id: input.id, state: input.state } };
     }).result.body;
   }
@@ -168,6 +177,7 @@ export class ChannelGatewayService {
         VALUES (?,?,?,?,1,?) ON CONFLICT(account_id,product_id) DO UPDATE SET buffer_quantity_base_int=excluded.buffer_quantity_base_int,
         version=channel_stock_buffers.version+1,updated_operation_id=excluded.updated_operation_id,updated_at=CURRENT_TIMESTAMP`).run(
         input.id, input.accountId, input.productId, buffer, input.operationId);
+      enqueueCanonicalChannelChanges(this.db, { productId: input.productId, kinds: ["STOCK"], operationId: input.operationId });
       return { statusCode: 200, body: { productId: input.productId, bufferQuantityBaseInt: buffer } };
     }).result.body;
   }
@@ -312,6 +322,152 @@ export class ChannelGatewayService {
     }).result.body;
   }
 
+  resolveAndReprocessOrder(input: { orderId: string; operationId: string; actor: Actor; resolvedAt: string }) {
+    return this.commands.execute<any>({ operationId: input.operationId, commandType: "channels.exception.resolve-reprocess.v1", payload: input,
+      actor: { human: input.actor }, authorization: { decision: "ALLOW", capability: "integrations:admin" } }, (context) => {
+      const order = this.db.prepare(`SELECT o.*,a.channel,a.merchant_account_id FROM channel_orders o
+        JOIN channel_accounts a ON a.id=o.account_id WHERE o.id=?`).get(input.orderId) as any;
+      if (!order) throw new ChannelGatewayError("CHANNEL_ORDER_NOT_FOUND", "Channel order was not found.", 404);
+      if (order.sale_id) return { statusCode: 200, body: { state: "ACCEPTED", saleId: order.sale_id, reservationId: order.reservation_id, replayed: true } };
+      if (order.order_state !== "EXCEPTION") throw new ChannelGatewayError("CHANNEL_ORDER_NOT_RECOVERABLE", "Only an exception order may be reprocessed.", 409);
+      const lines = this.db.prepare("SELECT * FROM channel_order_lines WHERE channel_order_id=? ORDER BY created_at,id").all(order.id) as any[];
+      if (!lines.length) throw new ChannelGatewayError("CHANNEL_LINES_REQUIRED", "Order lines are required.");
+      const acceptedLines: any[] = [];
+      const termsSnapshot: any[] = [];
+      let totalCommission = 0;
+      let commissionBasis = 0;
+      for (const line of lines) {
+        const mapping = this.db.prepare(`SELECT m.*,p.sale_price,
+          (SELECT v.final_sale_price_minor FROM published_kits k JOIN published_kit_versions v ON v.id=k.current_version_id WHERE k.product_id=m.product_id) AS kit_price_minor
+          FROM channel_product_mappings m JOIN products p ON p.id=m.product_id
+          WHERE m.account_id=? AND m.external_listing_id=? AND m.listing_state='ACTIVE'`).get(order.account_id, line.external_listing_id) as any;
+        if (!mapping) {
+          this.insertException(order.account_id, order.first_event_id, order.id, "CHANNEL_MAPPING_EXCEPTION",
+            { reprocessOperationId: input.operationId, externalLineId: line.external_line_id, externalListingId: line.external_listing_id });
+          return { statusCode: 202, body: { state: "EXCEPTION", saleId: null } };
+        }
+        const term = this.findCommissionTerm(order.account_id, mapping.product_id, mapping.category_ref, input.resolvedAt);
+        if (!term || term.state !== "KNOWN") {
+          this.insertException(order.account_id, order.first_event_id, order.id, "COMMISSION_EXCEPTION",
+            { reprocessOperationId: input.operationId, productId: mapping.product_id, state: term?.state || "MISSING" });
+          return { statusCode: 202, body: { state: "EXCEPTION", saleId: null } };
+        }
+        const rate = { numerator: Number(term.rate_numerator), denominator: Number(term.rate_denominator) };
+        const targetMinor = mapping.kit_price_minor === null || mapping.kit_price_minor === undefined
+          ? this.legacyPanelPriceMinor(mapping.sale_price) : Number(mapping.kit_price_minor);
+        const expected = calculateInverseCommissionPrice(targetMinor, rate);
+        const quantity = Number(line.quantity_base_int);
+        const actual = Number(line.actual_unit_gross_minor);
+        if (actual !== expected) this.db.prepare(`INSERT OR IGNORE INTO channel_price_variances
+          (id,channel_order_line_id,target_price_minor,expected_channel_price_minor,actual_channel_price_minor,difference_minor,provenance_json)
+          VALUES (?,?,?,?,?,?,?)`).run(randomUUID(), line.id, targetMinor, expected, actual, actual - expected,
+          stableJson({ source: "PROVIDER_ORDER_REPROCESS", operationId: input.operationId, commissionTermId: term.id }));
+        acceptedLines.push({ externalLineId: line.external_line_id, productId: mapping.product_id, quantityBaseInt: quantity,
+          actualUnitGrossMinor: actual, vatRateBps: Number(line.vat_rate_bps) });
+        const lineBasis = actual * quantity;
+        commissionBasis += lineBasis;
+        totalCommission += roundedCommission(lineBasis, rate);
+        termsSnapshot.push({ externalLineId: line.external_line_id, termId: term.id, version: term.version, basis: term.basis,
+          rate, provenance: JSON.parse(term.provenance_json), expectedUnitGrossMinor: expected, actualUnitGrossMinor: actual });
+      }
+      const divisor = commissionBasis === 0 ? 1 : gcd(totalCommission, commissionBasis);
+      try {
+        const accepted = this.sales.accept({ channel: order.channel, merchantAccountId: order.merchant_account_id,
+          externalOrderId: order.external_order_id, currency: order.currency, discountMinor: Number(order.actual_discount_minor), lines: acceptedLines,
+          commission: { amountMinor: totalCommission, effectiveNumerator: totalCommission / divisor,
+            effectiveDenominator: commissionBasis === 0 ? 1 : commissionBasis / divisor,
+            terms: { contract: "dsdst.channel-commission-snapshot.v1", lines: termsSnapshot, reprocessOperationId: input.operationId } },
+          operationId: input.operationId, actor: input.actor, acceptedAt: input.resolvedAt });
+        this.db.prepare(`UPDATE channel_orders SET order_state='ACCEPTED',sale_id=?,reservation_id=?,accepted_at=?,updated_at=? WHERE id=? AND sale_id IS NULL`)
+          .run(accepted.saleId, accepted.reservationId, input.resolvedAt, input.resolvedAt, order.id);
+        this.db.prepare("UPDATE channel_inbound_events SET processing_state='ACCEPTED',sale_id=? WHERE id=?").run(accepted.saleId, order.first_event_id);
+        this.db.prepare(`UPDATE channel_exceptions SET state='RESOLVED',resolved_at=?,resolved_operation_id=?
+          WHERE channel_order_id=? AND state='OPEN'`).run(input.resolvedAt, input.operationId, order.id);
+        context.addOutbox({ topic: "channels", eventType: "channel.order.reprocessed.v1", aggregateType: "sale", aggregateId: accepted.saleId,
+          payload: { sale_id: accepted.saleId, reservation_id: accepted.reservationId, channel_order_id: order.id } });
+        return { statusCode: 200, body: { state: "ACCEPTED", saleId: accepted.saleId, reservationId: accepted.reservationId, replayed: false } };
+      } catch (error) {
+        if (!(error instanceof InventoryValidationError) || error.code !== "INSUFFICIENT_AVAILABLE_STOCK") throw error;
+        this.insertException(order.account_id, order.first_event_id, order.id, "STOCK_EXCEPTION",
+          { reprocessOperationId: input.operationId, code: error.code, message: error.message });
+        return { statusCode: 202, body: { state: "EXCEPTION", saleId: null } };
+      }
+    }).result.body;
+  }
+
+  captureCanonicalProductChanges(input: { productId: string; kinds: ChannelProjectionKind[]; operationId: string; actor: Actor; occurredAt?: string }) {
+    return this.commands.execute({ operationId: input.operationId, commandType: "channels.canonical-change.capture.v1", payload: input,
+      actor: { human: input.actor }, authorization: { decision: "ALLOW", capability: "integrations:admin" } }, () => ({
+        statusCode: 202,
+        body: enqueueCanonicalChannelChanges(this.db, input),
+      })).result.body;
+  }
+
+  claimReadyOutboundJobs(input: { accountId?: string; limit: number; leaseSeconds: number; operationId: string; serviceActorId: string; claimedAt: string }) {
+    const limit = Math.min(integer(input.limit, "limit", 1), 100);
+    const leaseSeconds = Math.min(integer(input.leaseSeconds, "leaseSeconds", 1), 300);
+    if (input.accountId) {
+      const account = this.db.prepare("SELECT channel FROM channel_accounts WHERE id=?").get(input.accountId) as any;
+      if (!account) throw new ChannelGatewayError("CHANNEL_ACCOUNT_NOT_FOUND", "Channel account was not found.", 404);
+      if (!CHANNEL_ADAPTERS[account.channel as ChannelCode]?.enabledTransport) {
+        throw new ChannelGatewayError("ADAPTER_TRANSPORT_DISABLED", "The channel adapter transport is disabled.", 409);
+      }
+    }
+    return this.commands.execute({ operationId: input.operationId, commandType: "channels.outbound.claim.v1", payload: input,
+      actor: { service: { id: input.serviceActorId } }, authorization: { decision: "ALLOW", capability: "channels:publish" } }, () => {
+      const leaseExpiresAt = new Date(new Date(input.claimedAt).getTime() + leaseSeconds * 1000).toISOString();
+      const candidates = this.db.prepare(`SELECT j.id FROM channel_outbound_jobs j JOIN channel_accounts a ON a.id=j.account_id
+        WHERE j.state IN ('PENDING','RETRY') AND datetime(j.available_at)<=datetime(?)
+          AND (j.lease_token IS NULL OR datetime(j.lease_expires_at)<=datetime(?)) AND a.channel='TRENDYOL'
+          AND (? IS NULL OR j.account_id=?) ORDER BY datetime(j.available_at),j.created_at,j.id LIMIT ?`)
+        .all(input.claimedAt, input.claimedAt, input.accountId || null, input.accountId || null, limit) as Array<{ id: string }>;
+      const claimed: any[] = [];
+      for (const candidate of candidates) {
+        const leaseToken = randomUUID();
+        const changed = this.db.prepare(`UPDATE channel_outbound_jobs SET lease_token=?,lease_owner=?,lease_expires_at=? WHERE id=?
+          AND state IN ('PENDING','RETRY') AND (lease_token IS NULL OR datetime(lease_expires_at)<=datetime(?))`)
+          .run(leaseToken, input.serviceActorId, leaseExpiresAt, candidate.id, input.claimedAt);
+        if (changed.changes !== 1) continue;
+        const job = this.db.prepare(`SELECT j.id,j.account_id AS accountId,j.product_id AS productId,j.job_kind AS kind,j.state,
+          j.payload_json AS payloadJson,j.payload_hash AS payloadHash,j.attempt_count AS attemptCount,j.lease_token AS leaseToken,
+          j.lease_expires_at AS leaseExpiresAt,a.channel,m.external_listing_id AS externalListingId,m.external_sku AS externalSku
+          FROM channel_outbound_jobs j JOIN channel_accounts a ON a.id=j.account_id JOIN channel_product_mappings m ON m.id=j.mapping_id WHERE j.id=?`)
+          .get(candidate.id) as any;
+        claimed.push({ ...job, payload: JSON.parse(job.payloadJson) });
+      }
+      return { statusCode: 200, body: claimed };
+    }).result.body;
+  }
+
+  async processClaimedOutboundJob(input: { jobId: string; leaseToken: string; operationId: string; serviceActorId: string; occurredAt: string;
+    publish: (job: any) => Promise<unknown> }) {
+    const job = this.db.prepare(`SELECT j.*,a.channel,m.external_listing_id,m.external_sku FROM channel_outbound_jobs j
+      JOIN channel_accounts a ON a.id=j.account_id JOIN channel_product_mappings m ON m.id=j.mapping_id WHERE j.id=?`).get(input.jobId) as any;
+    if (!job) throw new ChannelGatewayError("OUTBOUND_JOB_NOT_FOUND", "Outbound job was not found.", 404);
+    if (job.state === "SUCCEEDED") return { id: job.id, state: "SUCCEEDED", replayed: true };
+    if (!CHANNEL_ADAPTERS[job.channel as ChannelCode]?.enabledTransport) throw new ChannelGatewayError("ADAPTER_TRANSPORT_DISABLED", "The channel adapter transport is disabled.", 409);
+    if (job.lease_token !== input.leaseToken || !job.lease_expires_at || new Date(job.lease_expires_at).getTime() < new Date(input.occurredAt).getTime()) {
+      throw new ChannelGatewayError("OUTBOUND_LEASE_INVALID", "The outbound job lease is missing or expired.", 409);
+    }
+    const attemptNumber = Number(job.attempt_count) + 1;
+    const providerMutationId = `${job.payload_hash}:${attemptNumber}`;
+    const publishJob = { id: job.id, accountId: job.account_id, productId: job.product_id, kind: job.job_kind,
+      payload: JSON.parse(job.payload_json), payloadHash: job.payload_hash, externalListingId: job.external_listing_id,
+      externalSku: job.external_sku, channel: job.channel, providerMutationId };
+    try {
+      const response = await input.publish(publishJob);
+      return this.recordOutboundAttempt({ jobId: job.id, providerMutationId, state: "SUCCEEDED", response,
+        operationId: input.operationId, serviceActorId: input.serviceActorId, occurredAt: input.occurredAt });
+    } catch (error: any) {
+      const rateLimited = Number(error?.statusCode) === 429;
+      const retryAt = new Date(new Date(input.occurredAt).getTime() + Math.min(15 * 60, 30 * 2 ** Math.min(attemptNumber - 1, 5)) * 1000).toISOString();
+      this.recordOutboundAttempt({ jobId: job.id, providerMutationId, state: rateLimited ? "RATE_LIMITED" : "FAILED",
+        response: error?.body, errorCode: rateLimited ? "RATE_LIMITED" : String(error?.code || "PROVIDER_PUBLISH_FAILED"), retryAt,
+        operationId: input.operationId, serviceActorId: input.serviceActorId, occurredAt: input.occurredAt });
+      throw error;
+    }
+  }
+
   enqueueStockSync(input: { accountId: string; productId: string; sourceVersion: string; operationId: string; actor: Actor }) {
     const availability = new InventoryService(this.db).getProductAvailability(input.productId);
     const buffer = Number(this.db.prepare("SELECT buffer_quantity_base_int FROM channel_stock_buffers WHERE account_id=? AND product_id=?")
@@ -348,7 +504,8 @@ export class ChannelGatewayService {
         input.response === undefined ? null : digest(redactProviderPayload(input.response)), input.errorCode || null, input.retryAt || null, input.occurredAt, input.occurredAt);
       const jobState = input.state === "SUCCEEDED" ? "SUCCEEDED" : "RETRY";
       this.db.prepare(`UPDATE channel_outbound_jobs SET state=?,attempt_count=attempt_count+1,available_at=COALESCE(?,available_at),
-        last_error_code=?,completed_at=CASE WHEN ?='SUCCEEDED' THEN ? ELSE NULL END WHERE id=?`).run(jobState, input.retryAt || null,
+        last_error_code=?,completed_at=CASE WHEN ?='SUCCEEDED' THEN ? ELSE NULL END,
+        lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE id=?`).run(jobState, input.retryAt || null,
         input.errorCode || null, jobState, input.occurredAt, input.jobId);
       return { statusCode: 200, body: { id, state: input.state, replayed: false as boolean } };
     }).result.body;

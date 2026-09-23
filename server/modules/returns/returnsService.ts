@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import { roundRatio } from "../finance/money.js";
 import { WarehouseExecutionService } from "../warehouse/warehouseExecutionService.js";
 import { ProfileCutInventoryService } from "../inventory/profileCutInventoryService.js";
+import { enqueueCanonicalChannelChanges } from "../channels/channelOutboundProjection.js";
 
 export type ReturnReason = "CUSTOMER_CHANGED_MIND" | "WRONG_PRODUCT" | "DAMAGED" | "MISSING_PART" | "INCOMPATIBLE" | "OTHER";
 export type ReturnDisposition = "SELLABLE" | "DAMAGED" | "MISSING_NOT_RECEIVED";
@@ -324,6 +325,7 @@ export class ReturnsService {
       for (const productId of products) {
         this.db.prepare(`UPDATE products SET central_stock=COALESCE((SELECT SUM(on_hand_base_int) FROM inventory_lots WHERE product_id=?),0),updated_at=? WHERE id=?`)
           .run(productId, receivedAt, productId);
+        enqueueCanonicalChannelChanges(this.db, { productId, kinds: ["STOCK"], operationId, occurredAt: receivedAt });
       }
       return this.getReturn(returnId);
     }).immediate();

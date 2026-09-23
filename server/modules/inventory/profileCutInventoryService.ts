@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { InventoryValidationError } from "./inventoryService.js";
 import { WarehousePackageBalanceError, WarehousePackageBalanceService } from "../warehouse/warehousePackageBalanceService.js";
+import { enqueueCanonicalChannelChanges } from "../channels/channelOutboundProjection.js";
 
 export type ProfileCutPlanInput = {
   publishedKitVersionId: string;
@@ -375,6 +376,7 @@ export class ProfileCutInventoryService {
             Math.max(0, consumedCost - pureCutCost), ledgerId, operationId, executedAt);
           this.db.prepare(`UPDATE products SET central_stock=(SELECT COALESCE(SUM(on_hand_base_int),0) FROM inventory_lots WHERE product_id=?),updated_at=? WHERE id=?`)
             .run(reservation.product_id, executedAt, reservation.product_id);
+          enqueueCanonicalChannelChanges(this.db, { productId: reservation.product_id, kinds: ["STOCK"], operationId, occurredAt: executedAt });
         }
         this.db.prepare("UPDATE profile_piece_reservations SET status='EXECUTED',updated_at=? WHERE id=?").run(executedAt, reservation.id);
         executions.push({ executionId, sourcePieceId: reservation.profile_piece_id,

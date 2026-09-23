@@ -34,6 +34,8 @@ import { CommandExecutor, CommandFoundationError } from "./server/modules/comman
 import { InventoryService, InventoryValidationError } from "./server/modules/inventory/inventoryService.js";
 import { SalesFinancialService, SalesFinancialValidationError } from "./server/modules/sales/salesFinancialService.js";
 import { ChannelGatewayError, ChannelGatewayService } from "./server/modules/channels/channelGateway.js";
+import { enqueueCanonicalChannelChanges } from "./server/modules/channels/channelOutboundProjection.js";
+import { TrendyolGatewayTransport } from "./server/modules/channels/trendyolGatewayTransport.js";
 import { PublishedKitService } from "./server/modules/kits/publishedKitService.js";
 import { createPanelApiAuth } from "./server/middleware/panelApiAuth.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
@@ -2522,6 +2524,7 @@ async function startServer() {
 
   app.post("/api/products/bulk-pricing", (req, res) => {
     try {
+      const operationId = saleOperationId(req);
       const { updates, settings } = req.body;
       if (!Array.isArray(updates)) return res.status(400).json({ success: false, error: { code: 'INVALID_PRICING_UPDATES', message: 'updates must be an array.' } });
       const kitMutation = updates.find((update: any) => db.prepare(`SELECT 1 FROM products p
@@ -2592,6 +2595,7 @@ async function startServer() {
           if (result.changes > 0) {
             updatedCount += result.changes;
             platformStmt.run(update.newSalePrice, update.id);
+            enqueueCanonicalChannelChanges(db, { productId: update.id, kinds: ["PRICE"], operationId });
           }
         }
       })();
@@ -2612,6 +2616,7 @@ async function startServer() {
 
   app.put("/api/products/:id", (req, res) => {
     try {
+      const operationId = saleOperationId(req);
       const beforeProduct: any = db.prepare("SELECT * FROM products WHERE id = ?").get(req.params.id);
       if (!beforeProduct) return res.status(404).json({ error: "Product not found" });
       const {
@@ -2662,6 +2667,12 @@ async function startServer() {
         resolvedType, resolvedType === "component" ? 0 : 1, resolvedType === "component" ? 0 : 1, resolvedType === "component" ? 1 : 0,
         normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size, req.params.id
       );
+      const changedKinds: Array<"PRICE" | "VISIBILITY"> = [];
+      if (Number(beforeProduct.sale_price) !== Number(sale_price || 0)) changedKinds.push("PRICE");
+      const nextVisible = resolvedType === "component" ? 0 : 1;
+      if (Number(beforeProduct.is_sellable) !== nextVisible || Number(beforeProduct.visible_in_catalog) !== nextVisible
+        || String(beforeProduct.status) !== String(status)) changedKinds.push("VISIBILITY");
+      if (changedKinds.length) enqueueCanonicalChannelChanges(db, { productId: req.params.id, kinds: changedKinds, operationId });
 
       const getPlatform = db.prepare("SELECT * FROM product_platforms WHERE product_id = ? AND platform_name = ? LIMIT 1");
       const updatePlatform = db.prepare(`
@@ -4715,63 +4726,42 @@ async function startServer() {
     return summary;
   };
 
-  const syncTrendyolShipmentPackages = async (config = getTrendyolConfig()) => {
+  const syncTrendyolShipmentPackages = async (config = getTrendyolConfig(), operationId = uuidv4(), actor: { id: string; name?: string | null } = { id: "trendyol-admin" }) => {
     const environment = normalizeTrendyolEnvironment(config.environment);
     const credentials = getTrendyolCredentials(config);
     const headers = buildTrendyolHeaders(credentials, config);
-    const baseUrl = trendyolBaseUrl(environment);
     const windowDays = Math.min(Math.max(Number(config.sync_window_days || 14), 1), 14);
     const endDate = Date.now();
-    const startDate = endDate - windowDays * 24 * 60 * 60 * 1000;
-    const summary = {
-      fetched: 0,
-      created: 0,
-      updated: 0,
-      unchanged: 0,
-      lines: 0,
-      matched_lines: 0,
-      unmatched_lines: 0,
-      environment,
-    };
-    let nextCursor = "";
-
-    do {
-      const params = new URLSearchParams({
-        size: '200',
-        lastModifiedStartDate: String(startDate),
-        lastModifiedEndDate: String(endDate),
-      });
-      if (nextCursor) params.set('nextCursor', nextCursor);
-
-      const response = await trendyolFetchJson(
-        `${baseUrl}/integration/order/sellers/${encodeURIComponent(credentials.sellerId)}/orders/stream?${params.toString()}`,
-        headers,
-      );
-
-      const content = Array.isArray(response?.content)
-        ? response.content
-        : Array.isArray(response)
-          ? response
-          : [];
-
-      for (const pkg of content) {
-        const normalized = normalizeTrendyolPackage(pkg, environment);
-        if (!normalized.shipment_package_id || !normalized.external_order_id) continue;
-        const result = upsertMarketplaceOrder(normalized);
-        const lineSummary = upsertMarketplaceOrderLines(result.id, pkg, normalized);
-        summary.fetched++;
-        summary.lines += lineSummary.total;
-        summary.matched_lines += lineSummary.matched;
-        summary.unmatched_lines += lineSummary.unmatched;
-        if (result.state === 'created') summary.created++;
-        if (result.state === 'updated') summary.updated++;
-        if (result.state === 'unchanged') summary.unchanged++;
-      }
-
-      nextCursor = response?.hasMore ? String(response.nextCursor || '') : '';
-    } while (nextCursor);
+    let startDate = endDate - windowDays * 24 * 60 * 60 * 1000;
+    let initialCursor = "";
+    let account = db.prepare(`SELECT * FROM channel_accounts WHERE channel='TRENDYOL' AND merchant_account_id=? AND environment=?`)
+      .get(credentials.sellerId, environment === "prod" ? "PRODUCTION" : "STAGE") as any;
+    if (!account) {
+      const accountId = `trendyol:${environment}:${credentials.sellerId}`;
+      channelGateway.configureAccount({ id: accountId, channel: "TRENDYOL", merchantAccountId: credentials.sellerId,
+        environment: environment === "prod" ? "PRODUCTION" : "STAGE", secretReference: `encrypted:api-key:${credentials.key.id}`,
+        config: { apiKeyIdRef: credentials.key.id, storeFrontCode: String(config.store_front_code || "") },
+        operationId: `${operationId}:account`, actor });
+      account = db.prepare("SELECT * FROM channel_accounts WHERE id=?").get(accountId) as any;
+    }
+    const cursorRow = db.prepare(`SELECT checkpoint_value FROM channel_poll_cursors WHERE account_id=? AND cursor_name='trendyol-orders-stream'`)
+      .get(account.id) as any;
+    if (cursorRow?.checkpoint_value) {
+      try {
+        const checkpoint = JSON.parse(cursorRow.checkpoint_value);
+        if (checkpoint.nextCursor && Number.isSafeInteger(checkpoint.windowStartMs) && Number.isSafeInteger(checkpoint.windowEndMs)) {
+          initialCursor = String(checkpoint.nextCursor);
+          startDate = Number(checkpoint.windowStartMs);
+        }
+      } catch (_) {}
+    }
+    const transport = new TrendyolGatewayTransport(channelGateway, trendyolFetchJson);
+    const summary = { ...(await transport.poll({ accountId: account.id, sellerId: credentials.sellerId, environment, headers,
+      windowStartMs: startDate, windowEndMs: endDate, initialCursor, serviceActorId: `trendyol-poller:${credentials.key.id}`,
+      operationIdPrefix: `${operationId}:poll`, receivedAt: new Date().toISOString() })), environment, account_id: account.id };
 
     db.prepare("UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?").run(credentials.key.id);
+    db.prepare("UPDATE channel_accounts SET state='CONNECTED',last_sync_at=CURRENT_TIMESTAMP,last_error_code=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(account.id);
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('trendyol_last_sync_at', CURRENT_TIMESTAMP)").run();
     saveJsonSetting("trendyol_last_sync_summary", summary);
 
@@ -4823,6 +4813,15 @@ async function startServer() {
     }
   });
 
+  app.post("/api/integrations/channels/orders/:id/resolve-reprocess", requireIntegrationsAdmin, apiLimiter, (req, res) => {
+    try {
+      res.json(channelGateway.resolveAndReprocessOrder({ orderId: req.params.id, operationId: saleOperationId(req),
+        actor: { id: req.user!.id, name: req.user!.username }, resolvedAt: req.body.resolvedAt || new Date().toISOString() }));
+    } catch (err: any) {
+      res.status(err.statusCode || 400).json({ success: false, error: { code: err.code || "CHANNEL_REPROCESS_FAILED", message: err.message } });
+    }
+  });
+
   app.get("/api/integrations/trendyol/status", requireIntegrationsAdmin, apiLimiter, (req, res) => {
     try {
       const config = getTrendyolConfig();
@@ -4832,19 +4831,15 @@ async function startServer() {
         WHERE service_name = 'Trendyol' AND deleted_at IS NULL
         ORDER BY status = 'active' DESC, updated_at DESC, created_at DESC
       `).all() as any[];
-      const stats = db.prepare(`
-        SELECT
-          COUNT(*) as total,
-          SUM(CASE WHEN environment = 'stage' THEN 1 ELSE 0 END) as stage_count,
-          SUM(CASE WHEN environment = 'prod' THEN 1 ELSE 0 END) as prod_count,
-          MAX(package_last_modified_at) as last_package_at,
-          MAX(updated_at) as last_local_update_at,
-          (SELECT COUNT(*) FROM marketplace_order_lines WHERE platform = 'Trendyol') as line_count,
-          (SELECT COUNT(*) FROM marketplace_order_lines WHERE platform = 'Trendyol' AND matched_product_id IS NOT NULL) as matched_line_count,
-          (SELECT COUNT(*) FROM marketplace_order_lines WHERE platform = 'Trendyol' AND matched_product_id IS NULL) as unmatched_line_count
-        FROM marketplace_orders
-        WHERE platform = 'Trendyol'
-      `).get() as any;
+      const stats = db.prepare(`SELECT COUNT(DISTINCT o.id) AS total,
+          COUNT(DISTINCT CASE WHEN a.environment='STAGE' THEN o.id END) AS stage_count,
+          COUNT(DISTINCT CASE WHEN a.environment='PRODUCTION' THEN o.id END) AS prod_count,
+          MAX(e.provider_occurred_at) AS last_package_at,MAX(o.updated_at) AS last_local_update_at,
+          COUNT(l.id) AS line_count,COUNT(CASE WHEN l.product_id IS NOT NULL THEN 1 END) AS matched_line_count,
+          COUNT(CASE WHEN l.product_id IS NULL THEN 1 END) AS unmatched_line_count
+        FROM channel_accounts a LEFT JOIN channel_orders o ON o.account_id=a.id
+        LEFT JOIN channel_inbound_events e ON e.id=o.first_event_id LEFT JOIN channel_order_lines l ON l.channel_order_id=o.id
+        WHERE a.channel='TRENDYOL'`).get() as any;
       const lastSyncRow = db.prepare("SELECT value FROM settings WHERE key = 'trendyol_last_sync_at'").get() as any;
       const lastSummary = parseJsonSetting("trendyol_last_sync_summary", null);
       res.json({
@@ -4922,7 +4917,7 @@ async function startServer() {
     try {
       const config = { ...getTrendyolConfig(), ...req.body };
       config.environment = normalizeTrendyolEnvironment(config.environment);
-      const summary = await syncTrendyolShipmentPackages(config);
+      const summary = await syncTrendyolShipmentPackages(config, saleOperationId(req), { id: req.user!.id, name: req.user!.username });
       logActivity("TRENDYOL_SYNCED", "integration", "Trendyol", { after: summary }, req.user?.id);
       res.json({ success: true, summary });
     } catch (err: any) {
@@ -4934,27 +4929,27 @@ async function startServer() {
     try {
       const environment = normalizeTrendyolEnvironment(req.query.environment);
       const limit = Math.min(Number(req.query.limit) || 100, 500);
-      const orders = db.prepare(`
-        SELECT id, platform, environment, external_order_id, shipment_package_id, status, panel_status,
-               customer_name, customer_phone, total_amount, currency, package_created_at,
-               package_last_modified_at, sale_id, imported_at, sync_status, sync_error, created_at, updated_at,
-               (SELECT COUNT(*) FROM marketplace_order_lines WHERE marketplace_order_id = marketplace_orders.id) as line_count,
-               (SELECT COUNT(*) FROM marketplace_order_lines WHERE marketplace_order_id = marketplace_orders.id AND matched_product_id IS NOT NULL) as matched_line_count,
-               (SELECT COUNT(*) FROM marketplace_order_lines WHERE marketplace_order_id = marketplace_orders.id AND matched_product_id IS NULL) as unmatched_line_count
-        FROM marketplace_orders
-        WHERE platform = 'Trendyol' AND environment = ?
-        ORDER BY datetime(COALESCE(package_last_modified_at, updated_at, created_at)) DESC
-        LIMIT ?
-      `).all(environment, limit);
+      const orders = db.prepare(`SELECT o.id,'Trendyol' AS platform,CASE WHEN a.environment='PRODUCTION' THEN 'prod' ELSE 'stage' END AS environment,
+          o.external_order_id,o.external_order_id AS shipment_package_id,o.order_state AS status,o.order_state AS panel_status,
+          NULL AS customer_name,NULL AS customer_phone,
+          COALESCE((SELECT SUM(actual_unit_gross_minor*quantity_base_int) FROM channel_order_lines WHERE channel_order_id=o.id),0)/100.0 AS total_amount,
+          o.currency,e.provider_occurred_at AS package_created_at,e.provider_occurred_at AS package_last_modified_at,
+          o.sale_id,o.accepted_at AS imported_at,e.processing_state AS sync_status,NULL AS sync_error,e.created_at,o.updated_at,
+          (SELECT COUNT(*) FROM channel_order_lines WHERE channel_order_id=o.id) AS line_count,
+          (SELECT COUNT(*) FROM channel_order_lines WHERE channel_order_id=o.id AND product_id IS NOT NULL) AS matched_line_count,
+          (SELECT COUNT(*) FROM channel_order_lines WHERE channel_order_id=o.id AND product_id IS NULL) AS unmatched_line_count
+        FROM channel_orders o JOIN channel_accounts a ON a.id=o.account_id JOIN channel_inbound_events e ON e.id=o.first_event_id
+        WHERE a.channel='TRENDYOL' AND a.environment=? ORDER BY datetime(o.updated_at) DESC LIMIT ?`)
+        .all(environment === "prod" ? "PRODUCTION" : "STAGE", limit);
       const getLines = db.prepare(`
-        SELECT mol.id, mol.external_line_id, mol.product_name, mol.barcode, mol.stock_code, mol.merchant_sku,
-               mol.quantity, mol.unit_price, mol.line_total, mol.status, mol.matched_product_id,
-               mol.match_method, mol.match_confidence, p.title as matched_product_title, p.sku as matched_product_sku,
-               p.barcode as matched_product_barcode
-        FROM marketplace_order_lines mol
-        LEFT JOIN products p ON p.id = mol.matched_product_id
-        WHERE mol.marketplace_order_id = ?
-        ORDER BY mol.created_at ASC, mol.external_line_id ASC
+        SELECT l.id,l.external_line_id,NULL AS product_name,l.external_listing_id AS barcode,NULL AS stock_code,
+               l.external_sku AS merchant_sku,l.quantity_base_int AS quantity,l.actual_unit_gross_minor/100.0 AS unit_price,
+               l.actual_unit_gross_minor*l.quantity_base_int/100.0 AS line_total,NULL AS status,l.product_id AS matched_product_id,
+               CASE WHEN l.product_id IS NULL THEN NULL ELSE 'channel_mapping' END AS match_method,
+               CASE WHEN l.product_id IS NULL THEN 0 ELSE 1 END AS match_confidence,p.title AS matched_product_title,
+               p.sku AS matched_product_sku,p.barcode AS matched_product_barcode
+        FROM channel_order_lines l LEFT JOIN products p ON p.id=l.product_id WHERE l.channel_order_id=?
+        ORDER BY l.created_at,l.external_line_id
       `);
       res.json(orders.map((order: any) => ({ ...order, lines: getLines.all(order.id) })));
     } catch (err: any) {
@@ -5529,6 +5524,40 @@ async function startServer() {
         occurredAt: req.body.occurredAt || new Date().toISOString() }));
     } catch (err: any) {
       res.status(err.statusCode || 400).json({ success: false, error: { code: err.code || "CHANNEL_ATTEMPT_FAILED", message: err.message } });
+    }
+  });
+  app.post("/api/channels/v1/outbound-jobs/claim", publicAuthFailedLimiter, publicApiLimiter, publicApiAuth("channels:publish"), (req, res) => {
+    try {
+      const operationId = req.headers["x-operation-id"]?.toString().trim();
+      if (!operationId) return res.status(400).json({ success: false, error: { code: "OPERATION_ID_REQUIRED", message: "x-operation-id header is required" } });
+      res.json({ jobs: channelGateway.claimReadyOutboundJobs({ ...req.body, operationId,
+        serviceActorId: `panel-api:${req.panelApiKey!.id}`, claimedAt: req.body.claimedAt || new Date().toISOString() }) });
+    } catch (err: any) {
+      res.status(err.statusCode || 400).json({ success: false, error: { code: err.code || "CHANNEL_CLAIM_FAILED", message: err.message } });
+    }
+  });
+  app.post("/api/channels/v1/outbound-jobs/:id/process", publicAuthFailedLimiter, publicApiLimiter, publicApiAuth("channels:publish"), async (req, res) => {
+    try {
+      const operationId = req.headers["x-operation-id"]?.toString().trim();
+      if (!operationId) return res.status(400).json({ success: false, error: { code: "OPERATION_ID_REQUIRED", message: "x-operation-id header is required" } });
+      const account = db.prepare(`SELECT a.* FROM channel_outbound_jobs j JOIN channel_accounts a ON a.id=j.account_id WHERE j.id=?`)
+        .get(req.params.id) as any;
+      if (!account) throw new ChannelGatewayError("OUTBOUND_JOB_NOT_FOUND", "Outbound job was not found.", 404);
+      if (account.channel !== "TRENDYOL") throw new ChannelGatewayError("ADAPTER_TRANSPORT_DISABLED", "The channel adapter transport is disabled.", 409);
+      const environment: TrendyolEnvironment = account.environment === "PRODUCTION" ? "prod" : "stage";
+      const config = { ...getTrendyolConfig(), environment };
+      const credentials = getTrendyolCredentials(config);
+      if (String(credentials.sellerId) !== String(account.merchant_account_id)) {
+        throw new ChannelGatewayError("CHANNEL_CREDENTIAL_ACCOUNT_MISMATCH", "Configured Trendyol credentials do not match the claimed channel account.", 409);
+      }
+      const headers = buildTrendyolHeaders(credentials, config);
+      const transport = new TrendyolGatewayTransport(channelGateway, trendyolFetchJson);
+      const outcome = await channelGateway.processClaimedOutboundJob({ jobId: req.params.id, leaseToken: String(req.body.leaseToken || ""),
+        operationId, serviceActorId: `panel-api:${req.panelApiKey!.id}`, occurredAt: req.body.occurredAt || new Date().toISOString(),
+        publish: (job) => transport.publish(job, { sellerId: credentials.sellerId, environment, headers }) });
+      res.json(outcome);
+    } catch (err: any) {
+      res.status(err.statusCode || 400).json({ success: false, error: { code: err.code || "CHANNEL_PROCESS_FAILED", message: err.message } });
     }
   });
   app.use(

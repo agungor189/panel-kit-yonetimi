@@ -8,6 +8,7 @@ import { ProcurementService } from "../procurement/procurementService.js";
 import { SalesFinancialService } from "../sales/salesFinancialService.js";
 import { authoredKitContentHash, PublishedKitService } from "../kits/publishedKitService.js";
 import { calculateInverseCommissionPrice, CHANNEL_ADAPTERS, ChannelGatewayError, ChannelGatewayService } from "./channelGateway.js";
+import { TrendyolGatewayTransport } from "./trendyolGatewayTransport.js";
 
 const actor = { id: "channel-admin", name: "Channel Admin" };
 
@@ -210,5 +211,109 @@ test("post-dispatch channel return opens V2-10 workflow without direct restock o
   assert.equal(db.prepare("SELECT COUNT(*) FROM return_receipts").pluck().get(), 0);
   assert.equal(db.prepare("SELECT COUNT(*) FROM refund_payments").pluck().get(), 0);
   assert.deepEqual(inventory.getProductAvailability("part"), before);
+  db.close();
+});
+
+test("exception orders resolve and reprocess exactly once after mapping or stock remediation", () => {
+  const { db, gateway, inventory } = setup(2);
+  const unmapped = gateway.ingest(order({ externalEventId: "recover-map-event", externalOrderId: "recover-map-order",
+    lines: [{ externalLineId: "recover-map-line", externalListingId: "recover-listing", quantityBaseInt: 1,
+      actualUnitGrossMinor: 125_000, vatRateBps: 2_000 }] }), "recover-map-ingest", "channel-worker") as any;
+  const mappingOrderId = String(db.prepare("SELECT id FROM channel_orders WHERE external_order_id='recover-map-order'").pluck().get());
+  gateway.mapProduct({ id: "recover-map", accountId: "account", externalListingId: "recover-listing", productId: "part",
+    categoryRef: "parts", operationId: "recover-map-create", actor });
+  const accepted = gateway.resolveAndReprocessOrder({ orderId: mappingOrderId, operationId: "recover-map-process",
+    actor, resolvedAt: "2026-09-23T10:00:00.000Z" }) as any;
+  assert.equal(accepted.state, "ACCEPTED");
+  assert.equal((gateway.resolveAndReprocessOrder({ orderId: mappingOrderId, operationId: "recover-map-process",
+    actor, resolvedAt: "2026-09-23T10:00:00.000Z" }) as any).saleId, accepted.saleId);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM channel_order_lines WHERE channel_order_id=?").pluck().get(mappingOrderId), 1);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM sales WHERE id=?").pluck().get(accepted.saleId), 1);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM channel_exceptions WHERE channel_order_id=? AND state='RESOLVED'").pluck().get(mappingOrderId), 1);
+  assert.equal(unmapped.result.body.state, "EXCEPTION");
+
+  const shortage = gateway.ingest(order({ externalEventId: "recover-stock-event", externalOrderId: "recover-stock-order",
+    lines: [{ externalLineId: "recover-stock-line", externalListingId: "listing-part", quantityBaseInt: 2,
+      actualUnitGrossMinor: 125_000, vatRateBps: 2_000 }] }), "recover-stock-ingest", "channel-worker") as any;
+  assert.equal(shortage.result.body.state, "EXCEPTION");
+  inventory.releaseReservation({ reservationId: accepted.reservationId, reason: "TEST_REPLENISH", operationId: "recover-stock-replenish" });
+  const stockOrderId = String(db.prepare("SELECT id FROM channel_orders WHERE external_order_id='recover-stock-order'").pluck().get());
+  const stockAccepted = gateway.resolveAndReprocessOrder({ orderId: stockOrderId, operationId: "recover-stock-process",
+    actor, resolvedAt: "2026-09-23T10:01:00.000Z" }) as any;
+  assert.equal(stockAccepted.state, "ACCEPTED");
+  assert.equal(db.prepare("SELECT COUNT(*) FROM sales").pluck().get(), 2);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_reservations").pluck().get(), 2);
+  db.close();
+});
+
+test("canonical changes auto-enqueue claimable jobs and disabled adapters remain fail-closed", async () => {
+  const { db, gateway, inventory } = setup(5);
+  db.prepare("DELETE FROM channel_outbound_jobs").run();
+  inventory.reserveOrder({ reservationId: "auto-reservation", orderId: "auto-order",
+    lines: [{ productId: "part", quantityBaseInt: 1 }], operationId: "auto-stock-change" });
+  assert.equal(db.prepare("SELECT COUNT(*) FROM channel_outbound_jobs WHERE job_kind='STOCK'").pluck().get(), 1);
+  db.prepare("UPDATE products SET sale_price=1000 WHERE id='part'").run();
+  gateway.captureCanonicalProductChanges({ productId: "part", kinds: ["PRICE"], operationId: "auto-price-change", actor });
+  const pricePayload = JSON.parse(String(db.prepare("SELECT payload_json FROM channel_outbound_jobs WHERE job_kind='PRICE'").pluck().get()));
+  assert.equal(pricePayload.channelPriceMinor, 125_000);
+  const claimed = gateway.claimReadyOutboundJobs({ limit: 10, leaseSeconds: 30, operationId: "claim-ready",
+    serviceActorId: "publisher", claimedAt: "2026-09-24T10:00:00.000Z" }) as any[];
+  assert.equal(claimed.length, 2);
+  let sends = 0;
+  for (const job of claimed) {
+    await gateway.processClaimedOutboundJob({ jobId: job.id, leaseToken: job.leaseToken,
+      operationId: `process-${job.id}`, serviceActorId: "publisher", occurredAt: "2026-09-24T10:00:01.000Z",
+      publish: async () => { sends += 1; return { batchRequestId: `batch-${job.id}` }; } });
+    await gateway.processClaimedOutboundJob({ jobId: job.id, leaseToken: job.leaseToken,
+      operationId: `process-${job.id}`, serviceActorId: "publisher", occurredAt: "2026-09-24T10:00:01.000Z",
+      publish: async () => { sends += 1; return { batchRequestId: `batch-${job.id}` }; } });
+  }
+  assert.equal(sends, 2);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM channel_outbound_attempts WHERE state='SUCCEEDED'").pluck().get(), 2);
+
+  gateway.configureAccount({ id: "disabled-shopify", channel: "SHOPIFY", merchantAccountId: "disabled", environment: "STAGE",
+    operationId: "disabled-account", actor });
+  gateway.mapProduct({ id: "disabled-map", accountId: "disabled-shopify", externalListingId: "disabled-listing", productId: "part",
+    operationId: "disabled-map", actor });
+  const disabledJob = gateway.captureCanonicalProductChanges({ productId: "part", kinds: ["STOCK"], operationId: "disabled-stock", actor })
+    .find((job: any) => job.accountId === "disabled-shopify");
+  assert.ok(disabledJob);
+  assert.throws(() => gateway.claimReadyOutboundJobs({ accountId: "disabled-shopify", limit: 1, leaseSeconds: 30,
+    operationId: "disabled-claim", serviceActorId: "publisher", claimedAt: "2026-09-23T10:00:00.000Z" }),
+  (error: unknown) => error instanceof ChannelGatewayError && error.code === "ADAPTER_TRANSPORT_DISABLED");
+  db.close();
+});
+
+test("verified Trendyol stream poll enters the gateway and the verified publisher sends stock and price payloads", async () => {
+  const { db, gateway } = setup(5);
+  const requests: Array<{ url: string; options?: RequestInit }> = [];
+  const transport = new TrendyolGatewayTransport(gateway, async (url, _headers, options) => {
+    requests.push({ url, options });
+    if (url.includes("/orders/stream")) return { content: [{ shipmentPackageId: "package-1", orderNumber: "trend-order-1",
+      status: "Created", currencyCode: "TRY", lastModifiedDate: 1_795_000_000_000,
+      lines: [{ lineId: "trend-line-1", barcode: "listing-part", quantity: 1, discountedPrice: "1250.00", vatRate: 20 }] }],
+      hasMore: false };
+    return { batchRequestId: "batch-1" };
+  });
+  const first = await transport.poll({ accountId: "account", sellerId: "merchant", environment: "stage", headers: { Authorization: "[secret]" },
+    windowStartMs: 1_794_000_000_000, windowEndMs: 1_796_000_000_000, serviceActorId: "trendyol-poller",
+    operationIdPrefix: "trendyol-poll-1", receivedAt: "2026-09-23T12:00:00.000Z" });
+  assert.equal(first.accepted, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM sales WHERE platform='TRENDYOL'").pluck().get(), 1);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_reservations").pluck().get(), 1);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM marketplace_orders").pluck().get(), 0);
+  await transport.poll({ accountId: "account", sellerId: "merchant", environment: "stage", headers: { Authorization: "[secret]" },
+    windowStartMs: 1_794_000_000_000, windowEndMs: 1_796_000_000_000, serviceActorId: "trendyol-poller",
+    operationIdPrefix: "trendyol-poll-2", receivedAt: "2026-09-23T12:01:00.000Z" });
+  assert.equal(db.prepare("SELECT COUNT(*) FROM sales WHERE platform='TRENDYOL'").pluck().get(), 1);
+
+  await transport.publish({ kind: "STOCK", externalListingId: "listing-part", payload: { quantityBaseInt: 4 } },
+    { sellerId: "merchant", environment: "stage", headers: { Authorization: "[secret]" } });
+  await transport.publish({ kind: "PRICE", externalListingId: "listing-part", payload: { channelPriceMinor: 125_000 } },
+    { sellerId: "merchant", environment: "stage", headers: { Authorization: "[secret]" } });
+  const bodies = requests.filter((request) => request.options?.method === "POST")
+    .map((request) => JSON.parse(String(request.options?.body)));
+  assert.deepEqual(bodies, [{ items: [{ barcode: "listing-part", quantity: 4 }] },
+    { items: [{ barcode: "listing-part", salePrice: 1250, listPrice: 1250 }] }]);
   db.close();
 });
