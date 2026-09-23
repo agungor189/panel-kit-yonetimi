@@ -13,6 +13,8 @@ import {
   ShipmentValidationError,
   type CarrierBookingTransport,
 } from "./shipmentService.js";
+import { GeliverFlowService, type GeliverTransport } from "./geliverFlowService.js";
+import type { Shipment, Transaction } from "@geliver/sdk";
 
 const actor = { id: "shipping-operator", name: "Shipping Operator" };
 
@@ -219,5 +221,116 @@ test("COD is rejected", () => {
   assert.throws(() => service.selectCarrier({ shipmentId: shipment.id, provider: "GELIVER", carrierCode: "FIXTURE", serviceCode: "COD",
     cashOnDelivery: true, quote: { quoteId: "q", amountMinor: 1, currency: "TRY", provenance: { source: "fixture" } }, operationId: "cod", actor }),
   (error: unknown) => error instanceof ShipmentValidationError && error.code === "COD_FORBIDDEN");
+  db.close();
+});
+
+const recipient = {
+  name: "Test Customer", email: "customer@example.test", phone: "+905551112233", address1: "Test Sokak 1",
+  countryCode: "TR", cityName: "İstanbul", cityCode: "34", districtName: "Kadıköy", zip: "34710",
+};
+
+class OfficialGeliverFixture implements GeliverTransport {
+  readonly enabled = true;
+  readonly disabledReason = null;
+  createCalls = 0;
+  acceptCalls = 0;
+  uncertainCreateOnce = false;
+  private readonly shipments = new Map<string, Shipment>();
+  async create(body: any) {
+    this.createCalls += 1;
+    const id = `provider-${body.order.orderNumber}`;
+    const shipment: Shipment = { id, order: { orderNumber: body.order.orderNumber }, offers: { percentageCompleted: 100, list: [
+      { id: `offer-${id}`, providerCode: "YURTICI", providerServiceCode: "STANDART", amount: "89.90", currency: "TRY",
+        amountLocal: "89.90", currencyLocal: "TRY" },
+    ] } };
+    this.shipments.set(id, shipment);
+    if (this.uncertainCreateOnce) {
+      this.uncertainCreateOnce = false;
+      throw Object.assign(new Error("timeout after provider commit"), { status: 503, code: "UPSTREAM_TIMEOUT" });
+    }
+    return structuredClone(shipment);
+  }
+  async listByOrderNumber(orderNumber: string) {
+    return [...this.shipments.values()].filter((shipment) => shipment.order?.orderNumber === orderNumber).map((item) => structuredClone(item));
+  }
+  async get(id: string) { return structuredClone(this.shipments.get(id)!); }
+  async acceptOffer(offerId: string): Promise<Transaction> {
+    this.acceptCalls += 1;
+    const shipment = [...this.shipments.values()].find((item) => item.offers?.list?.some((offer) => offer.id === offerId))!;
+    shipment.acceptedOfferID = offerId;
+    shipment.acceptedOffer = shipment.offers!.list![0];
+    shipment.barcode = `barcode-${shipment.id}`;
+    shipment.labelURL = `https://labels.geliver.test/${shipment.id}.pdf`;
+    shipment.responsiveLabelURL = `https://labels.geliver.test/${shipment.id}.html`;
+    shipment.labelFileType = "PDF";
+    return { id: `transaction-${shipment.id}`, offerID: offerId, shipmentID: shipment.id, shipment: structuredClone(shipment) };
+  }
+  async cancel(id: string) { const shipment = this.shipments.get(id)!; shipment.cancelDate = "2026-09-23T13:00:00.000Z"; return structuredClone(shipment); }
+  async downloadLabel(url: string) { return new TextEncoder().encode(`provider-native-label:${url}`); }
+  publishTracking(id: string) { const shipment = this.shipments.get(id)!; shipment.trackingNumber = "TRACK-LATER"; shipment.trackingUrl = "https://track.geliver.test/TRACK-LATER"; }
+}
+
+const prepareLiveGeliver = () => {
+  const fixture = setup();
+  const shipping = new ShipmentService(fixture.db);
+  const shipment = shipping.packAndPrepare({ reservationId: "reservation", operationId: "live-pack", actor }).shipment;
+  shipping.definePackages({ shipmentId: shipment.id, operationId: "live-packages", actor, packages: [{ packageNumber: 1,
+    measured: { lengthMm: 300, widthMm: 200, heightMm: 100, weightGrams: 1200 },
+    contents: [{ productId: "part", quantityBaseInt: 2 }] }] });
+  const transport = new OfficialGeliverFixture();
+  const geliver = new GeliverFlowService(fixture.db, transport, { senderAddressId: "sender-address", sourceIdentifier: "https://dsdst.example" });
+  return { ...fixture, shipping, shipment, transport, geliver };
+};
+
+test("verified live offers are selected by the operator; booking accepts provider-native label while tracking is nullable and refreshes later", async () => {
+  const { db, inventory, shipping, shipment, transport, geliver } = prepareLiveGeliver();
+  const jobs = geliver.prepareCreateJobs({ shipmentId: shipment.id, recipient, operationId: "geliver-create", actor });
+  const provider = await geliver.processCreateJob(jobs[0].id);
+  assert.equal(provider.offers.length, 1);
+  assert.deepEqual(provider.offers[0], { id: provider.offers[0].id, carrier: "YURTICI", service: "STANDART", amount: "89.90",
+    currency: "TRY", amountLocal: "89.90", currencyLocal: "TRY", estimatedArrivalAt: null, durationTerms: null });
+  const accept = geliver.selectOffer({ shipmentId: shipment.id, offerId: provider.offers[0].id, operationId: "select-live-offer", actor });
+  await geliver.processAcceptJob(accept.id);
+  const booked = shipping.getShipment(shipment.id);
+  assert.equal(booked.state, "LABEL_READY");
+  assert.equal(booked.packages[0].booking.trackingNumber, null);
+  assert.equal(booked.packages[0].booking.providerTransactionId.startsWith("transaction-"), true);
+  assert.equal(booked.packages[0].label.reference.endsWith(".pdf"), true);
+  assert.equal(booked.packages[0].label.mediaType, "PDF");
+  assert.equal(booked.packages[0].label.providerNative, true);
+  assert.match(booked.packages[0].label.sha256, /^[a-f0-9]{64}$/);
+  assert.equal("dpi" in booked.packages[0].label, false);
+  assert.equal(inventory.getProductAvailability("part").onHandBaseInt, 2);
+  transport.publishTracking(provider.providerShipmentId);
+  await geliver.refreshShipment(shipment.id);
+  assert.equal(shipping.getShipment(shipment.id).packages[0].booking.trackingNumber, "TRACK-LATER");
+  assert.equal(transport.acceptCalls, 1);
+  db.close();
+});
+
+test("uncertain Geliver create reconciles by exact orderNumber and never creates a duplicate", async () => {
+  const { db, shipment, transport, geliver } = prepareLiveGeliver();
+  transport.uncertainCreateOnce = true;
+  const [job] = geliver.prepareCreateJobs({ shipmentId: shipment.id, recipient, operationId: "uncertain-create", actor });
+  await assert.rejects(() => geliver.processCreateJob(job.id), /timeout after provider commit/);
+  const reconciled = await geliver.processCreateJob(job.id);
+  assert.equal(reconciled.providerOrderNumber.includes("DS-13-P1-"), true);
+  assert.equal(transport.createCalls, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM geliver_provider_shipments").pluck().get(), 1);
+  assert.equal(db.prepare("SELECT state FROM geliver_create_jobs WHERE id=?").pluck().get(job.id), "CREATED");
+  db.close();
+});
+
+test("pre-handoff Geliver cancellation records provider evidence and never dispatches", async () => {
+  const { db, inventory, shipping, shipment, geliver } = prepareLiveGeliver();
+  const [job] = geliver.prepareCreateJobs({ shipmentId: shipment.id, recipient, operationId: "cancel-create", actor });
+  const provider = await geliver.processCreateJob(job.id);
+  const accept = geliver.selectOffer({ shipmentId: shipment.id, offerId: provider.offers[0].id, operationId: "cancel-select", actor });
+  await geliver.processAcceptJob(accept.id);
+  await geliver.cancelBeforeHandoff({ shipmentId: shipment.id, operationId: "cancel-live", actor, reason: "CUSTOMER_REQUEST" });
+  assert.equal(shipping.getShipment(shipment.id).state, "CANCELLED");
+  assert.equal(db.prepare("SELECT COUNT(*) FROM geliver_cancellation_facts").pluck().get(), 1);
+  assert.equal(inventory.getProductAvailability("part").onHandBaseInt, 2);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_ledger_events WHERE event_type='DISPATCH'").pluck().get(), 0);
   db.close();
 });

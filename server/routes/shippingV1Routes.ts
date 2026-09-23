@@ -7,6 +7,7 @@ import {
   ShipmentService,
   ShipmentValidationError,
 } from "../modules/shipping/shipmentService.js";
+import { GeliverFlowService, GeliverSdkTransport } from "../modules/shipping/geliverFlowService.js";
 
 type Dependencies = {
   db: Database.Database;
@@ -26,6 +27,9 @@ const sendError = (error: unknown, res: express.Response) => {
   if (String((error as { code?: unknown })?.code || "").includes("SQLITE_CONSTRAINT")) {
     return res.status(409).json({ success: false, error: { code: "SHIPMENT_IDENTITY_CONFLICT", message: "Shipment identity already exists." } });
   }
+  if (error && typeof error === "object" && ("status" in error || "code" in error)) {
+    return res.status(502).json({ success: false, error: { code: "GELIVER_PROVIDER_ERROR", message: "Geliver request failed; the durable operation state must be reconciled before retry." } });
+  }
   throw error;
 };
 
@@ -34,6 +38,11 @@ export function createShippingV1Router(dependencies: Dependencies) {
   const service = new ShipmentService(dependencies.db);
   const commands = new CommandExecutor(dependencies.db);
   const failClosedTransport = new FailClosedGeliverTransport();
+  const geliverTransport = GeliverSdkTransport.fromEnvironment();
+  const geliver = new GeliverFlowService(dependencies.db, geliverTransport, {
+    senderAddressId: geliverTransport.senderAddressId,
+    sourceIdentifier: geliverTransport.sourceIdentifier,
+  });
   const execute = (req: express.Request, capability: string, commandType: string, payload: unknown, handler: Parameters<CommandExecutor["execute"]>[1]) => commands.execute({
     operationId: operationId(req), commandType, payload, actor: { human: actor(req) },
     authorization: { decision: "ALLOW", capability }, correlationId: req.headers["x-correlation-id"]?.toString(),
@@ -43,7 +52,7 @@ export function createShippingV1Router(dependencies: Dependencies) {
     res.status(outcome.result.statusCode).json({ ...(outcome.result.body as Record<string, unknown>), idempotent: outcome.replayed });
 
   router.get("/provider-contracts/geliver", dependencies.authorizeRead, (_req, res) =>
-    res.json({ success: true, contract: "dsdst.carrier-provider-contract.v1", data: GELIVER_TRANSPORT_CONTRACT }));
+    res.json({ success: true, contract: "dsdst.carrier-provider-contract.v2", data: geliver.contract() }));
   router.get("/shipments/:id", dependencies.authorizeRead, (req, res) => {
     try { return res.json({ success: true, contract: "dsdst.shipment.v1", data: service.getShipment(req.params.id) }); }
     catch (error) { return sendError(error, res); }
@@ -83,6 +92,7 @@ export function createShippingV1Router(dependencies: Dependencies) {
   router.post("/shipments/:id/carrier-selection", dependencies.authorizeManage, (req, res) => {
     const payload = { shipmentId: req.params.id, ...req.body };
     try {
+      if (geliverTransport.enabled) throw new ShipmentValidationError("LIVE_GELIVER_OFFER_REQUIRED", "Select a live Geliver offer; manual carrier/service/quote input is disabled.", 409);
       const outcome = execute(req, "shipping:manage", "shipping.carrier.select.v1", payload, (context) => {
         const data = service.selectCarrier({ ...req.body, shipmentId: req.params.id, operationId: operationId(req), actor: actor(req) });
         context.addOutbox({ topic: "shipping", eventType: "shipping.carrier.selected.v1", aggregateType: "shipment",
@@ -97,6 +107,7 @@ export function createShippingV1Router(dependencies: Dependencies) {
   router.post("/shipments/:id/booking", dependencies.authorizeManage, (req, res) => {
     const payload = { shipmentId: req.params.id, requestedAt: req.body?.requestedAt ?? null };
     try {
+      if (geliverTransport.enabled) throw new ShipmentValidationError("LIVE_GELIVER_OFFER_REQUIRED", "Use the verified Geliver offer acceptance flow.", 409);
       const outcome = execute(req, "shipping:manage", "shipping.booking.request.v1", payload, (context) => {
         const data = service.requestBooking({ shipmentId: req.params.id, operationId: operationId(req), actor: actor(req), requestedAt: req.body?.requestedAt });
         context.addOutbox({ topic: "carrier", eventType: "shipping.geliver.booking.requested.v1", aggregateType: "shipment",
@@ -109,9 +120,60 @@ export function createShippingV1Router(dependencies: Dependencies) {
     } catch (error) { return sendError(error, res); }
   });
 
-  router.post("/shipments/:id/cancel", dependencies.authorizeManage, (req, res) => {
+  router.post("/shipments/:id/geliver/offers", dependencies.authorizeManage, async (req, res) => {
+    const payload = { shipmentId: req.params.id, recipient: req.body?.recipient ?? null };
+    try {
+      const outcome = execute(req, "shipping:manage", "shipping.geliver.create-request.v2", payload, (context) => {
+        const jobs = geliver.prepareCreateJobs({ shipmentId: req.params.id, recipient: req.body?.recipient,
+          operationId: operationId(req), actor: actor(req) });
+        context.addOutbox({ topic: "carrier", eventType: "shipping.geliver.create.requested.v2", aggregateType: "shipment",
+          aggregateId: req.params.id, payload: { shipment_id: req.params.id, job_ids: jobs.map((job) => job.id) } });
+        return { statusCode: 202, body: { success: true, contract: "dsdst.geliver-live-offers.v2", data: { jobs } } };
+      });
+      const jobs = (outcome.result.body as any).data.jobs as Array<{ id: string }>;
+      for (const job of jobs) await geliver.processCreateJob(job.id);
+      const data = await geliver.refreshShipment(req.params.id);
+      return res.status(200).json({ success: true, contract: "dsdst.geliver-live-offers.v2", data, idempotent: outcome.replayed });
+    } catch (error) { return sendError(error, res); }
+  });
+
+  router.post("/shipments/:id/geliver/refresh", dependencies.authorizeManage, async (req, res) => {
+    try {
+      const data = await geliver.refreshShipment(req.params.id);
+      service.publishV212TrackingRefresh(req.params.id);
+      return res.json({ success: true, contract: "dsdst.geliver-shipment-refresh.v2", data });
+    } catch (error) { return sendError(error, res); }
+  });
+
+  router.post("/shipments/:id/geliver/offers/:offerId/accept", dependencies.authorizeManage, async (req, res) => {
+    const payload = { shipmentId: req.params.id, offerId: req.params.offerId };
+    try {
+      const outcome = execute(req, "shipping:manage", "shipping.geliver.offer.accept-request.v2", payload, (context) => {
+        const job = geliver.selectOffer({ shipmentId: req.params.id, offerId: req.params.offerId,
+          operationId: operationId(req), actor: actor(req) });
+        context.addOutbox({ topic: "carrier", eventType: "shipping.geliver.offer.accept.requested.v2", aggregateType: "shipment",
+          aggregateId: req.params.id, payload: { shipment_id: req.params.id, accept_job_id: job.id, offer_id: req.params.offerId } });
+        return { statusCode: 202, body: { success: true, contract: "dsdst.geliver-offer-accept.v2", data: { job } } };
+      });
+      await geliver.processAcceptJob((outcome.result.body as any).data.job.id);
+      const data = service.getShipment(req.params.id);
+      return res.json({ success: true, contract: "dsdst.shipment.v1", data, idempotent: outcome.replayed });
+    } catch (error) { return sendError(error, res); }
+  });
+
+  router.post("/shipments/:id/cancel", dependencies.authorizeManage, async (req, res) => {
     const payload = { shipmentId: req.params.id, reason: req.body?.reason ?? null, cancelledAt: req.body?.cancelledAt ?? null };
     try {
+      if (geliverTransport.enabled) {
+        const intent = execute(req, "shipping:manage", "shipping.geliver.cancel-request.v2", payload, (context) => {
+          context.addOutbox({ topic: "carrier", eventType: "shipping.geliver.cancel.requested.v2", aggregateType: "shipment",
+            aggregateId: req.params.id, payload: { shipment_id: req.params.id } });
+          return { statusCode: 202, body: { success: true, contract: "dsdst.geliver-cancel.v2", data: { shipmentId: req.params.id } } };
+        });
+        await geliver.cancelBeforeHandoff({ shipmentId: req.params.id, reason: req.body?.reason,
+          operationId: operationId(req), actor: actor(req), cancelledAt: req.body?.cancelledAt });
+        return res.json({ success: true, contract: "dsdst.shipment.v1", data: service.getShipment(req.params.id), idempotent: intent.replayed });
+      }
       const outcome = execute(req, "shipping:manage", "shipping.cancel.v1", payload, (context) => {
         const data = service.cancelBeforeHandoff({ shipmentId: req.params.id, reason: req.body?.reason,
           operationId: operationId(req), actor: actor(req), transport: failClosedTransport, cancelledAt: req.body?.cancelledAt });

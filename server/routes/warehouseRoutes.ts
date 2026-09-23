@@ -14,6 +14,7 @@ import {
   ShipmentService,
   ShipmentValidationError,
 } from "../modules/shipping/shipmentService.js";
+import { GeliverFlowService, GeliverSdkTransport } from "../modules/shipping/geliverFlowService.js";
 import { WarehouseExecutionError, WarehouseExecutionService, type WarehouseTopologyInput } from "../modules/warehouse/warehouseExecutionService.js";
 
 type WarehouseUser = WarehousePicker & {
@@ -74,6 +75,11 @@ export function createWarehouseRouter({
   const inventoryService = new InventoryService(db);
   const shipmentService = new ShipmentService(db);
   const failClosedGeliverTransport = new FailClosedGeliverTransport();
+  const geliverTransport = GeliverSdkTransport.fromEnvironment();
+  const geliverService = new GeliverFlowService(db, geliverTransport, {
+    senderAddressId: geliverTransport.senderAddressId,
+    sourceIdentifier: geliverTransport.sourceIdentifier,
+  });
   const returnsService = new ReturnsService(db);
   const executionService = new WarehouseExecutionService(db);
 
@@ -232,6 +238,9 @@ export function createWarehouseRouter({
     }
     if (error instanceof WarehouseExecutionError) {
       return errorResponse(res, error.statusCode, error.code, error.message);
+    }
+    if (error && typeof error === "object" && ("status" in error || "code" in error)) {
+      return errorResponse(res, 502, "GELIVER_PROVIDER_ERROR", "Geliver request failed; reconcile the durable operation before retry.");
     }
     throw error;
   };
@@ -521,7 +530,7 @@ export function createWarehouseRouter({
 
   router.get("/shipping/provider-contracts/geliver", authenticate("read:warehouse_orders"), requireWarehouseUser,
     requireWarehousePermission("warehouse:pick_orders"), (_req, res) =>
-      res.json({ success: true, contract: "dsdst.carrier-provider-contract.v1", data: GELIVER_TRANSPORT_CONTRACT }));
+      res.json({ success: true, contract: "dsdst.carrier-provider-contract.v2", data: geliverService.contract() }));
 
   router.get("/shipping/shipments/:id", authenticate("read:warehouse_orders"), requireWarehouseUser,
     requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
@@ -558,6 +567,7 @@ export function createWarehouseRouter({
     requireWarehousePermission("shipping:manage"), (req, res) => {
       const payload = { shipmentId: req.params.id, ...req.body };
       try {
+        if (geliverTransport.enabled) throw new ShipmentValidationError("LIVE_GELIVER_OFFER_REQUIRED", "Select a live Geliver offer; manual carrier/service/quote input is disabled.", 409);
         const outcome = commandExecutor.execute(commandRequest(req, res, "shipping.carrier.select.v1", "shipping:manage", payload), (context) => {
           const data = shipmentService.selectCarrier({ ...req.body, shipmentId: req.params.id,
             operationId: operationIdFromRequest(req), actor: { id: actor(res).id, name: actor(res).username } });
@@ -574,6 +584,7 @@ export function createWarehouseRouter({
     requireWarehousePermission("shipping:manage"), (req, res) => {
       const payload = { shipmentId: req.params.id, requestedAt: req.body?.requestedAt ?? null };
       try {
+        if (geliverTransport.enabled) throw new ShipmentValidationError("LIVE_GELIVER_OFFER_REQUIRED", "Use the verified Geliver offer acceptance flow.", 409);
         const outcome = commandExecutor.execute(commandRequest(req, res, "shipping.booking.request.v1", "shipping:manage", payload), (context) => {
           const data = shipmentService.requestBooking({ shipmentId: req.params.id, operationId: operationIdFromRequest(req),
             actor: { id: actor(res).id, name: actor(res).username }, requestedAt: req.body?.requestedAt });
@@ -587,10 +598,60 @@ export function createWarehouseRouter({
       } catch (error) { return handleServiceError(res, error); }
     });
 
+  router.post("/shipping/shipments/:id/geliver/offers", authenticate("write:warehouse_status"), requireWarehouseUser,
+    requireWarehousePermission("shipping:manage"), async (req, res) => {
+      const payload = { shipmentId: req.params.id, recipient: req.body?.recipient ?? null };
+      try {
+        const outcome = commandExecutor.execute(commandRequest(req, res, "shipping.geliver.create-request.v2", "shipping:manage", payload), (context) => {
+          const jobs = geliverService.prepareCreateJobs({ shipmentId: req.params.id, recipient: req.body?.recipient,
+            operationId: operationIdFromRequest(req), actor: { id: actor(res).id, name: actor(res).username } });
+          context.addOutbox({ topic: "carrier", eventType: "shipping.geliver.create.requested.v2", aggregateType: "shipment",
+            aggregateId: req.params.id, payload: { shipment_id: req.params.id, job_ids: jobs.map((job) => job.id) } });
+          return { statusCode: 202, body: { success: true, contract: "dsdst.geliver-live-offers.v2", data: { jobs } } };
+        });
+        for (const job of (outcome.result.body as any).data.jobs) await geliverService.processCreateJob(job.id);
+        const data = await geliverService.refreshShipment(req.params.id);
+        return res.json({ success: true, contract: "dsdst.geliver-live-offers.v2", data, idempotent: outcome.replayed });
+      } catch (error) { return handleServiceError(res, error); }
+    });
+
+  router.post("/shipping/shipments/:id/geliver/refresh", authenticate("write:warehouse_status"), requireWarehouseUser,
+    requireWarehousePermission("shipping:manage"), async (req, res) => {
+      try { const data = await geliverService.refreshShipment(req.params.id); shipmentService.publishV212TrackingRefresh(req.params.id);
+        return res.json({ success: true, contract: "dsdst.geliver-shipment-refresh.v2", data }); }
+      catch (error) { return handleServiceError(res, error); }
+    });
+
+  router.post("/shipping/shipments/:id/geliver/offers/:offerId/accept", authenticate("write:warehouse_status"), requireWarehouseUser,
+    requireWarehousePermission("shipping:manage"), async (req, res) => {
+      const payload = { shipmentId: req.params.id, offerId: req.params.offerId };
+      try {
+        const outcome = commandExecutor.execute(commandRequest(req, res, "shipping.geliver.offer.accept-request.v2", "shipping:manage", payload), (context) => {
+          const job = geliverService.selectOffer({ shipmentId: req.params.id, offerId: req.params.offerId,
+            operationId: operationIdFromRequest(req), actor: { id: actor(res).id, name: actor(res).username } });
+          context.addOutbox({ topic: "carrier", eventType: "shipping.geliver.offer.accept.requested.v2", aggregateType: "shipment",
+            aggregateId: req.params.id, payload: { shipment_id: req.params.id, accept_job_id: job.id, offer_id: req.params.offerId } });
+          return { statusCode: 202, body: { success: true, contract: "dsdst.geliver-offer-accept.v2", data: { job } } };
+        });
+        await geliverService.processAcceptJob((outcome.result.body as any).data.job.id);
+        return res.json({ success: true, contract: "dsdst.shipment.v1", data: shipmentService.getShipment(req.params.id), idempotent: outcome.replayed });
+      } catch (error) { return handleServiceError(res, error); }
+    });
+
   router.post("/shipping/shipments/:id/cancel", authenticate("write:warehouse_status"), requireWarehouseUser,
-    requireWarehousePermission("shipping:manage"), (req, res) => {
+    requireWarehousePermission("shipping:manage"), async (req, res) => {
       const payload = { shipmentId: req.params.id, reason: req.body?.reason ?? null, cancelledAt: req.body?.cancelledAt ?? null };
       try {
+        if (geliverTransport.enabled) {
+          const intent = commandExecutor.execute(commandRequest(req, res, "shipping.geliver.cancel-request.v2", "shipping:manage", payload), (context) => {
+            context.addOutbox({ topic: "carrier", eventType: "shipping.geliver.cancel.requested.v2", aggregateType: "shipment",
+              aggregateId: req.params.id, payload: { shipment_id: req.params.id } });
+            return { statusCode: 202, body: { success: true, contract: "dsdst.geliver-cancel.v2", data: { shipmentId: req.params.id } } };
+          });
+          await geliverService.cancelBeforeHandoff({ shipmentId: req.params.id, reason: req.body?.reason,
+            operationId: operationIdFromRequest(req), actor: { id: actor(res).id, name: actor(res).username }, cancelledAt: req.body?.cancelledAt });
+          return res.json({ success: true, contract: "dsdst.shipment.v1", data: shipmentService.getShipment(req.params.id), idempotent: intent.replayed });
+        }
         const outcome = commandExecutor.execute(commandRequest(req, res, "shipping.cancel.v1", "shipping:manage", payload), (context) => {
           const data = shipmentService.cancelBeforeHandoff({ shipmentId: req.params.id, reason: req.body?.reason,
             operationId: operationIdFromRequest(req), actor: { id: actor(res).id, name: actor(res).username },

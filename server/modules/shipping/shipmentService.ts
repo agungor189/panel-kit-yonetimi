@@ -427,7 +427,7 @@ export class ShipmentService {
       const shipment = this.getShipment(shipmentId);
       if (shipment.state !== "LABEL_READY") throw new ShipmentValidationError("HANDOFF_NOT_READY", "Every package must be booked with provider label provenance before handoff.", 409);
       if (shipment.packages.length !== shipment.packageCount || shipment.packages.some((pack: any) => !pack.booking || !pack.label)) {
-        throw new ShipmentValidationError("HANDOFF_NOT_READY", "Every package requires booking, tracking provenance, and a provider label.", 409);
+        throw new ShipmentValidationError("HANDOFF_NOT_READY", "Every package requires booking and a provider-native label; tracking may arrive later.", 409);
       }
       this.db.prepare(`UPDATE shipment_preparations SET state='HANDED_OFF',handoff_operation_id=?,handed_off_at=?,version=version+1,updated_at=?
         WHERE id=? AND state='LABEL_READY'`).run(operationId, handedOffAt, handedOffAt, shipmentId);
@@ -488,28 +488,53 @@ export class ShipmentService {
     const row = this.db.prepare(`SELECT s.*,o.order_code,o.platform FROM shipment_preparations s
       JOIN sales o ON o.id=s.order_id WHERE s.id=?`).get(shipmentId) as any;
     if (!row) throw new ShipmentValidationError("SHIPMENT_NOT_FOUND", "Shipment was not found.", 404);
-    const selection = row.carrier_selection_id ? this.db.prepare("SELECT * FROM shipment_carrier_selections WHERE id=?").get(row.carrier_selection_id) as any : null;
+    const liveSelection = this.db.prepare("SELECT * FROM geliver_offer_selections WHERE shipment_id=? ORDER BY selected_at,package_id LIMIT 1").get(shipmentId) as any;
+    const selection = liveSelection || (row.carrier_selection_id ? this.db.prepare("SELECT * FROM shipment_carrier_selections WHERE id=?").get(row.carrier_selection_id) as any : null);
+    const recipient = this.db.prepare("SELECT * FROM shipment_recipient_snapshots WHERE shipment_id=?").get(shipmentId) as any;
     const packages = (this.db.prepare("SELECT * FROM shipment_packages WHERE shipment_id=? ORDER BY package_number").all(shipmentId) as any[]).map((pack) => {
-      const booking = this.db.prepare("SELECT * FROM shipment_provider_bookings WHERE package_id=?").get(pack.id) as any;
-      const label = this.db.prepare("SELECT * FROM shipment_labels WHERE package_id=?").get(pack.id) as any;
+      const nativeBooking = this.db.prepare(`SELECT b.*,s.provider_code,s.provider_service_code FROM geliver_booking_facts b
+        JOIN geliver_offer_selections s ON s.package_id=b.package_id WHERE b.package_id=?`).get(pack.id) as any;
+      const nativeTracking = nativeBooking ? this.db.prepare(`SELECT * FROM geliver_tracking_observations
+        WHERE provider_shipment_id=? ORDER BY observed_at DESC,id DESC LIMIT 1`).get(nativeBooking.provider_shipment_id) as any : null;
+      const nativeLabel = nativeBooking ? this.db.prepare(`SELECT * FROM geliver_label_observations
+        WHERE provider_shipment_id=? ORDER BY observed_at DESC,id DESC LIMIT 1`).get(nativeBooking.provider_shipment_id) as any : null;
+      const booking = nativeBooking || this.db.prepare("SELECT * FROM shipment_provider_bookings WHERE package_id=?").get(pack.id) as any;
+      const label = nativeLabel || this.db.prepare("SELECT * FROM shipment_labels WHERE package_id=?").get(pack.id) as any;
       return {
         id: pack.id, packageNumber: Number(pack.package_number), measurementSource: pack.measurement_source,
         dimensionsMm: { length: Number(pack.length_mm), width: Number(pack.width_mm), height: Number(pack.height_mm) },
         weightGrams: Number(pack.weight_grams), recipeVersionRef: pack.recipe_version_ref, recipeHash: pack.recipe_hash,
         contents: JSON.parse(pack.contents_snapshot_json), contentsHash: pack.contents_snapshot_hash,
-        booking: booking ? { provider: booking.provider, providerShipmentId: booking.provider_shipment_id,
-          providerTransactionId: booking.provider_transaction_id, trackingNumber: booking.tracking_number, trackingUrl: booking.tracking_url,
-          providerResponseReference: booking.provider_response_reference } : null,
-        label: label ? { reference: label.label_reference, sha256: label.label_sha256, mediaType: label.media_type,
-          widthMm: Number(label.width_mm), heightMm: Number(label.height_mm), dpi: Number(label.dpi), printerCompatibility: label.printer_compatibility } : null,
+        booking: booking ? { provider: "GELIVER", providerShipmentId: booking.provider_shipment_id,
+          providerTransactionId: booking.provider_transaction_id || null,
+          carrierCode: booking.provider_code || booking.carrier_code, serviceCode: booking.provider_service_code || booking.service_code,
+          trackingNumber: nativeBooking ? nativeTracking?.tracking_number || null : booking.tracking_number,
+          trackingUrl: nativeBooking ? nativeTracking?.tracking_url || null : booking.tracking_url,
+          barcode: nativeBooking ? booking.barcode || null : null,
+          providerResponseReference: nativeBooking ? `sha256:${booking.response_hash}` : booking.provider_response_reference } : null,
+        label: label ? (nativeLabel ? { reference: nativeLabel.label_url, responsiveReference: nativeLabel.responsive_label_url,
+          sha256: nativeLabel.artifact_sha256, mediaType: nativeLabel.label_file_type, providerNative: true }
+          : { reference: label.label_reference, sha256: label.label_sha256, mediaType: label.media_type,
+            widthMm: Number(label.width_mm), heightMm: Number(label.height_mm), dpi: Number(label.dpi), printerCompatibility: label.printer_compatibility }) : null,
       };
     });
+    const requiredContents = (this.db.prepare(`SELECT l.product_id,l.quantity_base_int,l.base_uom_code_snapshot,
+      p.sku,COALESCE(p.title,p.name,p.sku) AS title FROM inventory_reservation_lines l
+      JOIN products p ON p.id=l.product_id WHERE l.reservation_id=? ORDER BY p.sku,l.product_id`).all(row.reservation_id) as any[])
+      .map((line) => ({ productId: line.product_id, sku: line.sku, title: line.title,
+        quantityBaseInt: Number(line.quantity_base_int), baseUomCode: line.base_uom_code_snapshot }));
     return {
       id: row.id, orderId: row.order_id, orderNumber: row.order_code, sourceChannel: row.platform || "DIRECT",
-      reservationId: row.reservation_id, state: row.state as ShipmentState, packageCount: Number(row.package_count), packages,
-      carrierSelection: selection ? { id: selection.id, provider: selection.provider, carrierCode: selection.carrier_code,
-        serviceCode: selection.service_code, quote: { id: selection.quote_id, amountMinor: Number(selection.quote_amount_minor),
-          currency: selection.quote_currency, provenance: JSON.parse(selection.quote_provenance_json) }, selectedAt: selection.selected_at } : null,
+      reservationId: row.reservation_id, state: row.state as ShipmentState, packageCount: Number(row.package_count), packages, requiredContents,
+      recipient: recipient ? { name: recipient.name, email: recipient.email, phone: recipient.phone, address1: recipient.address1,
+        address2: recipient.address2, countryCode: recipient.country_code, cityName: recipient.city_name, cityCode: recipient.city_code,
+        districtName: recipient.district_name, districtID: recipient.district_id, zip: recipient.zip } : null,
+      carrierSelection: selection ? (liveSelection ? { id: selection.id, provider: "GELIVER", carrierCode: selection.provider_code,
+        serviceCode: selection.provider_service_code, quote: { id: selection.offer_id, amount: selection.quote_amount,
+          currency: selection.quote_currency, provenance: { responseHash: selection.quote_response_hash, source: "GELIVER_LIVE_OFFER" } }, selectedAt: selection.selected_at }
+        : { id: selection.id, provider: selection.provider, carrierCode: selection.carrier_code,
+          serviceCode: selection.service_code, quote: { id: selection.quote_id, amountMinor: Number(selection.quote_amount_minor),
+            currency: selection.quote_currency, provenance: JSON.parse(selection.quote_provenance_json) }, selectedAt: selection.selected_at }) : null,
       handedOffAt: row.handed_off_at, dispatchedAt: row.dispatched_at, cancelledAt: row.cancelled_at, version: Number(row.version),
     };
   }
@@ -519,6 +544,14 @@ export class ShipmentService {
     const row = this.db.prepare("SELECT id FROM shipment_preparations WHERE reservation_id=?").get(reservationId) as any;
     if (!row) throw new ShipmentValidationError("SHIPMENT_NOT_FOUND", "Shipment was not found.", 404);
     return this.getShipment(row.id);
+  }
+
+  publishV212TrackingRefresh(shipmentIdValue: string, occurredAt = new Date().toISOString()) {
+    const shipment = this.getShipment(shipmentIdValue);
+    if (shipment.state !== "DISPATCHED") return null;
+    const trackingIdentity = digest(shipment.packages.map((pack: any) => ({ packageNumber: pack.packageNumber,
+      trackingNumber: pack.booking?.trackingNumber || null, trackingUrl: pack.booking?.trackingUrl || null })));
+    return this.enqueueV212Tracking(shipment, `geliver-tracking:${trackingIdentity}`, occurredAt);
   }
 
   private requireShipment(shipmentId: string) {
