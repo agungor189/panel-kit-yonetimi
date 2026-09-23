@@ -180,8 +180,11 @@ export class InventoryService {
         }
       }
       const plans = lines.map((line) => {
-        const product = this.db.prepare("SELECT id,base_uom_code FROM products WHERE id=?").get(line.productId) as any;
+        const product = this.db.prepare("SELECT id,sku,base_uom_code FROM products WHERE id=?").get(line.productId) as any;
         if (!product) throw new InventoryValidationError("PRODUCT_NOT_FOUND", `Product ${line.productId} was not found.`, 404);
+        const reconciliationBlock = this.db.prepare(`SELECT 1 FROM reconciliation_blocks
+          WHERE affected_type='SKU' AND affected_id=? AND status='ACTIVE' LIMIT 1`).get(product.sku || product.id);
+        if (reconciliationBlock) throw new InventoryValidationError("RECONCILIATION_SCOPE_BLOCKED", `Product ${product.sku || product.id} has an active critical reconciliation finding.`, 409);
         const discrepancy = this.db.prepare("SELECT id FROM inventory_lots WHERE product_id=? AND status='STOCK_DISCREPANCY' AND on_hand_base_int>0 ORDER BY received_at,id LIMIT 1").get(line.productId) as any;
         if (discrepancy) throw new InventoryValidationError("STOCK_DISCREPANCY", `Product ${line.productId} has unresolved physical stock discrepancy.`, 409);
         const physical = physicalPlans.filter((piece) => piece.productId === line.productId);
@@ -316,6 +319,9 @@ export class InventoryService {
     return this.db.transaction(() => {
       const reservation = this.db.prepare("SELECT status,order_id FROM inventory_reservations WHERE id=?").get(reservationId) as any;
       if (!reservation) throw new InventoryValidationError("RESERVATION_NOT_FOUND", "Reservation was not found.", 404);
+      const orderBlock = this.db.prepare(`SELECT 1 FROM reconciliation_blocks
+        WHERE affected_type='ORDER' AND affected_id=? AND status='ACTIVE' LIMIT 1`).get(reservation.order_id);
+      if (orderBlock) throw new InventoryValidationError("RECONCILIATION_SCOPE_BLOCKED", `Order ${reservation.order_id} has an active critical reconciliation finding.`, 409);
       if (reservation.status !== "PACKED") throw new InventoryValidationError("RESERVATION_STATE_CONFLICT", "Only a packed reservation may be dispatched.", 409);
       const fulfillment = this.getFulfillmentState(reservationId);
       if (fulfillment.status === "STOCK_DISCREPANCY") throw new InventoryValidationError("STOCK_DISCREPANCY", "Physical stock discrepancy blocks dispatch.", 409);

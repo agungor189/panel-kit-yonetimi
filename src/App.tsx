@@ -23,6 +23,7 @@ import {
   Landmark,
   AlertTriangle,
   RefreshCw,
+  ShieldAlert,
   Eye
 } from 'lucide-react';
 import Dashboard from './components/Dashboard';
@@ -53,6 +54,7 @@ import ApiKeys from './components/integrations/ApiKeys';
 import PanelApiKeys from './components/integrations/PanelApiKeys';
 import TrendyolIntegration from './components/integrations/TrendyolIntegration';
 import ChannelsIntegration from './components/integrations/ChannelsIntegration';
+import ReconciliationCenter from './components/ReconciliationCenter';
 
 const APP_VERSION = 'v2.5.5';
 
@@ -67,7 +69,7 @@ function normalizeRole(role: unknown): UserRole {
   return role === 'admin' || role === 'user' || role === 'readonly' ? role : 'admin';
 }
 
-type View = 'dashboard' | 'products' | 'product-detail' | 'product-wizard' | 'stock' | 'income' | 'expense' | 'recurring' | 'analytics' | 'product-analytics' | 'insights' | 'settings' | 'activity-logs' | 'b2b' | 'sales' | 'api-keys' | 'panel-api' | 'trendyol' | 'channels' | 'cash';
+type View = 'dashboard' | 'products' | 'product-detail' | 'product-wizard' | 'stock' | 'income' | 'expense' | 'recurring' | 'analytics' | 'product-analytics' | 'insights' | 'settings' | 'activity-logs' | 'reconciliation' | 'b2b' | 'sales' | 'api-keys' | 'panel-api' | 'trendyol' | 'channels' | 'cash';
 type NavItem = { id: View; label: string; icon: ComponentType<{ className?: string }> };
 
 export default function App() {
@@ -224,6 +226,7 @@ export default function App() {
           currentView === 'channels' ? 'Kanallar' :
           currentView === 'settings' ? 'Ayarlar' :
           currentView === 'activity-logs' ? 'Aktivite Logları' :
+          currentView === 'reconciliation' ? 'Reconciliation / Sistem Kontrolü' :
               'Ürün Detayı');
 
   const sidebarExpanded = isSidebarOpen || isMobileMenuOpen;
@@ -345,6 +348,7 @@ export default function App() {
 
           <div className={cn('my-3 h-px bg-white/10', sidebarExpanded ? 'mx-4' : 'mx-4')} />
           {renderSectionLabel('Sistem')}
+          {renderNavItem({ id: 'reconciliation', label: 'Sistem Kontrolü', icon: ShieldAlert })}
           {renderNavItem({ id: 'activity-logs', label: 'Aktivite Logları', icon: Activity })}
           {!isReadOnly && renderNavItem({ id: 'settings', label: 'Ayarlar', icon: SettingsIcon })}
         </nav>
@@ -590,6 +594,7 @@ export default function App() {
           {currentView === 'product-analytics' && <ProductAnalyticsPage />}
           {currentView === 'insights' && <InsightsPage />}
           {currentView === 'activity-logs' && <ActivityLogs />}
+          {currentView === 'reconciliation' && <ReconciliationCenter />}
           {!isReadOnly && currentView === 'settings' && <SettingsView onUpdate={loadSettings} />}
           {!isReadOnly && currentView === 'api-keys' && <ApiKeys />}
           {!isReadOnly && currentView === 'panel-api' && <PanelApiKeys />}

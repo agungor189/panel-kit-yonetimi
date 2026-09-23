@@ -30,6 +30,8 @@ import { createInventoryV1Router } from "./server/routes/inventoryV1Routes.js";
 import { createKitPublicationV1Router } from "./server/routes/kitPublicationV1Routes.js";
 import { createReturnsV1Router } from "./server/routes/returnsV1Routes.js";
 import { createShippingV1Router } from "./server/routes/shippingV1Routes.js";
+import { createReconciliationV1Router } from "./server/routes/reconciliationV1Routes.js";
+import { startDailyReconciliationScheduler } from "./server/modules/reconciliation/reconciliationScheduler.js";
 import { rejectLegacyCatalogMutation } from "./server/modules/catalog/legacyCatalogGuard.js";
 import { CommandExecutor, CommandFoundationError } from "./server/modules/commands/commandFoundation.js";
 import { InventoryService, InventoryValidationError } from "./server/modules/inventory/inventoryService.js";
@@ -5635,6 +5637,16 @@ async function startServer() {
       authorizeDispatch: auth.requireCapability("shipping:dispatch"),
     }),
   );
+  app.use(
+    "/api/reconciliation/v1",
+    createReconciliationV1Router({
+      db,
+      authorizeRead: auth.requireCapability("reconciliation:view"),
+      authorizeRun: auth.requireCapability("reconciliation:run"),
+      authorizePropose: auth.requireCapability("data:repair:propose"),
+      authorizeApprove: auth.requireCapability("data:repair:approve"),
+    }),
+  );
   mountWarehouseModule({
     app,
     db,
@@ -6192,6 +6204,7 @@ async function startServer() {
   });
 
   startBackupScheduler();
+  startDailyReconciliationScheduler(db, AppLogger);
 
   // --- VITE MIDDLEWARE ---
 

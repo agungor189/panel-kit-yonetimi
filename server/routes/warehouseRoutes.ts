@@ -17,6 +17,7 @@ import {
 import { GeliverFlowService, GeliverSdkTransport } from "../modules/shipping/geliverFlowService.js";
 import { WarehouseExecutionError, WarehouseExecutionService, type WarehouseTopologyInput } from "../modules/warehouse/warehouseExecutionService.js";
 import { PrintingError, PrintingService, type TemplateSnapshot, type ReprintReason } from "../modules/printing/printingService.js";
+import { ReconciliationService } from "../modules/reconciliation/reconciliationService.js";
 
 type WarehouseUser = WarehousePicker & {
   role: string;
@@ -84,6 +85,7 @@ export function createWarehouseRouter({
   const returnsService = new ReturnsService(db);
   const executionService = new WarehouseExecutionService(db);
   const printingService = new PrintingService(db);
+  const reconciliationService = new ReconciliationService(db);
 
   const authenticate = (requiredPermissions: string | string[]) => (
     req: express.Request,
@@ -448,6 +450,10 @@ export function createWarehouseRouter({
   router.get("/execution/products/:id/reconciliation", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:view_analytics"), (req, res) => {
     try { auditRead(req); return res.json({ success: true, contract: "dsdst.warehouse-reconciliation.v1", data: executionService.getReconciliation(req.params.id) }); }
     catch (error) { return handleServiceError(res, error); }
+  });
+  router.get("/reconciliation", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:view_analytics"), (req, res) => {
+    auditRead(req);
+    return res.json({ success: true, contract: "dsdst.reconciliation.warehouse.v1", data: reconciliationService.listFindings({ status: "OPEN", domain: "INVENTORY", affectedType: "SKU" }) });
   });
 
   router.get("/catalog/products", authenticate("read:products"), requireWarehouseUser, (req, res) => {

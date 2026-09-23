@@ -40,6 +40,10 @@ export const CAPABILITY_REGISTRY = Object.freeze({
   "kits:view": { description: "Kit workspace queries" },
   "kits:write": { description: "Kit workspace mutations" },
   "kits:approve": { description: "Kit approval" },
+  "reconciliation:view": { description: "Reconciliation finding and history queries" },
+  "reconciliation:run": { description: "Run deterministic reconciliation now" },
+  "data:repair:propose": { description: "Propose a bounded canonical repair command" },
+  "data:repair:approve": { description: "Approve, reject or explicitly verify canonical repair" },
 } as const);
 
 const appPermissionKeys = new Set<string>(Object.keys(CAPABILITY_REGISTRY));
