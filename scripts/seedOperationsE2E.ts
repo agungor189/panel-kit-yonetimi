@@ -46,7 +46,7 @@ db.prepare(`
 const authScopes = ["auth:login", "auth:session:validate", "auth:session:revoke", "auth:password:change"];
 const principals = [
   { id: "operations-e2e-warehouse", name: "Operations E2E Warehouse", key: serviceKeys.warehouse!, permissions: [...authScopes, "read:warehouse_orders", "read:products", "read:bom", "write:warehouse_status"] },
-  { id: "operations-e2e-kit", name: "Operations E2E Kit Studio", key: serviceKeys.kitStudio!, permissions: [...authScopes, "kit-catalog:read"] },
+  { id: "operations-e2e-kit", name: "Operations E2E Kit Studio", key: serviceKeys.kitStudio!, permissions: [...authScopes, "kit-catalog:read", "catalog:read"] },
   { id: "operations-e2e-label", name: "Operations E2E Label Printer", key: serviceKeys.labelPrinter!, permissions: authScopes },
   { id: "operations-e2e-customer-hub", name: "Operations E2E Customer Hub", key: serviceKeys.customerHub!, permissions: authScopes },
 ];
