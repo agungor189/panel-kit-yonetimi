@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { WarehousePackageBalanceError, WarehousePackageBalanceService } from "../warehouse/warehousePackageBalanceService.js";
 import { ProfileCutInventoryService, type ProfileCutPlanInput } from "./profileCutInventoryService.js";
+import { ReconciliationScopeGuard } from "../reconciliation/reconciliationGuard.js";
 import { enqueueCanonicalChannelChanges } from "../channels/channelOutboundProjection.js";
 
 type LocationKind = "PICKING" | "RESERVE";
@@ -36,7 +37,8 @@ const timestamp = (value: unknown, field: string) => {
 };
 
 export class InventoryService {
-  constructor(private readonly db: Database.Database) {}
+  private readonly reconciliationGuard: ReconciliationScopeGuard;
+  constructor(private readonly db: Database.Database) { this.reconciliationGuard = new ReconciliationScopeGuard(db); }
 
   private syncProjection(productId: string) {
     this.db.prepare(`UPDATE products SET central_stock=COALESCE((
@@ -66,6 +68,9 @@ export class InventoryService {
         l.quantity_base_int,l.base_uom_code_snapshot,p.status AS purchase_status
         FROM acquisition_lot_cost_snapshots l JOIN purchase_orders p ON p.id=l.purchase_order_id WHERE l.id=?`).get(costSnapshotId) as any;
       if (!snapshot) throw new InventoryValidationError("COST_SNAPSHOT_NOT_FOUND", "The acquisition-cost snapshot was not found.", 404);
+      const affectedSku = this.db.prepare("SELECT COALESCE(NULLIF(sku,''),id) FROM products WHERE id=?").pluck().get(snapshot.product_id) as string;
+      this.reconciliationGuard.assertAllowed("SKU", affectedSku,
+        (message) => new InventoryValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409));
       if (snapshot.state !== "COSTED_PENDING_RECEIPT" || snapshot.purchase_status !== "APPROVED") {
         throw new InventoryValidationError("COST_SNAPSHOT_NOT_RECEIVABLE", "Only an approved COSTED_PENDING_RECEIPT snapshot may create inventory.", 409);
       }
@@ -182,9 +187,8 @@ export class InventoryService {
       const plans = lines.map((line) => {
         const product = this.db.prepare("SELECT id,sku,base_uom_code FROM products WHERE id=?").get(line.productId) as any;
         if (!product) throw new InventoryValidationError("PRODUCT_NOT_FOUND", `Product ${line.productId} was not found.`, 404);
-        const reconciliationBlock = this.db.prepare(`SELECT 1 FROM reconciliation_blocks
-          WHERE affected_type='SKU' AND affected_id=? AND status='ACTIVE' LIMIT 1`).get(product.sku || product.id);
-        if (reconciliationBlock) throw new InventoryValidationError("RECONCILIATION_SCOPE_BLOCKED", `Product ${product.sku || product.id} has an active critical reconciliation finding.`, 409);
+        this.reconciliationGuard.assertAllowed("SKU", product.sku || product.id,
+          (message) => new InventoryValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409));
         const discrepancy = this.db.prepare("SELECT id FROM inventory_lots WHERE product_id=? AND status='STOCK_DISCREPANCY' AND on_hand_base_int>0 ORDER BY received_at,id LIMIT 1").get(line.productId) as any;
         if (discrepancy) throw new InventoryValidationError("STOCK_DISCREPANCY", `Product ${line.productId} has unresolved physical stock discrepancy.`, 409);
         const physical = physicalPlans.filter((piece) => piece.productId === line.productId);
@@ -291,6 +295,10 @@ export class InventoryService {
 
   markPicked(input: { reservationId: string; operationId: string; pickedAt?: string }) {
     text(input.operationId, "operationId");
+    this.reconciliationGuard.assertOrderForReservation(input.reservationId,
+      (message) => new InventoryValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409));
+    this.reconciliationGuard.assertReservationSkus(input.reservationId,
+      (message) => new InventoryValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409));
     const unexecutedCuts = Number(this.db.prepare("SELECT COUNT(*) FROM profile_piece_reservations WHERE reservation_id=? AND status='ACTIVE'").pluck().get(input.reservationId));
     if (unexecutedCuts > 0) throw new InventoryValidationError("PROFILE_CUT_EXECUTION_REQUIRED", "Reserved profile cuts must be executed before picking.", 409);
     const fulfillment = this.getFulfillmentState(input.reservationId);
@@ -303,6 +311,10 @@ export class InventoryService {
 
   markPacked(input: { reservationId: string; operationId: string; packedAt?: string }) {
     text(input.operationId, "operationId");
+    this.reconciliationGuard.assertOrderForReservation(input.reservationId,
+      (message) => new InventoryValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409));
+    this.reconciliationGuard.assertReservationSkus(input.reservationId,
+      (message) => new InventoryValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409));
     const fulfillment = this.getFulfillmentState(input.reservationId);
     if (fulfillment.status === "STOCK_DISCREPANCY") throw new InventoryValidationError("STOCK_DISCREPANCY", "Physical stock discrepancy blocks packing.", 409);
     if (fulfillment.requirements.some((item) => item.state === "REPLENISH_SAME_LOT")) {
@@ -319,9 +331,10 @@ export class InventoryService {
     return this.db.transaction(() => {
       const reservation = this.db.prepare("SELECT status,order_id FROM inventory_reservations WHERE id=?").get(reservationId) as any;
       if (!reservation) throw new InventoryValidationError("RESERVATION_NOT_FOUND", "Reservation was not found.", 404);
-      const orderBlock = this.db.prepare(`SELECT 1 FROM reconciliation_blocks
-        WHERE affected_type='ORDER' AND affected_id=? AND status='ACTIVE' LIMIT 1`).get(reservation.order_id);
-      if (orderBlock) throw new InventoryValidationError("RECONCILIATION_SCOPE_BLOCKED", `Order ${reservation.order_id} has an active critical reconciliation finding.`, 409);
+      this.reconciliationGuard.assertAllowed("ORDER", reservation.order_id,
+        (message) => new InventoryValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409));
+      this.reconciliationGuard.assertReservationSkus(reservationId,
+        (message) => new InventoryValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409));
       if (reservation.status !== "PACKED") throw new InventoryValidationError("RESERVATION_STATE_CONFLICT", "Only a packed reservation may be dispatched.", 409);
       const fulfillment = this.getFulfillmentState(reservationId);
       if (fulfillment.status === "STOCK_DISCREPANCY") throw new InventoryValidationError("STOCK_DISCREPANCY", "Physical stock discrepancy blocks dispatch.", 409);

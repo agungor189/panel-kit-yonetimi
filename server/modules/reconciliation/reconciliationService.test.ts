@@ -3,6 +3,7 @@ import test from "node:test";
 import Database from "better-sqlite3";
 import { initializeDatabase } from "../../db/initialize.js";
 import { ReconciliationService } from "./reconciliationService.js";
+import { ReconciliationRepairExecutor } from "./reconciliationRepairExecutor.js";
 
 function fixture() {
   const db = new Database(":memory:");
@@ -67,8 +68,20 @@ test("critical findings block only the exact SKU and unblock only after a clean 
   db.prepare("UPDATE inventory_lots SET on_hand_base_int=6 WHERE id='lot-bad'").run();
   const reopened = service.run({ trigger: "MANUAL", actor: { type: "HUMAN", id: "admin" }, operationId: "scan-reopen" });
   const critical = reopened.findings.filter((item) => item.severity === "CRITICAL" && item.affectedId === "SKU-BAD");
-  critical.forEach((finding, index) => service.verifyFinding({ findingId: finding.id, reason: "Physical count independently verified", actorId: "admin", operationId: `verify-${index}` }));
+  critical.forEach((finding, index) => service.verifyFinding({ findingId: finding.id, reason: "Physical count independently verified", actorId: "admin", actorIsAdmin: true, operationId: `verify-${index}` }));
   assert.equal(service.isBlocked("SKU", "SKU-BAD"), false);
+});
+
+test("admin verification clears only the exact finding block", () => {
+  const { db, service } = fixture();
+  insertInventory(db, { sku: "SKU-EXACT", onHand: 8, ledger: 7, location: 6 });
+  const run = service.run({ trigger: "MANUAL", actor: { type: "HUMAN", id: "admin" }, operationId: "exact-block-scan" });
+  const critical = run.findings.filter((item) => item.affectedId === "SKU-EXACT" && item.severity === "CRITICAL");
+  assert.equal(critical.length >= 2, true);
+  assert.throws(() => service.verifyFinding({ findingId: critical[0].id, reason: "attempt", actorId: "operator", actorIsAdmin: false, operationId: "verify-denied" }), /admin/i);
+  service.verifyFinding({ findingId: critical[0].id, reason: "Verified exact discrepancy", actorId: "admin", actorIsAdmin: true, operationId: "verify-one" });
+  assert.equal(service.isBlocked("SKU", "SKU-EXACT"), true);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM reconciliation_blocks WHERE affected_id='SKU-EXACT' AND status='ACTIVE'").pluck().get(), critical.length - 1);
 });
 
 test("repeat scans deterministically update and reopen one finding without duplicate noise", () => {
@@ -151,8 +164,12 @@ test("return quantity/money bounds and sold frozen kit version are checked exact
     (id,financial_line_id,sale_line_id,product_id,published_kit_id,published_kit_version_id,version_number,content_hash,is_current_at_sale,snapshot_json)
     VALUES ('sold-kit','fl-return','sale-line-return','product-1','kit','kit-version',2,?,1,'{}')`).run("d".repeat(64));
   db.pragma("foreign_keys = ON");
-  const codes = new Set(service.run({ trigger: "MANUAL", actor: { type: "HUMAN", id: "admin" }, operationId: "return-kit-scan" }).findings.map((finding) => finding.code));
+  const scan = service.run({ trigger: "MANUAL", actor: { type: "HUMAN", id: "admin" }, operationId: "return-kit-scan" });
+  const codes = new Set(scan.findings.map((finding) => finding.code));
   assert.equal(codes.has("RETURN_QUANTITY_BOUND_EXCEEDED"), true);
+  const bound = scan.findings.filter((finding) => finding.code === "RETURN_QUANTITY_BOUND_EXCEEDED");
+  assert.equal(bound.length, 1);
+  assert.equal(bound[0].occurrences, 1);
   assert.equal(codes.has("REFUND_MONEY_BOUND_EXCEEDED"), true);
   assert.equal(codes.has("SOLD_KIT_FROZEN_VERSION_MISMATCH"), true);
 });
@@ -168,4 +185,33 @@ test("repair approval is admin-only and immutable evidence is preserved", () => 
   assert.equal(Number(db.prepare("SELECT COUNT(*) FROM inventory_ledger_events WHERE lot_id='lot-product-1'").pluck().get()), 1);
   assert.equal(Number(db.prepare("SELECT COUNT(*) FROM reconciliation_history WHERE finding_id=?").pluck().get(finding.id)) >= 3, true);
   assert.throws(() => db.prepare("DELETE FROM reconciliation_history WHERE finding_id=?").run(finding.id), /immutable/i);
+});
+
+test("approved repair executes only a registered authoritative command and records immutable APPLIED before/after evidence", () => {
+  const { db, service } = fixture();
+  insertInventory(db, { reserved: 3 });
+  db.pragma("foreign_keys = OFF");
+  db.prepare("INSERT INTO inventory_reservations (id,order_id,status,reserve_operation_id,created_at) VALUES ('repair-reservation','repair-order','ACTIVE','reserve','2026-09-23')").run();
+  db.prepare("INSERT INTO inventory_reservation_lines (id,reservation_id,product_id,quantity_base_int,base_uom_code_snapshot,created_at) VALUES ('repair-line','repair-reservation','product-1',2,'piece','2026-09-23')").run();
+  db.prepare("INSERT INTO inventory_reservation_allocations (id,reservation_id,reservation_line_id,product_id,lot_id,quantity_base_int,fifo_sequence,created_at) VALUES ('repair-allocation','repair-reservation','repair-line','product-1','lot-product-1',2,0,'2026-09-23')").run();
+  db.pragma("foreign_keys = ON");
+  const finding = service.run({ trigger: "MANUAL", actor: { type: "HUMAN", id: "admin" }, operationId: "repair-command-scan" }).findings
+    .find((item) => item.code === "INVENTORY_RESERVED_MISMATCH")!;
+  const proposal = service.proposeRepair({ findingId: finding.id, commandType: "inventory.release-reservation.v1", commandPayload: { reservationId: "repair-reservation" }, reason: "Cancel stale reservation through inventory authority", actorId: "admin", operationId: "repair-command-propose" });
+  service.approveRepair({ proposalId: proposal.id, reason: "Approved exact reservation release", actorId: "admin-2", actorIsAdmin: true, operationId: "repair-command-approve" });
+  const applied = new ReconciliationRepairExecutor(db, service).execute({ proposalId: proposal.id, actorId: "admin-2", operationId: "repair-command-apply" });
+  assert.equal(applied.status, "APPLIED");
+  assert.equal(db.prepare("SELECT status FROM inventory_reservations WHERE id='repair-reservation'").pluck().get(), "RELEASED");
+  const evidence = db.prepare("SELECT before_json,after_json FROM reconciliation_repair_proposals WHERE id=?").get(proposal.id) as any;
+  assert.equal(JSON.parse(evidence.before_json).reservation.status, "ACTIVE");
+  assert.equal(JSON.parse(evidence.after_json).reservation.status, "RELEASED");
+  assert.equal(db.prepare("SELECT COUNT(*) FROM reconciliation_history WHERE finding_id=? AND event_type='REPAIR_APPLIED'").pluck().get(finding.id), 1);
+
+  db.prepare("UPDATE inventory_lots SET on_hand_base_int=9 WHERE id='lot-product-1'").run();
+  const unsupportedFinding = service.run({ trigger: "MANUAL", actor: { type: "HUMAN", id: "admin" }, operationId: "unsupported-scan" }).findings.find((item) => item.code === "INVENTORY_LEDGER_MISMATCH")!;
+  const unsupported = service.proposeRepair({ findingId: unsupportedFinding.id, commandType: "sql.patch.v1", commandPayload: {}, reason: "Must fail closed", actorId: "admin", operationId: "unsupported-propose" });
+  service.approveRepair({ proposalId: unsupported.id, reason: "Review unsupported behavior", actorId: "admin-2", actorIsAdmin: true, operationId: "unsupported-approve" });
+  assert.throws(() => new ReconciliationRepairExecutor(db, service).execute({ proposalId: unsupported.id, actorId: "admin-2", operationId: "unsupported-apply" }),
+    (error: any) => error.code === "REPAIR_COMMAND_UNSUPPORTED");
+  assert.equal(db.prepare("SELECT status FROM reconciliation_repair_proposals WHERE id=?").pluck().get(unsupported.id), "APPROVED");
 });

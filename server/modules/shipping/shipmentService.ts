@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import type { OutboxMessage } from "../commands/commandFoundation.js";
 import { InventoryService } from "../inventory/inventoryService.js";
 import { SalesFinancialService } from "../sales/salesFinancialService.js";
+import { ReconciliationScopeGuard } from "../reconciliation/reconciliationGuard.js";
 
 type Actor = { id: string; name?: string | null };
 type ShipmentState = "PREPARING" | "CARRIER_SELECTED" | "BOOKED" | "LABEL_READY" | "HANDED_OFF" | "DISPATCHED" | "CANCELLED" | "EXCEPTION";
@@ -121,6 +122,7 @@ const currency = (value: unknown) => {
 export class ShipmentService {
   private readonly inventory: InventoryService;
   private readonly finance: SalesFinancialService;
+  private readonly reconciliationGuard: ReconciliationScopeGuard;
   private readonly recipeResolver: (orderId: string, packageNumber: number) => RecipeMeasurement | null;
 
   constructor(private readonly db: Database.Database, options: {
@@ -128,7 +130,14 @@ export class ShipmentService {
   } = {}) {
     this.inventory = new InventoryService(db);
     this.finance = new SalesFinancialService(db);
+    this.reconciliationGuard = new ReconciliationScopeGuard(db);
     this.recipeResolver = options.recipeResolver || ((orderId, packageNumber) => this.resolveRecipe(orderId, packageNumber));
+  }
+
+  private assertShipmentAllowed(shipmentId: string) {
+    const error = (message: string) => new ShipmentValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409);
+    this.reconciliationGuard.assertOrderForShipment(shipmentId, error);
+    this.reconciliationGuard.assertShipmentSkus(shipmentId, error);
   }
 
   packAndPrepare(input: { reservationId: string; operationId: string; actor: Actor; packedAt?: string }) {
@@ -136,6 +145,8 @@ export class ShipmentService {
     const operationId = text(input.operationId, "operationId");
     const actor = actorInput(input.actor);
     const packedAt = input.packedAt ? instant(input.packedAt, "packedAt") : new Date().toISOString();
+    this.reconciliationGuard.assertOrderForReservation(reservationId,
+      (message) => new ShipmentValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409));
     return this.db.transaction(() => {
       const existing = this.db.prepare("SELECT id,created_operation_id FROM shipment_preparations WHERE reservation_id=?").get(reservationId) as any;
       if (existing) {
@@ -168,6 +179,7 @@ export class ShipmentService {
     const shipmentId = text(input.shipmentId, "shipmentId");
     const operationId = text(input.operationId, "operationId");
     const actor = actorInput(input.actor);
+    this.assertShipmentAllowed(shipmentId);
     if (!Array.isArray(input.packages) || input.packages.length === 0) {
       throw new ShipmentValidationError("PACKAGE_DEFINITION_REQUIRED", "At least one package is required.");
     }
@@ -246,6 +258,7 @@ export class ShipmentService {
     const operationId = text(input.operationId, "operationId");
     const actor = actorInput(input.actor);
     const selectedAt = input.selectedAt ? instant(input.selectedAt, "selectedAt") : new Date().toISOString();
+    this.assertShipmentAllowed(shipmentId);
     return this.db.transaction(() => {
       const shipment = this.getShipment(shipmentId);
       if (shipment.state !== "PREPARING") throw new ShipmentValidationError("SHIPMENT_STATE_CONFLICT", "Carrier may only be selected while preparing.", 409);
@@ -273,6 +286,7 @@ export class ShipmentService {
     const operationId = text(input.operationId, "operationId");
     actorInput(input.actor);
     const requestedAt = input.requestedAt ? instant(input.requestedAt, "requestedAt") : new Date().toISOString();
+    this.assertShipmentAllowed(shipmentId);
     return this.db.transaction(() => {
       const existing = this.db.prepare("SELECT id FROM shipment_booking_jobs WHERE shipment_id=? AND created_operation_id=? ORDER BY id").all(shipmentId, operationId) as any[];
       if (existing.length > 0) return { shipment: this.getShipment(shipmentId), jobs: existing.map(({ id }) => this.getBookingJob(id)) };
@@ -377,6 +391,7 @@ export class ShipmentService {
     const operationId = text(input.operationId, "operationId");
     const actor = actorInput(input.actor);
     const cancelledAt = input.cancelledAt ? instant(input.cancelledAt, "cancelledAt") : new Date().toISOString();
+    this.assertShipmentAllowed(shipmentId);
     const shipment = this.requireShipment(shipmentId);
     if (["HANDED_OFF", "DISPATCHED"].includes(shipment.state)) {
       throw new ShipmentValidationError("RETURN_FLOW_REQUIRED", "After physical handoff, use the V2-10 return flow.", 409);
@@ -420,6 +435,7 @@ export class ShipmentService {
     const operationId = text(input.operationId, "operationId");
     const actor = actorInput(input.actor);
     const handedOffAt = instant(input.handedOffAt, "handedOffAt");
+    this.assertShipmentAllowed(shipmentId);
     if (input.handoffEvidence === undefined || input.handoffEvidence === null) {
       throw new ShipmentValidationError("HANDOFF_EVIDENCE_REQUIRED", "Confirmed physical carrier handoff requires evidence.", 409);
     }
@@ -495,9 +511,9 @@ export class ShipmentService {
       const nativeBooking = this.db.prepare(`SELECT b.*,s.provider_code,s.provider_service_code FROM geliver_booking_facts b
         JOIN geliver_offer_selections s ON s.package_id=b.package_id WHERE b.package_id=?`).get(pack.id) as any;
       const nativeTracking = nativeBooking ? this.db.prepare(`SELECT * FROM geliver_tracking_observations
-        WHERE provider_shipment_id=? ORDER BY observed_at DESC,id DESC LIMIT 1`).get(nativeBooking.provider_shipment_id) as any : null;
+        WHERE provider_shipment_id=? ORDER BY observed_at DESC,rowid DESC LIMIT 1`).get(nativeBooking.provider_shipment_id) as any : null;
       const nativeLabel = nativeBooking ? this.db.prepare(`SELECT * FROM geliver_label_observations
-        WHERE provider_shipment_id=? ORDER BY observed_at DESC,id DESC LIMIT 1`).get(nativeBooking.provider_shipment_id) as any : null;
+        WHERE provider_shipment_id=? ORDER BY observed_at DESC,rowid DESC LIMIT 1`).get(nativeBooking.provider_shipment_id) as any : null;
       const booking = nativeBooking || this.db.prepare("SELECT * FROM shipment_provider_bookings WHERE package_id=?").get(pack.id) as any;
       const label = nativeLabel || this.db.prepare("SELECT * FROM shipment_labels WHERE package_id=?").get(pack.id) as any;
       return {

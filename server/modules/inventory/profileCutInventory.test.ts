@@ -11,6 +11,7 @@ import { SalesFinancialService } from "../sales/salesFinancialService.js";
 import { ReturnsService, ReturnsValidationError } from "../returns/returnsService.js";
 import { runMigrations } from "../../migrations/runner.js";
 import { applySchema } from "../../db/schema.js";
+import { ReconciliationService } from "../reconciliation/reconciliationService.js";
 
 const setup = (cutLengthMm = 1800) => {
   const db = new Database(":memory:");
@@ -71,6 +72,27 @@ test("reservation plans whole physical pieces and rejects an unfittable cut atom
     profileCutPlans: [{ publishedKitVersionId: publication.versionId, productId: "profile", kerfMm: 3, cuts: [{ lengthMm: 1000 }] }],
   }), (error: unknown) => error instanceof InventoryValidationError && error.code === "PROFILE_CUT_PLAN_INVALID");
   assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_reservations WHERE id='tampered'").pluck().get(), 0);
+  db.close();
+});
+
+test("reconciliation uses profile cut reservation evidence so valid kerf produces no false finding", () => {
+  const { db, inventory, publication } = setup();
+  inventory.reserveOrder({ reservationId: "reconcile-profile", orderId: "profile-order", operationId: "reconcile-reserve",
+    lines: [{ productId: "profile", quantityBaseInt: 1800 }],
+    profileCutPlans: [{ publishedKitVersionId: publication.versionId, productId: "profile", kerfMm: 3, cuts: [{ lengthMm: 1800 }] }] });
+  const run = new ReconciliationService(db).run({ trigger: "MANUAL", actor: { type: "HUMAN", id: "admin" }, operationId: "profile-valid-scan" });
+  assert.equal(run.findings.some((finding) => finding.code === "INVENTORY_RESERVED_MISMATCH" || finding.code === "PROFILE_CUT_RESERVATION_MISMATCH"), false);
+  db.close();
+});
+
+test("reconciliation reports a real profile reserved-balance mismatch", () => {
+  const { db, inventory, publication } = setup();
+  inventory.reserveOrder({ reservationId: "reconcile-profile-bad", orderId: "profile-order-bad", operationId: "reconcile-reserve-bad",
+    lines: [{ productId: "profile", quantityBaseInt: 1800 }],
+    profileCutPlans: [{ publishedKitVersionId: publication.versionId, productId: "profile", kerfMm: 3, cuts: [{ lengthMm: 1800 }] }] });
+  db.prepare("UPDATE inventory_lots SET reserved_base_int=reserved_base_int-1").run();
+  const run = new ReconciliationService(db).run({ trigger: "MANUAL", actor: { type: "HUMAN", id: "admin" }, operationId: "profile-bad-scan" });
+  assert.equal(run.findings.some((finding) => finding.code === "INVENTORY_RESERVED_MISMATCH" && finding.affectedId === "P-3000"), true);
   db.close();
 });
 

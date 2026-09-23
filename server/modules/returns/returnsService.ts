@@ -4,6 +4,7 @@ import { roundRatio } from "../finance/money.js";
 import { WarehouseExecutionService } from "../warehouse/warehouseExecutionService.js";
 import { ProfileCutInventoryService } from "../inventory/profileCutInventoryService.js";
 import { enqueueCanonicalChannelChanges } from "../channels/channelOutboundProjection.js";
+import { ReconciliationScopeGuard } from "../reconciliation/reconciliationGuard.js";
 
 export type ReturnReason = "CUSTOMER_CHANGED_MIND" | "WRONG_PRODUCT" | "DAMAGED" | "MISSING_PART" | "INCOMPATIBLE" | "OTHER";
 export type ReturnDisposition = "SELLABLE" | "DAMAGED" | "MISSING_NOT_RECEIVED";
@@ -61,7 +62,8 @@ const isMarketplace = (sourceChannel: string, accountType?: string | null) => (
 );
 
 export class ReturnsService {
-  constructor(private readonly db: Database.Database) {}
+  private readonly reconciliationGuard: ReconciliationScopeGuard;
+  constructor(private readonly db: Database.Database) { this.reconciliationGuard = new ReconciliationScopeGuard(db); }
 
   createReturnRequest(input: {
     saleId: string;
@@ -75,6 +77,8 @@ export class ReturnsService {
     const operationId = text(input.operationId, "operationId");
     const actor = actorInput(input.actor);
     const requestedAt = input.requestedAt ? instant(input.requestedAt, "requestedAt") : new Date().toISOString();
+    this.reconciliationGuard.assertAllowed("ORDER", saleId,
+      (message) => new ReturnsValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409));
     if (!Array.isArray(input.lines) || input.lines.length === 0) throw new ReturnsValidationError("RETURN_LINES_REQUIRED", "At least one return line is required.");
     const normalizedLines = input.lines.map((line, index) => {
       const financialLineId = text(line.financialLineId, `lines[${index}].financialLineId`);
@@ -209,6 +213,8 @@ export class ReturnsService {
     const operationId = text(input.operationId, "operationId");
     const actor = actorInput(input.actor);
     const receivedAt = input.receivedAt ? instant(input.receivedAt, "receivedAt") : new Date().toISOString();
+    this.reconciliationGuard.assertOrderForReturn(returnId,
+      (message) => new ReturnsValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409));
     if (!Array.isArray(input.lines) || input.lines.length === 0) throw new ReturnsValidationError("RETURN_RECEIPT_LINES_REQUIRED", "At least one inspected line is required.");
 
     return this.db.transaction(() => {
@@ -248,6 +254,9 @@ export class ReturnsService {
         const components = new Map<string, any[]>();
         for (const allocation of cogs) components.set(allocation.component_product_id, [...(components.get(allocation.component_product_id) || []), allocation]);
         for (const [productId, allocations] of components) {
+          const affectedSku = this.db.prepare("SELECT COALESCE(NULLIF(sku,''),id) FROM products WHERE id=?").pluck().get(productId) as string;
+          this.reconciliationGuard.assertAllowed("SKU", affectedSku,
+            (message) => new ReturnsValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409));
           const totalComponent = allocations.reduce((sum, row) => sum + Number(row.quantity_base_int), 0);
           if (totalComponent % Number(requestLine.quantity_base_int) !== 0) throw new ReturnsValidationError("RETURN_COMPONENT_ALLOCATION_INVALID", "Return component quantity cannot be inspected as integer units.", 409);
           let required = quantity * (totalComponent / Number(requestLine.quantity_base_int));
@@ -346,6 +355,8 @@ export class ReturnsService {
     const operationId = text(input.operationId, "operationId");
     const actor = actorInput(input.actor);
     const approvedAt = input.approvedAt ? instant(input.approvedAt, "approvedAt") : new Date().toISOString();
+    this.reconciliationGuard.assertOrderForReturn(returnId,
+      (message) => new ReturnsValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409));
     return this.db.transaction(() => {
       const request = this.db.prepare(`SELECT r.*,f.source_channel,s.cash_account_id,a.type AS original_account_type
         FROM return_requests r JOIN sale_financial_snapshots f ON f.id=r.financial_snapshot_id

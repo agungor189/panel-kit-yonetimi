@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { GeliverClient, GeliverError, type Offer, type Shipment, type Transaction } from "@geliver/sdk";
 import type Database from "better-sqlite3";
 import { ShipmentValidationError } from "./shipmentService.js";
+import { ReconciliationScopeGuard } from "../reconciliation/reconciliationGuard.js";
 
 type Actor = { id: string; name?: string | null };
 type GeliverCreateRequest = {
@@ -113,8 +114,17 @@ const errorInfo = (error: unknown) => {
 };
 
 export class GeliverFlowService {
+  private readonly reconciliationGuard: ReconciliationScopeGuard;
   constructor(private readonly db: Database.Database, private readonly transport: GeliverTransport,
-    private readonly config: { senderAddressId: string | null; sourceIdentifier: string | null }) {}
+    private readonly config: { senderAddressId: string | null; sourceIdentifier: string | null }) {
+    this.reconciliationGuard = new ReconciliationScopeGuard(db);
+  }
+
+  private assertShipmentAllowed(shipmentId: string) {
+    const error = (message: string) => new ShipmentValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409);
+    this.reconciliationGuard.assertOrderForShipment(shipmentId, error);
+    this.reconciliationGuard.assertShipmentSkus(shipmentId, error);
+  }
 
   contract() { return { ...VERIFIED_GELIVER_CONTRACT, enabled: this.transport.enabled, disabledReason: this.transport.disabledReason }; }
 
@@ -123,6 +133,7 @@ export class GeliverFlowService {
     const senderAddressID = required(this.config.senderAddressId, "GELIVER_SENDER_ADDRESS_ID", 300);
     const sourceIdentifier = required(this.config.sourceIdentifier, "GELIVER_SOURCE_IDENTIFIER", 500);
     const shipmentId = required(input.shipmentId, "shipmentId", 200);
+    this.assertShipmentAllowed(shipmentId);
     const operationId = required(input.operationId, "operationId", 200);
     const actorId = required(input.actor.id, "actor.id", 200);
     const requestedAt = input.requestedAt || at();
@@ -175,6 +186,7 @@ export class GeliverFlowService {
     const jobId = required(jobIdValue, "jobId", 200);
     const job = this.db.prepare("SELECT * FROM geliver_create_jobs WHERE id=?").get(jobId) as any;
     if (!job) throw new ShipmentValidationError("GELIVER_CREATE_JOB_NOT_FOUND", "Geliver create job was not found.", 404);
+    this.assertShipmentAllowed(job.shipment_id);
     const bound = this.db.prepare("SELECT provider_shipment_id FROM geliver_provider_shipments WHERE create_job_id=?").get(jobId) as any;
     if (bound) return this.refreshProviderShipment(bound.provider_shipment_id);
     if (job.state === "RECONCILE_REQUIRED" || job.state === "PROCESSING") return this.reconcileCreate(job);
@@ -254,6 +266,7 @@ export class GeliverFlowService {
 
   selectOffer(input: { shipmentId: string; offerId: string; operationId: string; actor: Actor; selectedAt?: string }) {
     const shipmentId = required(input.shipmentId, "shipmentId", 200);
+    this.assertShipmentAllowed(shipmentId);
     const offerId = required(input.offerId, "offerId", 300);
     const operationId = required(input.operationId, "operationId", 200);
     const actorId = required(input.actor.id, "actor.id", 200);
@@ -293,6 +306,7 @@ export class GeliverFlowService {
     const job = this.db.prepare(`SELECT j.*,s.offer_id,s.provider_shipment_id FROM geliver_accept_jobs j
       JOIN geliver_offer_selections s ON s.id=j.selection_id WHERE j.id=?`).get(jobId) as any;
     if (!job) throw new ShipmentValidationError("GELIVER_ACCEPT_JOB_NOT_FOUND", "Geliver accept job was not found.", 404);
+    this.assertShipmentAllowed(job.shipment_id);
     const fact = this.db.prepare("SELECT id FROM geliver_booking_facts WHERE accept_job_id=?").get(jobId) as any;
     if (fact) return this.viewProviderShipment(job.provider_shipment_id);
     if (job.state === "RECONCILE_REQUIRED" || job.state === "PROCESSING") {
@@ -460,8 +474,8 @@ export class GeliverFlowService {
     const offers = this.db.prepare(`SELECT o.* FROM geliver_offer_observations o JOIN
       (SELECT offer_id,MAX(observed_at) latest FROM geliver_offer_observations WHERE provider_shipment_id=? GROUP BY offer_id) x
       ON x.offer_id=o.offer_id AND x.latest=o.observed_at WHERE o.provider_shipment_id=? ORDER BY CAST(o.amount AS REAL),o.offer_id`).all(providerId, providerId) as any[];
-    const tracking = this.db.prepare("SELECT * FROM geliver_tracking_observations WHERE provider_shipment_id=? ORDER BY observed_at DESC,id DESC LIMIT 1").get(providerId) as any;
-    const label = this.db.prepare("SELECT * FROM geliver_label_observations WHERE provider_shipment_id=? ORDER BY observed_at DESC,id DESC LIMIT 1").get(providerId) as any;
+    const tracking = this.db.prepare("SELECT * FROM geliver_tracking_observations WHERE provider_shipment_id=? ORDER BY observed_at DESC,rowid DESC LIMIT 1").get(providerId) as any;
+    const label = this.db.prepare("SELECT * FROM geliver_label_observations WHERE provider_shipment_id=? ORDER BY observed_at DESC,rowid DESC LIMIT 1").get(providerId) as any;
     return { provider: "GELIVER", providerShipmentId: providerId, packageId: row.package_id, providerOrderNumber: row.provider_order_number,
       createState: row.create_state, bookingState: row.accept_state || null, providerTransactionId: row.provider_transaction_id || null,
       barcode: row.booking_barcode || row.barcode || null,

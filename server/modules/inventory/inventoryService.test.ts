@@ -11,6 +11,16 @@ import { CommandExecutor } from "../commands/commandFoundation.js";
 import { ProcurementService } from "../procurement/procurementService.js";
 import { InventoryService, InventoryValidationError } from "./inventoryService.js";
 
+const addReconciliationBlock = (db: Database.Database, type: "SKU"|"ORDER", id: string) => {
+  const key = `${type}-${id}`.padEnd(64, "0").slice(0, 64);
+  db.prepare("INSERT INTO reconciliation_runs (id,operation_id,trigger_type,actor_type,actor_id,status,started_at) VALUES (?,?,?,?,?,'COMPLETED',?)")
+    .run(`run-${id}`, `block-${id}`, "MANUAL", "HUMAN", "admin", "2026-09-23T00:00:00Z");
+  db.prepare(`INSERT INTO reconciliation_findings (id,identity_key,domain,code,severity,affected_type,affected_id,source_ref,expected_json,actual_json,status,repair_status,first_run_id,last_run_id,first_seen_at,last_seen_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,'OPEN','APPROVAL_REQUIRED',?,?,?,?)`).run(`finding-${id}`, key, "TEST", "TEST_BLOCK", "CRITICAL", type, id, id, "{}", "{}", `run-${id}`, `run-${id}`, "2026-09-23T00:00:00Z", "2026-09-23T00:00:00Z");
+  db.prepare("INSERT INTO reconciliation_blocks (id,finding_id,affected_type,affected_id,status,reason,created_at) VALUES (?,?,?,?,'ACTIVE','TEST_BLOCK',?)")
+    .run(`scope-block-${id}`, `finding-${id}`, type, id, "2026-09-23T00:00:00Z");
+};
+
 const actor = { human: { id: "inventory-owner", name: "Inventory Owner" } };
 
 const execute = (
@@ -127,6 +137,24 @@ test("reservation changes available but not on-hand, rejects shortage atomically
   execute(db, "release-order-1", "inventory.reservation.release.v1", { reservationId: "reservation-1" }, () =>
     inventory.releaseReservation({ reservationId: "reservation-1", reason: "ORDER_CANCELLED", operationId: "release-order-1" }));
   assert.deepEqual(inventory.getProductAvailability("part"), { productId: "part", baseUomCode: "piece", onHandBaseInt: 5, reservedBaseInt: 0, availableBaseInt: 5 });
+  db.close();
+});
+
+test("SKU reconciliation block gates only that SKU while an unrelated SKU still reserves", () => {
+  const { db, procurement, inventory } = setup();
+  const catalog = new CatalogService(db);
+  catalog.createProduct({ id: "other", sku: "OTHER", title: "Other", catalog_type: "product", base_uom_code: "piece" });
+  for (const [id, productId] of [["blocked", "part"], ["other", "other"]] as const) {
+    procurement.createPurchase({ id: `purchase-${id}`, supplierId: "supplier", acquisitionCostVatPolicy: "VAT_EXCLUDED_FROM_INVENTORY_COST",
+      lines: [{ id: `line-${id}`, productId, quantity: "2", quoteBasis: "piece", supplierUnitPriceMinor: 100, currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 0 }] });
+    const lot = procurement.finalizeAcquisitionCosts(`purchase-${id}`, { allocations: [] }).lots[0];
+    inventory.receiveCostedLot({ receiptId: `receipt-${id}`, costSnapshotId: lot.id, receivedAt: "2026-09-23T08:00:00Z",
+      location: { id: `pick-${id}`, kind: "PICKING" }, operationId: `receive-${id}` });
+  }
+  addReconciliationBlock(db, "SKU", "PART");
+  assert.throws(() => inventory.reserveOrder({ reservationId: "blocked-reservation", orderId: "blocked-order", lines: [{ productId: "part", quantityBaseInt: 1 }], operationId: "blocked-reserve" }),
+    (error: any) => error.code === "RECONCILIATION_SCOPE_BLOCKED");
+  assert.equal(inventory.reserveOrder({ reservationId: "other-reservation", orderId: "other-order", lines: [{ productId: "other", quantityBaseInt: 1 }], operationId: "other-reserve" }).status, "ACTIVE");
   db.close();
 });
 

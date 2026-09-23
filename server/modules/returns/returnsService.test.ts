@@ -14,6 +14,29 @@ import { createReturnsV1Router } from "../../routes/returnsV1Routes.js";
 
 const actor = { id: "return-owner", name: "Return Owner" };
 
+const addOrderBlock = (db: Database.Database, orderId: string) => {
+  const key = `order-${orderId}`.padEnd(64, "0").slice(0, 64);
+  db.prepare("INSERT INTO reconciliation_runs (id,operation_id,trigger_type,actor_type,actor_id,status,started_at) VALUES (?,?,?,?,?,'COMPLETED',?)")
+    .run(`block-run-${orderId}`, `block-op-${orderId}`, "MANUAL", "HUMAN", "admin", "2026-09-23T00:00:00Z");
+  db.prepare(`INSERT INTO reconciliation_findings (id,identity_key,domain,code,severity,affected_type,affected_id,source_ref,expected_json,actual_json,status,repair_status,first_run_id,last_run_id,first_seen_at,last_seen_at)
+    VALUES (?,?,?,?,?,'ORDER',?,?,?,?,'OPEN','APPROVAL_REQUIRED',?,?,?,?)`).run(`block-finding-${orderId}`, key, "TEST", "TEST_ORDER_BLOCK", "CRITICAL", orderId, orderId, "{}", "{}", `block-run-${orderId}`, `block-run-${orderId}`, "2026-09-23T00:00:00Z", "2026-09-23T00:00:00Z");
+  db.prepare("INSERT INTO reconciliation_blocks (id,finding_id,affected_type,affected_id,status,reason,created_at) VALUES (?,?, 'ORDER',?,'ACTIVE','TEST_ORDER_BLOCK',?)")
+    .run(`block-${orderId}`, `block-finding-${orderId}`, orderId, "2026-09-23T00:00:00Z");
+};
+
+test("ORDER reconciliation block stops the affected return flow while an unrelated block does not", () => {
+  const blocked = setup();
+  addOrderBlock(blocked.db, "sale");
+  assert.throws(() => blocked.service.createReturnRequest({ saleId: "sale", lines: [{ financialLineId: blocked.financialLineId, quantityBaseInt: 1, reasonCode: "DAMAGED" }], operationId: "blocked-return", actor }),
+    (error: any) => error.code === "RECONCILIATION_SCOPE_BLOCKED");
+  blocked.db.close();
+
+  const unrelated = setup();
+  addOrderBlock(unrelated.db, "some-other-order");
+  assert.equal(unrelated.service.createReturnRequest({ saleId: "sale", lines: [{ financialLineId: unrelated.financialLineId, quantityBaseInt: 1, reasonCode: "DAMAGED" }], operationId: "allowed-return", actor }).saleId, "sale");
+  unrelated.db.close();
+});
+
 const addLocation = (db: Database.Database, code: string, role: "PICKING" | "QUARANTINE") => {
   const rack = role === "PICKING" ? "S" : "Q";
   db.prepare("INSERT OR IGNORE INTO warehouse_topologies (id,name,code_template,config_json,config_hash,active) VALUES ('returns','Returns','{rack}','{}','returns',1)").run();

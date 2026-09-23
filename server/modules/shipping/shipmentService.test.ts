@@ -17,8 +17,19 @@ import {
 } from "./shipmentService.js";
 import { GeliverFlowService, type GeliverTransport } from "./geliverFlowService.js";
 import type { Shipment, Transaction } from "@geliver/sdk";
+import { ReconciliationService } from "../reconciliation/reconciliationService.js";
 
 const actor = { id: "shipping-operator", name: "Shipping Operator" };
+
+const addShipmentOrderBlock = (db: Database.Database, orderId: string) => {
+  const key = `shipment-${orderId}`.padEnd(64, "0").slice(0, 64);
+  db.prepare("INSERT INTO reconciliation_runs (id,operation_id,trigger_type,actor_type,actor_id,status,started_at) VALUES (?,?,?,?,?,'COMPLETED',?)")
+    .run(`shipment-block-run-${orderId}`, `shipment-block-op-${orderId}`, "MANUAL", "HUMAN", "admin", "2026-09-23T00:00:00Z");
+  db.prepare(`INSERT INTO reconciliation_findings (id,identity_key,domain,code,severity,affected_type,affected_id,source_ref,expected_json,actual_json,status,repair_status,first_run_id,last_run_id,first_seen_at,last_seen_at)
+    VALUES (?,?,?,?,?,'ORDER',?,?,?,?,'OPEN','APPROVAL_REQUIRED',?,?,?,?)`).run(`shipment-block-finding-${orderId}`, key, "TEST", "TEST_ORDER_BLOCK", "CRITICAL", orderId, orderId, "{}", "{}", `shipment-block-run-${orderId}`, `shipment-block-run-${orderId}`, "2026-09-23T00:00:00Z", "2026-09-23T00:00:00Z");
+  db.prepare("INSERT INTO reconciliation_blocks (id,finding_id,affected_type,affected_id,status,reason,created_at) VALUES (?,?, 'ORDER',?,'ACTIVE','TEST_ORDER_BLOCK',?)")
+    .run(`shipment-block-${orderId}`, `shipment-block-finding-${orderId}`, orderId, "2026-09-23T00:00:00Z");
+};
 
 class VerifiedFakeGeliverTransport implements CarrierBookingTransport {
   readonly provider = "GELIVER" as const;
@@ -410,6 +421,34 @@ test("verified live offers are selected by the operator; booking accepts provide
   await geliver.refreshShipment(shipment.id);
   assert.equal(shipping.getShipment(shipment.id).packages[0].booking.trackingNumber, "TRACK-LATER");
   assert.equal(transport.acceptCalls, 1);
+  db.close();
+});
+
+test("V83 live Geliver dispatch and later tracking projection reconcile cleanly", async () => {
+  const { db, shipping, shipment, transport, geliver } = prepareLiveGeliver();
+  const [job] = geliver.prepareCreateJobs({ shipmentId: shipment.id, recipient, operationId: "reconcile-create", actor });
+  const provider = await geliver.processCreateJob(job.id);
+  const accept = geliver.selectOffer({ shipmentId: shipment.id, offerId: provider.offers[0].id, operationId: "reconcile-select", actor });
+  await geliver.processAcceptJob(accept.id);
+  shipping.confirmHandoff({ shipmentId: shipment.id, handedOffAt: "2026-09-23T12:00:00.000Z", handoffEvidence: { receipt: "carrier" }, operationId: "reconcile-handoff", actor });
+  transport.publishTracking(provider.providerShipmentId);
+  await geliver.refreshShipment(shipment.id);
+  shipping.publishV212TrackingRefresh(shipment.id, "2026-09-23T12:30:00.000Z");
+  const run = new ReconciliationService(db).run({ trigger: "MANUAL", actor: { type: "HUMAN", id: "admin" }, operationId: "geliver-v83-scan" });
+  assert.equal(run.findings.find((finding) => finding.code === "CHANNEL_TRACKING_PROJECTION_MISMATCH"), undefined);
+  db.close();
+});
+
+test("ORDER reconciliation block prevents the affected physical handoff", async () => {
+  const { db, shipping, shipment, geliver } = prepareLiveGeliver();
+  const [job] = geliver.prepareCreateJobs({ shipmentId: shipment.id, recipient, operationId: "blocked-create", actor });
+  const provider = await geliver.processCreateJob(job.id);
+  const accept = geliver.selectOffer({ shipmentId: shipment.id, offerId: provider.offers[0].id, operationId: "blocked-select", actor });
+  await geliver.processAcceptJob(accept.id);
+  addShipmentOrderBlock(db, "sale");
+  assert.throws(() => shipping.confirmHandoff({ shipmentId: shipment.id, handedOffAt: "2026-09-23T12:00:00Z", handoffEvidence: { receipt: "carrier" }, operationId: "blocked-handoff", actor }),
+    (error: any) => error.code === "RECONCILIATION_SCOPE_BLOCKED");
+  assert.equal(shipping.getShipment(shipment.id).state, "LABEL_READY");
   db.close();
 });
 

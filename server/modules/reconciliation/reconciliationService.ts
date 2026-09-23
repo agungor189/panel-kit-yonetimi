@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { canonicalPayloadHash } from "../commands/commandFoundation.js";
+import { ReconciliationScopeGuard } from "./reconciliationGuard.js";
 
 export type FindingSeverity = "INFO" | "WARN" | "CRITICAL";
 export type FindingScope = "SKU" | "ORDER" | "SYSTEM";
@@ -56,7 +57,8 @@ export class ReconciliationService {
     this.db.prepare(`INSERT INTO reconciliation_runs (id,operation_id,trigger_type,actor_type,actor_id,status,started_at)
       VALUES (?,?,?,?,?,'RUNNING',?)`).run(runId, operationId, input.trigger, input.actor.type, actorId, startedAt);
     try {
-      const drafts = this.collect();
+      const collected = this.collect();
+      const drafts = [...new Map(collected.map((draft) => [identity(draft), draft])).values()];
       const seen = new Set<string>(); let autoRepairCount = 0;
       this.db.transaction(() => {
         for (const draft of drafts) {
@@ -121,7 +123,11 @@ export class ReconciliationService {
       COALESCE((SELECT SUM(e.quantity_delta_base_int) FROM inventory_ledger_events e WHERE e.lot_id=l.id),0) ledger_total,
       COALESCE((SELECT SUM(b.quantity_base_int) FROM inventory_lot_location_balances b WHERE b.lot_id=l.id AND b.active=1),0) location_total,
       COALESCE((SELECT SUM(a.quantity_base_int) FROM inventory_reservation_allocations a JOIN inventory_reservations r ON r.id=a.reservation_id
-        WHERE a.lot_id=l.id AND r.status IN ('ACTIVE','PICKED','PACKED','STOCK_DISCREPANCY')),0) allocated_total,
+        WHERE a.lot_id=l.id AND r.status IN ('ACTIVE','PICKED','PACKED','STOCK_DISCREPANCY')),0)
+        + COALESCE((SELECT SUM(pr.kerf_total_mm) FROM profile_piece_reservations pr
+          JOIN profile_inventory_pieces pi ON pi.id=pr.profile_piece_id
+          JOIN inventory_reservations r ON r.id=pr.reservation_id
+          WHERE pi.inventory_lot_id=l.id AND pr.status='ACTIVE' AND r.status IN ('ACTIVE','PICKED','PACKED','STOCK_DISCREPANCY')),0) allocated_total,
       (SELECT COUNT(*) FROM warehouse_execution_packages w WHERE w.inventory_lot_id=l.id AND w.disposition='ON_HAND') package_count,
       COALESCE((SELECT SUM(w.remaining_quantity_base_int) FROM warehouse_execution_packages w WHERE w.inventory_lot_id=l.id AND w.disposition='ON_HAND'),0) package_total
       FROM inventory_lots l JOIN products p ON p.id=l.product_id ORDER BY l.id`).all() as any[];
@@ -131,6 +137,20 @@ export class ReconciliationService {
       if (Number(lot.location_total) !== Number(lot.on_hand_base_int)) result.push({ domain:"INVENTORY",code:"INVENTORY_LOCATION_MISMATCH",severity:"CRITICAL",affectedType:"SKU",affectedId:scope,sourceRef:lot.id,expected:{onHandBaseInt:Number(lot.on_hand_base_int)},actual:{locationBaseInt:Number(lot.location_total)} });
       if (Number(lot.package_count) > 0 && Number(lot.package_total) !== Number(lot.location_total)) result.push({ domain:"INVENTORY",code:"INVENTORY_PACKAGE_MISMATCH",severity:"CRITICAL",affectedType:"SKU",affectedId:scope,sourceRef:lot.id,expected:{locationBaseInt:Number(lot.location_total)},actual:{packageBaseInt:Number(lot.package_total)} });
       if (Number(lot.reserved_base_int) > Number(lot.on_hand_base_int) || Number(lot.reserved_base_int) !== Number(lot.allocated_total)) result.push({ domain:"INVENTORY",code:"INVENTORY_RESERVED_MISMATCH",severity:"CRITICAL",affectedType:"SKU",affectedId:scope,sourceRef:lot.id,expected:{reservedBaseInt:Number(lot.allocated_total),maxReservedBaseInt:Number(lot.on_hand_base_int)},actual:{reservedBaseInt:Number(lot.reserved_base_int),availableBaseInt:Number(lot.on_hand_base_int)-Number(lot.reserved_base_int)} });
+    }
+    for (const row of this.db.prepare(`SELECT pr.id,pr.cut_length_total_mm,pr.kerf_total_mm,pr.consumed_length_mm,
+      COALESCE(SUM(c.length_mm),0) cut_total,COALESCE(SUM(c.kerf_mm),0) kerf_total,p.sku,pr.product_id
+      FROM profile_piece_reservations pr
+      JOIN products p ON p.id=pr.product_id
+      LEFT JOIN profile_piece_reservation_cuts c ON c.profile_piece_reservation_id=pr.id
+      GROUP BY pr.id ORDER BY pr.id`).all() as any[]) {
+      const valid = Number(row.cut_total) === Number(row.cut_length_total_mm)
+        && Number(row.kerf_total) === Number(row.kerf_total_mm)
+        && Number(row.consumed_length_mm) === Number(row.cut_length_total_mm) + Number(row.kerf_total_mm);
+      if (!valid) result.push({ domain:"INVENTORY",code:"PROFILE_CUT_RESERVATION_MISMATCH",severity:"CRITICAL",affectedType:"SKU",
+        affectedId:row.sku || row.product_id,sourceRef:row.id,
+        expected:{cutLengthTotalMm:Number(row.cut_length_total_mm),kerfTotalMm:Number(row.kerf_total_mm),consumedLengthMm:Number(row.cut_length_total_mm)+Number(row.kerf_total_mm)},
+        actual:{cutLengthTotalMm:Number(row.cut_total),kerfTotalMm:Number(row.kerf_total),consumedLengthMm:Number(row.consumed_length_mm)} });
     }
     const products = this.db.prepare(`SELECT p.id,p.sku,p.central_stock,COALESCE(SUM(l.on_hand_base_int),0) canonical
       FROM products p LEFT JOIN inventory_lots l ON l.product_id=p.id GROUP BY p.id ORDER BY p.id`).all() as any[];
@@ -179,10 +199,10 @@ export class ReconciliationService {
 
   private returnChecks(): Draft[] {
     const result: Draft[]=[];
-    for (const row of this.db.prepare(`SELECT r.id,r.return_id,fs.sale_id,r.sale_line_id,r.quantity_base_int,f.quantity_base_int original_quantity,
-      (SELECT COALESCE(SUM(r2.quantity_base_int),0) FROM return_request_lines r2 JOIN return_requests rr ON rr.id=r2.return_id WHERE r2.sale_line_id=r.sale_line_id) returned_total
+    for (const row of this.db.prepare(`SELECT fs.sale_id,r.sale_line_id,MAX(f.quantity_base_int) original_quantity,SUM(r.quantity_base_int) returned_total
       FROM return_request_lines r JOIN sale_financial_lines f ON f.sale_line_id=r.sale_line_id
-      JOIN sale_financial_snapshots fs ON fs.id=f.financial_snapshot_id ORDER BY r.id`).all() as any[]) {
+      JOIN sale_financial_snapshots fs ON fs.id=f.financial_snapshot_id
+      GROUP BY fs.sale_id,r.sale_line_id ORDER BY fs.sale_id,r.sale_line_id`).all() as any[]) {
       if(Number(row.returned_total)>Number(row.original_quantity)) result.push({domain:"RETURNS",code:"RETURN_QUANTITY_BOUND_EXCEEDED",severity:"CRITICAL",affectedType:"ORDER",affectedId:row.sale_id,sourceRef:row.sale_line_id,expected:{max:Number(row.original_quantity)},actual:{returned:Number(row.returned_total)}});
     }
     for(const row of this.db.prepare(`SELECT r.sale_id,r.id,s.gross_amount_minor,(SELECT COALESCE(SUM(p.amount_minor),0) FROM refund_payments p WHERE p.return_id=r.id) refunded FROM return_requests r JOIN sale_financial_snapshots s ON s.id=r.financial_snapshot_id`).all() as any[]) {
@@ -202,7 +222,7 @@ export class ReconciliationService {
       LEFT JOIN channel_stock_buffers b ON b.account_id=j.account_id AND b.product_id=j.product_id
       WHERE j.job_kind IN ('STOCK','PRICE') AND j.state IN ('PENDING','RETRY','SUCCEEDED','BLOCKED')
         AND NOT EXISTS (SELECT 1 FROM channel_outbound_jobs newer WHERE newer.account_id=j.account_id AND newer.product_id=j.product_id AND newer.job_kind=j.job_kind
-          AND (datetime(newer.created_at)>datetime(j.created_at) OR (newer.created_at=j.created_at AND newer.id>j.id))) ORDER BY j.id`).all() as any[]) {
+          AND newer.rowid>j.rowid) ORDER BY j.id`).all() as any[]) {
       let expected:any=null;
       if(row.job_kind==="STOCK") expected={productId:row.product_id,quantityBaseInt:Math.max(0,Number(row.available)-Number(row.stock_buffer)),canonicalAvailableBaseInt:Number(row.available),channelStockBufferBaseInt:Number(row.stock_buffer)};
       else {
@@ -215,14 +235,21 @@ export class ReconciliationService {
       let actual:any=null; try{actual=JSON.parse(row.payload_json);}catch{}
       if(digest(String(row.payload_json))!==row.payload_hash||expected&&stableJson(actual)!==stableJson(expected)) result.push({domain:"CHANNELS",code:"CHANNEL_OUTBOUND_PROJECTION_MISMATCH",severity:"WARN",affectedType:"SKU",affectedId:row.sku||row.product_id,sourceRef:row.id,expected:{payload:expected,payloadHash:digest(String(row.payload_json))},actual:{payload:actual,payloadHash:row.payload_hash}});
     }
-    for(const row of this.db.prepare(`SELECT j.*,s.order_id,s.state shipment_state,s.package_count,cs.carrier_code,cs.service_code
+    for(const row of this.db.prepare(`SELECT j.*,s.order_id,s.state shipment_state,s.package_count,
+      COALESCE((SELECT gs.provider_code FROM geliver_offer_selections gs WHERE gs.shipment_id=s.id ORDER BY gs.selected_at,gs.package_id LIMIT 1),cs.carrier_code) carrier_code,
+      COALESCE((SELECT gs.provider_service_code FROM geliver_offer_selections gs WHERE gs.shipment_id=s.id ORDER BY gs.selected_at,gs.package_id LIMIT 1),cs.service_code) service_code
       FROM channel_shipment_outbound_jobs j JOIN shipment_preparations s ON s.id=j.shipment_id
       LEFT JOIN shipment_carrier_selections cs ON cs.id=s.carrier_selection_id
       WHERE j.state IN ('PENDING','RETRY','SUCCEEDED','BLOCKED') AND NOT EXISTS (SELECT 1 FROM channel_shipment_outbound_jobs newer
         WHERE newer.account_id=j.account_id AND newer.shipment_id=j.shipment_id AND newer.job_kind=j.job_kind
-        AND (datetime(newer.created_at)>datetime(j.created_at) OR (newer.created_at=j.created_at AND newer.id>j.id))) ORDER BY j.id`).all() as any[]) {
-      const packages=(this.db.prepare(`SELECT p.package_number,b.tracking_number,b.tracking_url FROM shipment_packages p
-        LEFT JOIN shipment_provider_bookings b ON b.package_id=p.id WHERE p.shipment_id=? ORDER BY p.package_number`).all(row.shipment_id) as any[])
+        AND newer.rowid>j.rowid) ORDER BY j.id`).all() as any[]) {
+      const packages=(this.db.prepare(`SELECT p.package_number,
+        CASE WHEN gb.id IS NOT NULL THEN (SELECT gt.tracking_number FROM geliver_tracking_observations gt WHERE gt.provider_shipment_id=gb.provider_shipment_id ORDER BY gt.observed_at DESC,gt.rowid DESC LIMIT 1) ELSE b.tracking_number END tracking_number,
+        CASE WHEN gb.id IS NOT NULL THEN (SELECT gt.tracking_url FROM geliver_tracking_observations gt WHERE gt.provider_shipment_id=gb.provider_shipment_id ORDER BY gt.observed_at DESC,gt.rowid DESC LIMIT 1) ELSE b.tracking_url END tracking_url
+        FROM shipment_packages p
+        LEFT JOIN geliver_booking_facts gb ON gb.package_id=p.id
+        LEFT JOIN shipment_provider_bookings b ON b.package_id=p.id AND gb.id IS NULL
+        WHERE p.shipment_id=? ORDER BY p.package_number`).all(row.shipment_id) as any[])
         .map((pack)=>({packageNumber:Number(pack.package_number),trackingNumber:pack.tracking_number,trackingUrl:pack.tracking_url}));
       const expected={contract:"dsdst.channel-shipment-projection.v1",shipmentId:row.shipment_id,orderId:row.order_id,status:row.shipment_state,carrier:row.carrier_code,service:row.service_code,packageCount:Number(row.package_count),packages};
       let actual:any=null; try{actual=JSON.parse(row.payload_json);}catch{}
@@ -271,10 +298,11 @@ export class ReconciliationService {
     else this.db.prepare(`INSERT INTO reconciliation_blocks (id,finding_id,affected_type,affected_id,status,reason,created_at) VALUES (?,?,?,?,'ACTIVE',?,?)`).run(randomUUID(),findingId,draft.affectedType,draft.affectedId,draft.code,at);
   }
 
-  isBlocked(type:"SKU"|"ORDER",id:string){return Boolean(this.db.prepare("SELECT 1 FROM reconciliation_blocks WHERE affected_type=? AND affected_id=? AND status='ACTIVE' LIMIT 1").get(type,id));}
-  assertNotBlocked(type:"SKU"|"ORDER",id:string){if(this.isBlocked(type,id)) throw new ReconciliationError("RECONCILIATION_SCOPE_BLOCKED",`${type} ${id} has an active critical reconciliation finding.`,409);}
+  isBlocked(type:"SKU"|"ORDER",id:string){return new ReconciliationScopeGuard(this.db).isBlocked(type,id);}
+  assertNotBlocked(type:"SKU"|"ORDER",id:string){new ReconciliationScopeGuard(this.db).assertAllowed(type,id,(message)=>new ReconciliationError("RECONCILIATION_SCOPE_BLOCKED",message,409));}
 
-  verifyFinding(input:{findingId:string;reason:string;actorId:string;operationId:string}){
+  verifyFinding(input:{findingId:string;reason:string;actorId:string;actorIsAdmin:boolean;operationId:string}){
+    if(!input.actorIsAdmin) throw new ReconciliationError("REPAIR_ADMIN_REQUIRED","Explicit reconciliation verification is admin-only.",403);
     const finding=this.requireFinding(input.findingId); const at=now();
     this.db.transaction(()=>{this.db.prepare("UPDATE reconciliation_findings SET status='VERIFIED',resolved_at=?,verified_by_actor_id=?,verification_reason=? WHERE id=?").run(at,required(input.actorId,"actorId"),required(input.reason,"reason"),finding.id);
       this.db.prepare("UPDATE reconciliation_blocks SET status='CLEARED',cleared_at=?,cleared_by_actor_id=?,clear_reason='ADMIN_VERIFICATION' WHERE finding_id=? AND status='ACTIVE'").run(at,input.actorId,finding.id);
@@ -322,6 +350,6 @@ export class ReconciliationService {
   private getRun(id:string){const run=this.db.prepare("SELECT * FROM reconciliation_runs WHERE id=?").get(id) as any;if(!run)throw new ReconciliationError("RUN_NOT_FOUND","Reconciliation run was not found.",404);return{...run,findings:(this.db.prepare("SELECT * FROM reconciliation_findings WHERE last_run_id=? ORDER BY severity,affected_id").all(id) as any[]).map((row)=>this.view(row))};}
   private requireFinding(id:string){const row=this.db.prepare("SELECT * FROM reconciliation_findings WHERE id=?").get(required(id,"findingId")) as any;if(!row)throw new ReconciliationError("FINDING_NOT_FOUND","Reconciliation finding was not found.",404);return row;}
   private getFinding(id:string){return this.view(this.requireFinding(id));}
-  private view(row:any){const proposal=this.db.prepare("SELECT id,status,command_type,reason,proposed_by_actor_id,proposed_at,reviewed_by_actor_id,review_reason,reviewed_at FROM reconciliation_repair_proposals WHERE finding_id=? ORDER BY datetime(proposed_at) DESC,id DESC LIMIT 1").get(row.id)||null;return{id:row.id,identityKey:row.identity_key,domain:row.domain,code:row.code,severity:row.severity,affectedType:row.affected_type,affectedId:row.affected_id,sourceRef:row.source_ref,expected:JSON.parse(row.expected_json),actual:JSON.parse(row.actual_json),status:row.status,repairStatus:row.repair_status,repairProposal:proposal,occurrences:Number(row.occurrences),firstSeenAt:row.first_seen_at,lastSeenAt:row.last_seen_at,resolvedAt:row.resolved_at};}
+  private view(row:any){const proposal=this.db.prepare("SELECT id,status,command_type,reason,proposed_by_actor_id,proposed_at,reviewed_by_actor_id,review_reason,reviewed_at,applied_operation_id,applied_at,before_json,after_json FROM reconciliation_repair_proposals WHERE finding_id=? ORDER BY datetime(proposed_at) DESC,id DESC LIMIT 1").get(row.id) as any;return{id:row.id,identityKey:row.identity_key,domain:row.domain,code:row.code,severity:row.severity,affectedType:row.affected_type,affectedId:row.affected_id,sourceRef:row.source_ref,expected:JSON.parse(row.expected_json),actual:JSON.parse(row.actual_json),status:row.status,repairStatus:row.repair_status,repairProposal:proposal?{...proposal,executable:proposal.command_type==="inventory.release-reservation.v1",before:proposal.before_json?JSON.parse(proposal.before_json):null,after:proposal.after_json?JSON.parse(proposal.after_json):null}:null,occurrences:Number(row.occurrences),firstSeenAt:row.first_seen_at,lastSeenAt:row.last_seen_at,resolvedAt:row.resolved_at};}
   private history(input:{findingId:string;runId?:string;eventType:string;before:unknown;after:unknown;reason:string;actorType:"SYSTEM"|"HUMAN";actorId:string;operationId:string}){this.db.prepare(`INSERT INTO reconciliation_history (id,finding_id,run_id,event_type,before_json,after_json,reason,actor_type,actor_id,operation_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(randomUUID(),input.findingId,input.runId||null,input.eventType,input.before===undefined?null:json(input.before),input.after===undefined?null:json(input.after),required(input.reason,"reason"),input.actorType,required(input.actorId,"actorId"),required(input.operationId,"operationId"),now());}
 }
