@@ -29,6 +29,7 @@ import { createProcurementV1Router } from "./server/routes/procurementV1Routes.j
 import { createInventoryV1Router } from "./server/routes/inventoryV1Routes.js";
 import { createKitPublicationV1Router } from "./server/routes/kitPublicationV1Routes.js";
 import { createReturnsV1Router } from "./server/routes/returnsV1Routes.js";
+import { createShippingV1Router } from "./server/routes/shippingV1Routes.js";
 import { rejectLegacyCatalogMutation } from "./server/modules/catalog/legacyCatalogGuard.js";
 import { CommandExecutor, CommandFoundationError } from "./server/modules/commands/commandFoundation.js";
 import { InventoryService, InventoryValidationError } from "./server/modules/inventory/inventoryService.js";
@@ -5620,6 +5621,16 @@ async function startServer() {
       authorizeRead: auth.requireCapability("panel:read"),
       authorizeCreate: auth.requireCapability("returns:create"),
       authorizeRefund: auth.requireCapability("returns:approve_refund"),
+    }),
+  );
+  app.use(
+    "/api/shipping/v1",
+    createShippingV1Router({
+      db,
+      authorizeRead: auth.requireCapability("panel:read"),
+      authorizePrepare: auth.requireCapability("warehouse:pick_orders"),
+      authorizeManage: auth.requireCapability("shipping:manage"),
+      authorizeDispatch: auth.requireCapability("shipping:dispatch"),
     }),
   );
   mountWarehouseModule({

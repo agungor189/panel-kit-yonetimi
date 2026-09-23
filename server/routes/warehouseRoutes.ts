@@ -7,8 +7,13 @@ import { CommandExecutor, CommandFoundationError } from "../modules/commands/com
 import { CatalogService } from "../modules/catalog/catalogService.js";
 import { UOM_DEFINITIONS, UOM_REGISTRY_VERSION } from "../modules/catalog/uom.js";
 import { InventoryService, InventoryValidationError } from "../modules/inventory/inventoryService.js";
-import { SalesFinancialService, SalesFinancialValidationError } from "../modules/sales/salesFinancialService.js";
 import { ReturnsService, ReturnsValidationError } from "../modules/returns/returnsService.js";
+import {
+  FailClosedGeliverTransport,
+  GELIVER_TRANSPORT_CONTRACT,
+  ShipmentService,
+  ShipmentValidationError,
+} from "../modules/shipping/shipmentService.js";
 import { WarehouseExecutionError, WarehouseExecutionService, type WarehouseTopologyInput } from "../modules/warehouse/warehouseExecutionService.js";
 
 type WarehouseUser = WarehousePicker & {
@@ -67,7 +72,8 @@ export function createWarehouseRouter({
   const commandExecutor = new CommandExecutor(db);
   const catalogService = new CatalogService(db);
   const inventoryService = new InventoryService(db);
-  const salesFinancials = new SalesFinancialService(db);
+  const shipmentService = new ShipmentService(db);
+  const failClosedGeliverTransport = new FailClosedGeliverTransport();
   const returnsService = new ReturnsService(db);
   const executionService = new WarehouseExecutionService(db);
 
@@ -218,7 +224,7 @@ export function createWarehouseRouter({
     if (error instanceof InventoryValidationError) {
       return errorResponse(res, error.statusCode, error.code, error.message);
     }
-    if (error instanceof SalesFinancialValidationError) {
+    if (error instanceof ShipmentValidationError) {
       return errorResponse(res, error.statusCode, error.code, error.message);
     }
     if (error instanceof ReturnsValidationError) {
@@ -491,11 +497,16 @@ export function createWarehouseRouter({
           const payload = { reservationId: req.params.id, at: req.body?.at ?? null };
           const commandType = `inventory.reservation.${transition}.v1`;
           const outcome = commandExecutor.execute(commandRequest(req, res, commandType, "warehouse:pick_orders", payload), (context) => {
-            const data = transition === "pick"
-              ? inventoryService.markPicked({ reservationId: req.params.id, pickedAt: req.body?.at, operationId: operationIdFromRequest(req) })
-              : inventoryService.markPacked({ reservationId: req.params.id, packedAt: req.body?.at, operationId: operationIdFromRequest(req) });
-            context.addOutbox({ topic: "inventory", eventType: `inventory.reservation.${transition}ed.v1`, aggregateType: "reservation", aggregateId: data.id, payload: { reservation_id: data.id } });
-            return { statusCode: 200, body: { success: true, contract: "dsdst.inventory-reservation.v1", data } };
+            if (transition === "pick") {
+              const data = inventoryService.markPicked({ reservationId: req.params.id, pickedAt: req.body?.at, operationId: operationIdFromRequest(req) });
+              context.addOutbox({ topic: "inventory", eventType: "inventory.reservation.picked.v1", aggregateType: "reservation", aggregateId: data.id, payload: { reservation_id: data.id } });
+              return { statusCode: 200, body: { success: true, contract: "dsdst.inventory-reservation.v1", data } };
+            }
+            const data = shipmentService.packAndPrepare({ reservationId: req.params.id, packedAt: req.body?.at,
+              operationId: operationIdFromRequest(req), actor: { id: actor(res).id, name: actor(res).username } });
+            context.addOutbox({ topic: "shipping", eventType: "shipping.preparation.created.v1", aggregateType: "shipment",
+              aggregateId: data.shipment.id, payload: { reservation_id: data.reservation.id, shipment_id: data.shipment.id } });
+            return { statusCode: 200, body: { success: true, contract: "dsdst.shipment.v1", data } };
           });
           return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
         } catch (error) { return handleServiceError(res, error); }
@@ -504,21 +515,107 @@ export function createWarehouseRouter({
 
   router.post("/inventory/reservations/:id/dispatch", authenticate("write:warehouse_status"), requireWarehouseUser,
     requireWarehousePermission("shipping:dispatch"), (req, res) => {
+      return errorResponse(res, 409, "PHYSICAL_HANDOFF_REQUIRED",
+        "Inventory dispatch is closed; confirm physical carrier handoff through /shipping/shipments/:id/handoff.");
+    });
+
+  router.get("/shipping/provider-contracts/geliver", authenticate("read:warehouse_orders"), requireWarehouseUser,
+    requireWarehousePermission("warehouse:pick_orders"), (_req, res) =>
+      res.json({ success: true, contract: "dsdst.carrier-provider-contract.v1", data: GELIVER_TRANSPORT_CONTRACT }));
+
+  router.get("/shipping/shipments/:id", authenticate("read:warehouse_orders"), requireWarehouseUser,
+    requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
       try {
-        const payload = { reservationId: req.params.id, shipmentId: req.body?.shipmentId ?? null, dispatchedAt: req.body?.dispatchedAt ?? null };
-        const outcome = commandExecutor.execute(commandRequest(req, res, "inventory.reservation.dispatch.v1", "shipping:dispatch", payload), (context) => {
-          const data = inventoryService.dispatchReservation({ ...payload, operationId: operationIdFromRequest(req) } as any);
-          const financial = salesFinancials.finalizeDispatch({
-            reservationId: req.params.id,
-            operationId: operationIdFromRequest(req),
-            actor: { id: actor(res).id, name: actor(res).username },
-            finalizedAt: req.body?.dispatchedAt,
-          });
-          context.addOutbox({ topic: "inventory", eventType: "inventory.shipment.dispatched.v1", aggregateType: "reservation", aggregateId: data.id, payload: { reservation_id: data.id, shipment_id: data.shipmentId } });
-          if (financial && financial.state !== "LEGACY_UNSNAPSHOTTED") {
-            context.addOutbox({ topic: "sales-finance", eventType: "sales.cogs.finalized.v1", aggregateType: "sale", aggregateId: financial.saleId, payload: { sale_id: financial.saleId, reservation_id: data.id, cogs_base_try_minor: financial.totals.actualCogsTryMinor } });
-          }
-          return { statusCode: 200, body: { success: true, contract: "dsdst.inventory-dispatch.v1", data: { ...data, financialState: financial?.state ?? null } } };
+        auditRead(req);
+        return res.json({ success: true, contract: "dsdst.shipment.v1", data: shipmentService.getShipment(req.params.id) });
+      } catch (error) { return handleServiceError(res, error); }
+    });
+
+  router.get("/shipping/reservations/:id/shipment", authenticate("read:warehouse_orders"), requireWarehouseUser,
+    requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
+      try {
+        auditRead(req);
+        return res.json({ success: true, contract: "dsdst.shipment.v1", data: shipmentService.getShipmentForReservation(req.params.id) });
+      } catch (error) { return handleServiceError(res, error); }
+    });
+
+  router.post("/shipping/shipments/:id/packages", authenticate("write:warehouse_status"), requireWarehouseUser,
+    requireWarehousePermission("shipping:manage"), (req, res) => {
+      const payload = { shipmentId: req.params.id, packages: req.body?.packages ?? null };
+      try {
+        const outcome = commandExecutor.execute(commandRequest(req, res, "shipping.packages.define.v1", "shipping:manage", payload), (context) => {
+          const data = shipmentService.definePackages({ shipmentId: req.params.id, packages: req.body?.packages,
+            operationId: operationIdFromRequest(req), actor: { id: actor(res).id, name: actor(res).username } });
+          context.addOutbox({ topic: "shipping", eventType: "shipping.packages.defined.v1", aggregateType: "shipment",
+            aggregateId: req.params.id, payload: { shipment_id: req.params.id, package_count: data.length } });
+          return { statusCode: 201, body: { success: true, contract: "dsdst.shipment-packages.v1", data } };
+        });
+        return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
+      } catch (error) { return handleServiceError(res, error); }
+    });
+
+  router.post("/shipping/shipments/:id/carrier-selection", authenticate("write:warehouse_status"), requireWarehouseUser,
+    requireWarehousePermission("shipping:manage"), (req, res) => {
+      const payload = { shipmentId: req.params.id, ...req.body };
+      try {
+        const outcome = commandExecutor.execute(commandRequest(req, res, "shipping.carrier.select.v1", "shipping:manage", payload), (context) => {
+          const data = shipmentService.selectCarrier({ ...req.body, shipmentId: req.params.id,
+            operationId: operationIdFromRequest(req), actor: { id: actor(res).id, name: actor(res).username } });
+          context.addOutbox({ topic: "shipping", eventType: "shipping.carrier.selected.v1", aggregateType: "shipment",
+            aggregateId: req.params.id, payload: { shipment_id: req.params.id, provider: data.carrierSelection.provider,
+              carrier: data.carrierSelection.carrierCode, service: data.carrierSelection.serviceCode } });
+          return { statusCode: 200, body: { success: true, contract: "dsdst.shipment.v1", data } };
+        });
+        return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
+      } catch (error) { return handleServiceError(res, error); }
+    });
+
+  router.post("/shipping/shipments/:id/booking", authenticate("write:warehouse_status"), requireWarehouseUser,
+    requireWarehousePermission("shipping:manage"), (req, res) => {
+      const payload = { shipmentId: req.params.id, requestedAt: req.body?.requestedAt ?? null };
+      try {
+        const outcome = commandExecutor.execute(commandRequest(req, res, "shipping.booking.request.v1", "shipping:manage", payload), (context) => {
+          const data = shipmentService.requestBooking({ shipmentId: req.params.id, operationId: operationIdFromRequest(req),
+            actor: { id: actor(res).id, name: actor(res).username }, requestedAt: req.body?.requestedAt });
+          context.addOutbox({ topic: "carrier", eventType: "shipping.geliver.booking.requested.v1", aggregateType: "shipment",
+            aggregateId: req.params.id, payload: { shipment_id: req.params.id, booking_job_ids: data.jobs.map((job) => job.id),
+              transport_enabled: GELIVER_TRANSPORT_CONTRACT.enabled } });
+          return { statusCode: 202, body: { success: true, contract: "dsdst.shipment-booking.v1", data,
+            providerTransport: { ...GELIVER_TRANSPORT_CONTRACT, verifiedCapabilities: [...GELIVER_TRANSPORT_CONTRACT.verifiedCapabilities] } } };
+        });
+        return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
+      } catch (error) { return handleServiceError(res, error); }
+    });
+
+  router.post("/shipping/shipments/:id/cancel", authenticate("write:warehouse_status"), requireWarehouseUser,
+    requireWarehousePermission("shipping:manage"), (req, res) => {
+      const payload = { shipmentId: req.params.id, reason: req.body?.reason ?? null, cancelledAt: req.body?.cancelledAt ?? null };
+      try {
+        const outcome = commandExecutor.execute(commandRequest(req, res, "shipping.cancel.v1", "shipping:manage", payload), (context) => {
+          const data = shipmentService.cancelBeforeHandoff({ shipmentId: req.params.id, reason: req.body?.reason,
+            operationId: operationIdFromRequest(req), actor: { id: actor(res).id, name: actor(res).username },
+            transport: failClosedGeliverTransport, cancelledAt: req.body?.cancelledAt });
+          context.addOutbox({ topic: "shipping", eventType: "shipping.cancelled.v1", aggregateType: "shipment",
+            aggregateId: req.params.id, payload: { shipment_id: req.params.id, state: data.state } });
+          return { statusCode: 200, body: { success: true, contract: "dsdst.shipment.v1", data } };
+        });
+        return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
+      } catch (error) { return handleServiceError(res, error); }
+    });
+
+  router.post("/shipping/shipments/:id/handoff", authenticate("write:warehouse_status"), requireWarehouseUser,
+    requireWarehousePermission("shipping:dispatch"), (req, res) => {
+      const payload = { shipmentId: req.params.id, handedOffAt: req.body?.handedOffAt ?? null,
+        handoffEvidence: req.body?.handoffEvidence ?? null, actualCharge: req.body?.actualCharge ?? null };
+      try {
+        const outcome = commandExecutor.execute(commandRequest(req, res, "shipping.handoff.confirm.v1", "shipping:dispatch", payload), (context) => {
+          const data = shipmentService.confirmHandoff({ shipmentId: req.params.id, handedOffAt: req.body?.handedOffAt,
+            handoffEvidence: req.body?.handoffEvidence, actualCharge: req.body?.actualCharge,
+            operationId: operationIdFromRequest(req), actor: { id: actor(res).id, name: actor(res).username } });
+          for (const event of data.outbox) context.addOutbox(event);
+          context.addOutbox({ topic: "shipping", eventType: "shipping.dispatched.v1", aggregateType: "shipment",
+            aggregateId: req.params.id, payload: { shipment_id: req.params.id, reservation_id: data.shipment.reservationId } });
+          return { statusCode: 200, body: { success: true, contract: "dsdst.shipment.v1", data: data.shipment } };
         });
         return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
       } catch (error) { return handleServiceError(res, error); }

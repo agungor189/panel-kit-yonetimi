@@ -12,6 +12,7 @@ import { CatalogService } from "../modules/catalog/catalogService.js";
 import { ExchangeRateService } from "../modules/finance/exchangeRates.js";
 import { InventoryService } from "../modules/inventory/inventoryService.js";
 import { ProcurementService } from "../modules/procurement/procurementService.js";
+import { ShipmentService, type CarrierBookingTransport } from "../modules/shipping/shipmentService.js";
 import { api, createRetryOperation } from "../../src/lib/api.js";
 
 const panelRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
@@ -178,11 +179,31 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
     assert.equal(dispatchedSale.status, 201, await dispatchedSale.clone().text());
     const dispatchedSaleId = (await dispatchedSale.json() as any).id as string;
     const dispatchedReservation = `sale-reservation:${dispatchedSaleId}`;
-    for (const [step, body] of [["pick", {}], ["pack", {}], ["dispatch", { shipmentId: "shipment-1", dispatchedAt: "2026-09-20T12:00:00.000Z" }]] as const) {
+    for (const [step, body] of [["pick", {}], ["pack", {}]] as const) {
       const response = await request(`/api/inventory/v1/reservations/${dispatchedReservation}/${step}`, `sale-2-${step}`, body);
       assert.equal(response.status, 200, `${step}: ${await response.text()}`);
     }
-    const dispatchReplay = await request(`/api/inventory/v1/reservations/${dispatchedReservation}/dispatch`, "sale-2-dispatch", { shipmentId: "shipment-1", dispatchedAt: "2026-09-20T12:00:00.000Z" });
+    const closedDispatch = await request(`/api/inventory/v1/reservations/${dispatchedReservation}/dispatch`, "sale-2-direct-dispatch", { shipmentId: "shipment-1", dispatchedAt: "2026-09-20T12:00:00.000Z" });
+    assert.equal(closedDispatch.status, 409);
+    const shippingWriter = new Database(databasePath);
+    const shipping = new ShipmentService(shippingWriter);
+    const shipmentId = `shipment:${dispatchedReservation}`;
+    shipping.definePackages({ shipmentId, packages: [{ packageNumber: 1, measured: { lengthMm: 200, widthMm: 150, heightMm: 100, weightGrams: 800 },
+      contents: [{ productId: "component", quantityBaseInt: 2 }] }], operationId: "sale-2-packages", actor: { id: "owner" } });
+    shipping.selectCarrier({ shipmentId, provider: "GELIVER", carrierCode: "carrier-explicit", serviceCode: "service-explicit",
+      quote: { quoteId: "quote-1", amountMinor: 50, currency: "TRY", provenance: { source: "test-fixture" } },
+      operationId: "sale-2-carrier", actor: { id: "owner" } });
+    const booking = shipping.requestBooking({ shipmentId, operationId: "sale-2-booking", actor: { id: "owner" } });
+    const transport: CarrierBookingTransport = { provider: "GELIVER", enabled: true, serverIdempotencyVerified: true,
+      bookPackage: (input) => ({ providerShipmentId: "provider-shipment-1", carrierCode: input.carrierCode, serviceCode: input.serviceCode,
+        trackingNumber: "TRACK-1", trackingUrl: "https://tracking.invalid/TRACK-1", providerResponseReference: "provider-response-1",
+        label: { reference: "provider-label-1", sha256: "a".repeat(64), mediaType: "application/pdf", widthMm: 100, heightMm: 150, dpi: 203 } }) };
+    shipping.processBookingJob({ jobId: booking.jobs[0].id, transport, serviceActorId: "carrier-worker" });
+    shippingWriter.close();
+    const handoffBody = { handedOffAt: "2026-09-20T12:00:00.000Z", handoffEvidence: { kind: "TEST_DOCK_SCAN", reference: "dock-1" } };
+    const handoff = await request(`/api/shipping/v1/shipments/${encodeURIComponent(shipmentId)}/handoff`, "sale-2-dispatch", handoffBody);
+    assert.equal(handoff.status, 200, await handoff.clone().text());
+    const dispatchReplay = await request(`/api/shipping/v1/shipments/${encodeURIComponent(shipmentId)}/handoff`, "sale-2-dispatch", handoffBody);
     assert.equal(dispatchReplay.status, 200, await dispatchReplay.clone().text());
     assert.equal((await dispatchReplay.json() as any).idempotent, true);
     assert.deepEqual(inspect.prepare("SELECT on_hand_base_int AS onHand,reserved_base_int AS reserved FROM inventory_lots WHERE product_id='component'").get(), { onHand: 8, reserved: 0 });

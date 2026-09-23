@@ -45,7 +45,7 @@ const post = (path: string, operationId: string, body: unknown) => fetch(`${base
   method: "POST", headers: { "content-type": "application/json", "x-operation-id": operationId }, body: JSON.stringify(body),
 });
 
-test("versioned inventory API uses command audit/outbox and replays receipt/reserve/dispatch exactly once", async () => {
+test("versioned inventory API replays commands and closes direct dispatch behind physical handoff", async () => {
   const receiptBody = { receiptId: "route-receipt", costSnapshotId, receivedAt: "2026-09-20T08:00:00.000Z", location: { id: "pick-route", kind: "PICKING" } };
   const missing = await fetch(`${baseUrl}/receipts`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(receiptBody) });
   assert.equal(missing.status, 400);
@@ -55,20 +55,22 @@ test("versioned inventory API uses command audit/outbox and replays receipt/rese
   assert.equal(replayReceipt.idempotent, true);
   assert.deepEqual(replayReceipt.data, firstReceipt.data);
 
+  db.prepare("INSERT INTO sales (id,order_code,total_amount,platform) VALUES ('route-order','ROUTE-ORDER',0,'Direct')").run();
   const reservationBody = { reservationId: "route-reservation", lines: [{ productId: "route-part", quantityBaseInt: 2 }] };
   assert.equal((await post("/orders/route-order/reservation", "route-reserve-op", reservationBody)).status, 201);
   assert.equal((await post("/reservations/route-reservation/pick", "route-pick-op", {})).status, 200);
   assert.equal((await post("/reservations/route-reservation/pack", "route-pack-op", {})).status, 200);
   const dispatchBody = { shipmentId: "route-shipment", dispatchedAt: "2026-09-20T12:00:00.000Z" };
-  const firstDispatch = await (await post("/reservations/route-reservation/dispatch", "route-dispatch-op", dispatchBody)).json() as any;
-  const replayDispatch = await (await post("/reservations/route-reservation/dispatch", "route-dispatch-op", dispatchBody)).json() as any;
-  assert.equal(firstDispatch.data.status, "DISPATCHED");
-  assert.equal(replayDispatch.idempotent, true);
+  const firstDispatch = await post("/reservations/route-reservation/dispatch", "route-dispatch-op", dispatchBody);
+  const replayDispatch = await post("/reservations/route-reservation/dispatch", "route-dispatch-op", dispatchBody);
+  assert.equal(firstDispatch.status, 409);
+  assert.equal((await firstDispatch.json() as any).error.code, "PHYSICAL_HANDOFF_REQUIRED");
+  assert.equal(replayDispatch.status, 409);
   assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_ledger_events WHERE event_type='RECEIPT'").pluck().get(), 1);
-  assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_ledger_events WHERE event_type='DISPATCH'").pluck().get(), 1);
-  assert.equal(db.prepare("SELECT COUNT(*) FROM command_audit_log WHERE command_type LIKE 'inventory.%'").pluck().get(), 5);
-  assert.equal(db.prepare("SELECT COUNT(*) FROM command_outbox WHERE event_type LIKE 'inventory.%'").pluck().get(), 5);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_ledger_events WHERE event_type='DISPATCH'").pluck().get(), 0);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM command_audit_log WHERE command_type LIKE 'inventory.%'").pluck().get(), 4);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM command_outbox WHERE event_type LIKE 'inventory.%'").pluck().get(), 3);
   const reconciliation = await (await fetch(`${baseUrl}/products/route-part/reconciliation`)).json() as any;
   assert.equal(reconciliation.data.reconciled, true);
-  assert.equal(reconciliation.data.onHandBaseInt, 0);
+  assert.equal(reconciliation.data.onHandBaseInt, 2);
 });

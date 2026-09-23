@@ -135,6 +135,18 @@ const businessTablesThatMustStartEmpty = [
   "channel_exceptions",
   "channel_order_packages",
   "channel_order_package_versions",
+  "shipment_preparations",
+  "shipment_packages",
+  "shipment_carrier_selections",
+  "shipment_booking_jobs",
+  "shipment_booking_attempts",
+  "shipment_provider_bookings",
+  "shipment_labels",
+  "shipment_state_events",
+  "shipment_cancellations",
+  "shipment_actual_charge_facts",
+  "channel_shipment_outbound_jobs",
+  "shipment_notification_policies",
 ] as const;
 
 test("fresh production schema is exact, versioned and has zero business history", () => {
@@ -143,7 +155,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 80);
+  assert.equal(manifest.length, 81);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(

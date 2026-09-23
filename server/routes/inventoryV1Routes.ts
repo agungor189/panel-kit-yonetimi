@@ -3,7 +3,7 @@ import express, { type RequestHandler } from "express";
 import { CommandExecutor, CommandFoundationError } from "../modules/commands/commandFoundation.js";
 import { InventoryService, InventoryValidationError } from "../modules/inventory/inventoryService.js";
 import { ProfileCutInventoryService } from "../modules/inventory/profileCutInventoryService.js";
-import { SalesFinancialService, SalesFinancialValidationError } from "../modules/sales/salesFinancialService.js";
+import { ShipmentService, ShipmentValidationError } from "../modules/shipping/shipmentService.js";
 
 type Dependencies = {
   db: Database.Database;
@@ -19,7 +19,7 @@ type Dependencies = {
 const operationId = (req: express.Request) => String(req.headers["x-operation-id"] || req.headers["idempotency-key"] || "").trim();
 
 const sendError = (error: unknown, res: express.Response) => {
-  if (error instanceof CommandFoundationError || error instanceof InventoryValidationError || error instanceof SalesFinancialValidationError) {
+  if (error instanceof CommandFoundationError || error instanceof InventoryValidationError || error instanceof ShipmentValidationError) {
     return res.status(error.statusCode).json({ success: false, error: { code: error.code, message: error.message } });
   }
   if (String((error as { code?: unknown })?.code || "").includes("SQLITE_CONSTRAINT")) {
@@ -32,7 +32,7 @@ export function createInventoryV1Router(dependencies: Dependencies) {
   const router = express.Router();
   const inventory = new InventoryService(dependencies.db);
   const profileCuts = new ProfileCutInventoryService(dependencies.db);
-  const salesFinancials = new SalesFinancialService(dependencies.db);
+  const shipping = new ShipmentService(dependencies.db);
   const commands = new CommandExecutor(dependencies.db);
   const execute = (req: express.Request, capability: string, commandType: string, payload: unknown, handler: Parameters<CommandExecutor["execute"]>[1]) => commands.execute({
     operationId: operationId(req),
@@ -117,11 +117,17 @@ export function createInventoryV1Router(dependencies: Dependencies) {
         const payload = { reservationId: req.params.id, at: req.body?.at ?? null };
         const commandType = `inventory.reservation.${transition}.v1`;
         const outcome = execute(req, "warehouse:pick_orders", commandType, payload, (context) => {
-          const data = transition === "pick"
-            ? inventory.markPicked({ reservationId: req.params.id, pickedAt: req.body?.at, operationId: operationId(req) })
-            : inventory.markPacked({ reservationId: req.params.id, packedAt: req.body?.at, operationId: operationId(req) });
-          context.addOutbox({ topic: "inventory", eventType: `${commandType.replace(".v1", "ed.v1")}`, aggregateType: "reservation", aggregateId: data.id, payload: { reservation_id: data.id } });
-          return { statusCode: 200, body: { success: true, contract: "dsdst.inventory-reservation.v1", data } };
+          if (transition === "pick") {
+            const data = inventory.markPicked({ reservationId: req.params.id, pickedAt: req.body?.at, operationId: operationId(req) });
+            context.addOutbox({ topic: "inventory", eventType: "inventory.reservation.picked.v1", aggregateType: "reservation",
+              aggregateId: data.id, payload: { reservation_id: data.id } });
+            return { statusCode: 200, body: { success: true, contract: "dsdst.inventory-reservation.v1", data } };
+          }
+          const data = shipping.packAndPrepare({ reservationId: req.params.id, packedAt: req.body?.at, operationId: operationId(req),
+            actor: { id: req.user!.id, name: req.user!.username } });
+          context.addOutbox({ topic: "shipping", eventType: "shipping.preparation.created.v1", aggregateType: "shipment",
+            aggregateId: data.shipment.id, payload: { reservation_id: data.reservation.id, shipment_id: data.shipment.id } });
+          return { statusCode: 200, body: { success: true, contract: "dsdst.shipment.v1", data } };
         });
         return send(res, outcome);
       } catch (error) { return sendError(error, res); }
@@ -129,24 +135,8 @@ export function createInventoryV1Router(dependencies: Dependencies) {
   }
 
   router.post("/reservations/:id/dispatch", dependencies.authorizeDispatch, (req, res) => {
-    try {
-      const payload = { reservationId: req.params.id, shipmentId: req.body?.shipmentId ?? null, dispatchedAt: req.body?.dispatchedAt ?? null };
-      const outcome = execute(req, "shipping:dispatch", "inventory.reservation.dispatch.v1", payload, (context) => {
-        const data = inventory.dispatchReservation({ ...payload, operationId: operationId(req) });
-        const financial = salesFinancials.finalizeDispatch({
-          reservationId: req.params.id,
-          operationId: operationId(req),
-          actor: { id: req.user!.id, name: req.user!.username },
-          finalizedAt: req.body?.dispatchedAt,
-        });
-        context.addOutbox({ topic: "inventory", eventType: "inventory.shipment.dispatched.v1", aggregateType: "reservation", aggregateId: data.id, payload: { reservation_id: data.id, shipment_id: data.shipmentId } });
-        if (financial && financial.state !== "LEGACY_UNSNAPSHOTTED") {
-          context.addOutbox({ topic: "sales-finance", eventType: "sales.cogs.finalized.v1", aggregateType: "sale", aggregateId: financial.saleId, payload: { sale_id: financial.saleId, reservation_id: data.id, cogs_base_try_minor: financial.totals.actualCogsTryMinor } });
-        }
-        return { statusCode: 200, body: { success: true, contract: "dsdst.inventory-dispatch.v1", data: { ...data, financialState: financial?.state ?? null } } };
-      });
-      return send(res, outcome);
-    } catch (error) { return sendError(error, res); }
+    return res.status(409).json({ success: false, error: { code: "PHYSICAL_HANDOFF_REQUIRED",
+      message: "Inventory dispatch is closed; confirm physical carrier handoff through /api/shipping/v1/shipments/:id/handoff." } });
   });
 
   router.post("/reservations/:id/discrepancies", dependencies.authorizeWarehouse, (req, res) => {

@@ -22,6 +22,7 @@ export const CAPABILITY_REGISTRY = Object.freeze({
   "inventory:release": { description: "Reservation cancellation and release" },
   "inventory:correct": { description: "Approved inventory count correction" },
   "shipping:dispatch": { description: "Approved shipment dispatch inventory posting" },
+  "shipping:manage": { description: "Shipment package, carrier selection, booking and pre-handoff cancellation" },
   "warehouse:pick_orders": { description: "Warehouse order picking" },
   "warehouse:receive": { description: "Warehouse receiving" },
   "warehouse:manage_receiving_sessions": { description: "Warehouse receiving-session administration" },
