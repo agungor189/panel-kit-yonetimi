@@ -33,6 +33,9 @@ test("queue is only print intent; exact template/payload snapshots are immutable
   payload.SKU = "SKU-CHANGED"; selectedTemplate.name = "Changed current template";
   assert.equal(service.getJob(first.id).payload_snapshot.SKU, "SKU-ORIGINAL");
   assert.equal(service.getJob(first.id).template_snapshot.name, "goods_receipt");
+  assert.throws(() => service.queueTemplateJob({ purpose: "GOODS_RECEIPT_PACKAGE", subjectId: "pkg-1", subjectCode: "PKG-1",
+    payload: { SKU: "SKU-DIFFERENT", Urun_adi: "Original" }, template: template("goods_receipt"), operationId: "print-op", actorId }),
+  (error: unknown) => error instanceof PrintingError && error.code === "IDEMPOTENCY_KEY_CONFLICT");
   assert.throws(() => service.queueTemplateJob({ purpose: "GOODS_RECEIPT_PACKAGE", subjectId: "pkg-2", subjectCode: "PKG-2",
     payload: { SKU: "OTHER" }, template: template("goods_receipt", 2), operationId: "print-op", actorId }),
   (error: unknown) => error instanceof PrintingError && error.code === "IDEMPOTENCY_KEY_CONFLICT");
@@ -93,5 +96,75 @@ test("reprint requires permission-layer reason semantics and stores immutable hi
   const reprint = service.reprint({ originalJobId: original.id, reason: "DAMAGED_OUTPUT", operationId: "reprint", actorId });
   assert.equal(reprint.original_job_id, original.id); assert.equal(reprint.reprint.reason, "DAMAGED_OUTPUT");
   assert.throws(() => db.prepare("UPDATE printing_reprints SET reason='LOST' WHERE reprint_job_id=?").run(reprint.id), /immutable/i);
+  db.close();
+});
+
+test("repeated package Yazdır with different client operation ids converges to one original job", () => {
+  const { db, service } = setup();
+  const input = { purpose: "GOODS_RECEIPT_PACKAGE" as const, subjectId: "pkg-dedupe", subjectCode: "PKG-DEDUPE",
+    payload: { SKU: "SKU-DEDUPE", Urun_adi: "Same immutable package" }, template: template("goods_receipt"), actorId };
+  const first = service.queueTemplateJob({ ...input, operationId: "package-click-1" });
+  const second = service.queueTemplateJob({ ...input, operationId: "package-click-2" });
+  assert.equal(second.id, first.id);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM printing_jobs WHERE original_job_id IS NULL AND purpose='GOODS_RECEIPT_PACKAGE'").pluck().get(), 1);
+  db.close();
+});
+
+test("repeated location Yazdır with different client operation ids converges to one original job", () => {
+  const { db, service } = setup();
+  const input = { purpose: "LOCATION" as const, subjectId: "loc-dedupe", subjectCode: "A1-K1-P1",
+    payload: { Lokasyon: "A1-K1-P1" }, template: template("location"), actorId };
+  const first = service.queueTemplateJob({ ...input, operationId: "location-click-1" });
+  const second = service.queueTemplateJob({ ...input, operationId: "location-click-2" });
+  assert.equal(second.id, first.id);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM printing_jobs WHERE original_job_id IS NULL AND purpose='LOCATION'").pluck().get(), 1);
+  db.close();
+});
+
+test("repeated shipping-label Yazdır with different client operation ids converges to one original job", () => {
+  const { db, service } = setup();
+  const artifact = Buffer.from("%PDF-same-provider-native-label");
+  const input = { shipmentId: "shipment-dedupe", packageId: "ship-pkg-dedupe", subjectCode: "GELIVER-DEDUPE",
+    artifactReference: "https://labels.geliver.test/dedupe.pdf", artifactSha256: createHash("sha256").update(artifact).digest("hex"),
+    artifactMediaType: "application/pdf", artifact, actorId };
+  const first = service.queueShippingJob({ ...input, operationId: "shipping-click-1" });
+  const second = service.queueShippingJob({ ...input, operationId: "shipping-click-2" });
+  assert.equal(second.id, first.id);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM printing_jobs WHERE original_job_id IS NULL AND purpose='SHIPPING'").pluck().get(), 1);
+  db.close();
+});
+
+test("reprint double-click with different client operation ids converges while a later completed reprint remains possible", () => {
+  const { db, service } = setup();
+  const original = service.queueTemplateJob({ purpose: "LOCATION", subjectId: "loc-reprint", subjectCode: "B1-K1-P1",
+    payload: { Lokasyon: "B1-K1-P1" }, template: template("location"), operationId: "reprint-original", actorId });
+  const first = service.reprint({ originalJobId: original.id, reason: "PRINTER_ERROR", operationId: "reprint-click-1", actorId });
+  const second = service.reprint({ originalJobId: original.id, reason: "PRINTER_ERROR", operationId: "reprint-click-2", actorId });
+  assert.equal(second.id, first.id);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM printing_reprints WHERE original_job_id=?").pluck().get(original.id), 1);
+  service.cancel(first.id, "cancel-reprint", actorId);
+  const later = service.reprint({ originalJobId: original.id, reason: "PRINTER_ERROR", operationId: "reprint-later", actorId });
+  assert.notEqual(later.id, first.id);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM printing_reprints WHERE original_job_id=?").pluck().get(original.id), 2);
+  db.close();
+});
+
+test("changed payload, template version, or provider artifact hash is never collapsed as the same printable snapshot", () => {
+  const { db, service } = setup();
+  const base = { purpose: "GOODS_RECEIPT_PACKAGE" as const, subjectId: "pkg-change", subjectCode: "PKG-CHANGE", actorId };
+  const payloadOne = service.queueTemplateJob({ ...base, payload: { SKU: "SKU-1" }, template: template("goods_receipt", 1), operationId: "snapshot-payload-1" });
+  const payloadTwo = service.queueTemplateJob({ ...base, payload: { SKU: "SKU-2" }, template: template("goods_receipt", 1), operationId: "snapshot-payload-2" });
+  const templateTwo = service.queueTemplateJob({ ...base, payload: { SKU: "SKU-1" }, template: template("goods_receipt", 2), operationId: "snapshot-template-2" });
+  assert.equal(new Set([payloadOne.id, payloadTwo.id, templateTwo.id]).size, 3);
+
+  const artifactOne = Buffer.from("%PDF-provider-artifact-one");
+  const artifactTwo = Buffer.from("%PDF-provider-artifact-two");
+  const shippingBase = { shipmentId: "shipment-change", packageId: "ship-pkg-change", subjectCode: "GELIVER-CHANGE",
+    artifactReference: "https://labels.geliver.test/change.pdf", artifactMediaType: "application/pdf", actorId };
+  const shippingOne = service.queueShippingJob({ ...shippingBase, artifact: artifactOne,
+    artifactSha256: createHash("sha256").update(artifactOne).digest("hex"), operationId: "snapshot-artifact-1" });
+  const shippingTwo = service.queueShippingJob({ ...shippingBase, artifact: artifactTwo,
+    artifactSha256: createHash("sha256").update(artifactTwo).digest("hex"), operationId: "snapshot-artifact-2" });
+  assert.notEqual(shippingOne.id, shippingTwo.id);
   db.close();
 });

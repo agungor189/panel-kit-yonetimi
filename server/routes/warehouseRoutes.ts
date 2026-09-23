@@ -750,7 +750,7 @@ export function createWarehouseRouter({
         const outcome = commandExecutor.execute(commandRequest(req, res, "printing.shipping.queue.v1", "warehouse:print_labels", payload), (context) => {
           const data = printingService.queueShippingJob({ ...payload, subjectCode: label.provider_shipment_id,
             artifactMediaType: label.label_file_type || "application/pdf", artifact, operationId: operationIdFromRequest(req), actorId: actor(res).id });
-          context.addOutbox({ topic: "printing", eventType: "printing.job.queued.v1", aggregateType: "print_job", aggregateId: data.id, payload: { job_id: data.id, purpose: data.purpose } });
+          if (!data.logical_replay) context.addOutbox({ topic: "printing", eventType: "printing.job.queued.v1", aggregateType: "print_job", aggregateId: data.id, payload: { job_id: data.id, purpose: data.purpose } });
           return { statusCode: 201, body: { success: true, contract: "dsdst.print-job.v1", data } };
         });
         return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
@@ -990,7 +990,7 @@ export function createWarehouseRouter({
       const outcome = commandExecutor.execute(commandRequest(req, res, "printing.goods-receipt-package.queue.v1", "warehouse:print_labels", payload), (context) => {
         const data = printingService.queueTemplateJob({ purpose: "GOODS_RECEIPT_PACKAGE", ...snapshot, template,
           operationId: operationIdFromRequest(req), actorId: actor(res).id, printerName: req.body?.printer_name });
-        context.addOutbox({ topic: "printing", eventType: "printing.job.queued.v1", aggregateType: "print_job", aggregateId: data.id, payload: { job_id: data.id, purpose: data.purpose } });
+        if (!data.logical_replay) context.addOutbox({ topic: "printing", eventType: "printing.job.queued.v1", aggregateType: "print_job", aggregateId: data.id, payload: { job_id: data.id, purpose: data.purpose } });
         return { statusCode: 201, body: { success: true, contract: "dsdst.print-job.v1", data } };
       });
       res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
@@ -1009,7 +1009,7 @@ export function createWarehouseRouter({
       const outcome = commandExecutor.execute(commandRequest(req, res, "printing.job.reprint.v1", "warehouse:print_labels", payload), (context) => {
         const data = printingService.reprint({ originalJobId: req.params.id, reason: req.body?.reason as ReprintReason,
           explanation: req.body?.explanation, operationId: operationIdFromRequest(req), actorId: actor(res).id });
-        context.addOutbox({ topic: "printing", eventType: "printing.job.reprint-queued.v1", aggregateType: "print_job", aggregateId: data.id,
+        if (!data.logical_replay) context.addOutbox({ topic: "printing", eventType: "printing.job.reprint-queued.v1", aggregateType: "print_job", aggregateId: data.id,
           payload: { job_id: data.id, original_job_id: req.params.id, reason: req.body?.reason } });
         return { statusCode: 201, body: { success: true, contract: "dsdst.print-job.v1", data } };
       });
@@ -1054,7 +1054,7 @@ export function createWarehouseRouter({
       ), (context) => {
         const data = printingService.queueTemplateJob({ purpose: "LOCATION", ...snapshot, template, operationId,
           actorId: actor(res).id, printerName });
-        context.addOutbox({ topic: "printing", eventType: "printing.job.queued.v1", aggregateType: "print_job", aggregateId: data.id, payload: { job_id: data.id, purpose: data.purpose } });
+        if (!data.logical_replay) context.addOutbox({ topic: "printing", eventType: "printing.job.queued.v1", aggregateType: "print_job", aggregateId: data.id, payload: { job_id: data.id, purpose: data.purpose } });
         return { statusCode: 201, body: { success: true, contract: "dsdst.print-job.v1", data } };
       });
       res.status(outcome.result.statusCode).json(outcome.result.body);

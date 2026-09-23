@@ -318,9 +318,15 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
       const replayPrint = await call(`/admin/locations/${locationC.id}/print`, printBody);
       assert.equal(replayPrint.status, 201);
       assert.deepEqual(await replayPrint.json(), firstPrintJson);
+      const logicalReplayPrint = await call(`/admin/locations/${locationC.id}/print`, { ...printBody, idempotency_key: "command-location-print-2" });
+      const logicalReplayPrintJson = await logicalReplayPrint.json() as any;
+      assert.equal(logicalReplayPrint.status, 201);
+      assert.equal(logicalReplayPrintJson.data.id, firstPrintJson.data.id);
+      assert.equal(logicalReplayPrintJson.data.logical_replay, true);
       const conflictPrint = await call(`/admin/locations/${locationC.id}/print`, { ...printBody, printer_name: "other-printer" });
       assert.equal(conflictPrint.status, 409);
-      assert.equal((db.prepare("SELECT COUNT(*) FROM printing_jobs WHERE created_operation_id = 'command-location-print'").pluck().get()), 1);
+      assert.equal((db.prepare("SELECT COUNT(*) FROM printing_jobs WHERE purpose = 'LOCATION' AND subject_id = ?").pluck().get(locationC.id)), 1);
+      assert.equal((db.prepare("SELECT COUNT(*) FROM command_outbox WHERE event_type = 'printing.job.queued.v1'").pluck().get()), 1);
 
       const audits = db.prepare(`SELECT human_actor_id, human_actor_name, service_actor_id, service_actor_name,
         correlation_id, request_id, command_type FROM command_audit_log ORDER BY command_type`).all() as any[];
@@ -334,8 +340,17 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
           request_id: "warehouse-request",
           command_type: "warehouse.location-label.queue.v1",
         },
+        {
+          human_actor_id: actor.id,
+          human_actor_name: actor.username,
+          service_actor_id: "warehouse-command-key",
+          service_actor_name: "Warehouse Command",
+          correlation_id: "warehouse-correlation",
+          request_id: "warehouse-request",
+          command_type: "warehouse.location-label.queue.v1",
+        },
       ]);
-      assert.equal(db.prepare("SELECT COUNT(*) FROM command_operations").pluck().get(), 1);
+      assert.equal(db.prepare("SELECT COUNT(*) FROM command_operations").pluck().get(), 2);
     } finally {
       await new Promise<void>((resolve, reject) => http.close((error) => error ? reject(error) : resolve()));
     }

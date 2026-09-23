@@ -19,6 +19,7 @@ const required = (value: unknown, field: string, max = 500) => {
 const optional = (value: unknown, max = 500) => String(value ?? "").trim().slice(0, max) || null;
 const json = (value: unknown) => JSON.stringify(value);
 const sha256 = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+const ACTIVE_REPRINT_STATUSES = ["QUEUED", "RENDERED", "SUBMITTED", "ACKNOWLEDGED", "DELIVERY_UNKNOWN"] as const;
 
 export type TemplateSnapshot = {
   id: string; name: string; purpose: "goods_receipt" | "location"; version: number; contentHash: string;
@@ -100,29 +101,55 @@ export class PrintingService {
   private insertJob(input: any) {
     const operationId = required(input.operationId, "operationId", 200);
     const actorId = required(input.actorId, "actorId", 200);
+    const payloadJson = json(input.payload);
+    const payloadSnapshotHash = sha256(payloadJson);
+    const templateJson = input.template ? json(input.template) : null;
+    const printableSnapshotHash = canonicalPayloadHash({
+      purpose: input.purpose,
+      subjectType: input.subjectType,
+      subjectId: input.subjectId,
+      subjectCode: input.subjectCode,
+      template: input.template ? { id: input.template.id, version: input.template.version, contentHash: input.template.contentHash,
+        snapshotHash: sha256(templateJson as string) } : null,
+      payloadSnapshotHash,
+      providerArtifact: input.artifactSha256 ? { provider: input.provider, reference: input.artifactReference,
+        sha256: input.artifactSha256, mediaType: input.artifactMediaType } : null,
+    });
+    const reprintDedupeHash = input.originalJobId ? canonicalPayloadHash({ originalJobId: input.originalJobId, printableSnapshotHash,
+      reason: input.reprintReason, explanation: input.reprintExplanation || null }) : null;
     const requestHash = canonicalPayloadHash({ purpose: input.purpose, subjectId: input.subjectId, subjectCode: input.subjectCode,
       template: input.template ? { id: input.template.id, version: input.template.version, contentHash: input.template.contentHash } : null,
       artifactSha256: input.artifactSha256 || null, originalJobId: input.originalJobId || null,
       reprintReason: input.reprintReason || null, reprintExplanation: input.reprintExplanation || null });
-    const existing = this.db.prepare("SELECT * FROM printing_jobs WHERE created_operation_id=?").get(operationId) as any;
-    if (existing) {
-      if (existing.request_hash !== requestHash || existing.created_by !== actorId) throw new PrintingError("IDEMPOTENCY_KEY_CONFLICT", "Operation key payload differs.", 409);
-      return this.getJob(existing.id);
-    }
-    const id = randomUUID();
-    const payloadJson = json(input.payload);
-    const templateJson = input.template ? json(input.template) : null;
-    this.db.transaction(() => {
+    return this.db.transaction(() => {
+      const existing = this.db.prepare("SELECT * FROM printing_jobs WHERE created_operation_id=?").get(operationId) as any;
+      if (existing) {
+        if (existing.request_hash !== requestHash || existing.created_by !== actorId || existing.printable_snapshot_hash !== printableSnapshotHash
+          || (input.originalJobId && existing.reprint_dedupe_hash !== reprintDedupeHash)) {
+          throw new PrintingError("IDEMPOTENCY_KEY_CONFLICT", "Operation key payload differs.", 409);
+        }
+        return { ...this.getJob(existing.id), logical_replay: true };
+      }
+      const logicalExisting = input.originalJobId
+        ? this.db.prepare(`SELECT * FROM printing_jobs WHERE original_job_id IS NOT NULL AND reprint_dedupe_hash=?
+            AND status IN (${ACTIVE_REPRINT_STATUSES.map(() => "?").join(",")}) ORDER BY datetime(created_at),id LIMIT 1`)
+          .get(reprintDedupeHash, ...ACTIVE_REPRINT_STATUSES) as any
+        : this.db.prepare("SELECT * FROM printing_jobs WHERE original_job_id IS NULL AND printable_snapshot_hash=? LIMIT 1")
+          .get(printableSnapshotHash) as any;
+      if (logicalExisting) return { ...this.getJob(logicalExisting.id), logical_replay: true };
+
+      const id = randomUUID();
       this.db.prepare(`INSERT INTO printing_jobs (id,purpose,subject_type,subject_id,subject_code,original_job_id,request_hash,
         template_id,template_version,template_content_hash,template_snapshot_json,payload_snapshot_json,payload_snapshot_hash,
-        provider,artifact_reference,artifact_sha256,artifact_media_type,artifact_blob,printer_name,created_operation_id,created_by)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.purpose, input.subjectType, input.subjectId, input.subjectCode,
+        printable_snapshot_hash,reprint_dedupe_hash,provider,artifact_reference,artifact_sha256,artifact_media_type,artifact_blob,
+        printer_name,created_operation_id,created_by)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.purpose, input.subjectType, input.subjectId, input.subjectCode,
         input.originalJobId || null, requestHash, input.template?.id || null, input.template?.version || null, input.template?.contentHash || null,
-        templateJson, payloadJson, sha256(payloadJson), input.provider || null, input.artifactReference || null, input.artifactSha256 || null,
+        templateJson, payloadJson, payloadSnapshotHash, printableSnapshotHash, reprintDedupeHash, input.provider || null, input.artifactReference || null, input.artifactSha256 || null,
         input.artifactMediaType || null, input.artifact || null, optional(input.printerName, 160), operationId, actorId);
       this.event(id, null, null, "QUEUED", operationId, actorId, { explicitOperatorAction: true });
+      return { ...this.getJob(id), logical_replay: false };
     }).immediate();
-    return this.getJob(id);
   }
 
   reprint(input: { originalJobId: string; reason: ReprintReason; explanation?: string | null; operationId: string; actorId: string }) {
@@ -142,7 +169,7 @@ export class PrintingService {
         : this.insertJob({ ...common, template });
       this.db.prepare(`INSERT OR IGNORE INTO printing_reprints (id,original_job_id,reprint_job_id,reason,explanation,operation_id,actor_id)
         VALUES (?,?,?,?,?,?,?)`).run(randomUUID(), original.id, job.id, input.reason, explanation, input.operationId, input.actorId);
-      return this.getJob(job.id);
+      return { ...this.getJob(job.id), logical_replay: job.logical_replay };
     }).immediate();
   }
 

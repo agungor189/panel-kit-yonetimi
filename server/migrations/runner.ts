@@ -18,7 +18,9 @@ import { SHIPMENT_CARRIER_SCHEMA_V82 } from "../db/shipmentCarrierSchema.js";
 import { GELIVER_REMEDIATION_SCHEMA_V83 } from "../db/geliverRemediationSchema.js";
 import { CHANNEL_SHIPMENT_OUTBOUND_SCHEMA_V84 } from "../db/channelShipmentOutboundSchema.js";
 import { PRINT_STATE_SCHEMA_V85 } from "../db/printStateSchema.js";
+import { PRINT_DEDUP_COLUMNS_SCHEMA_V86, PRINT_DEDUP_GUARDS_SCHEMA_V86 } from "../db/printDedupSchema.js";
 import { WAREHOUSE_EXECUTION_SCHEMA_V71, WAREHOUSE_REPLENISHMENT_RUNTIME_SCHEMA_V73 } from "../db/warehouseExecutionSchema.js";
+import { canonicalPayloadHash } from "../modules/commands/commandFoundation.js";
 
 interface Migration {
   version: number;
@@ -2975,9 +2977,62 @@ const migrations: Migration[] = [
       db.exec(PRINT_STATE_SCHEMA_V85);
     },
   },
+  {
+    version: 86,
+    name: "dedupe_canonical_print_intents",
+    up(db) {
+      db.exec(PRINT_DEDUP_COLUMNS_SCHEMA_V86);
+      const jobs = db.prepare(`SELECT id,purpose,subject_type,subject_id,subject_code,original_job_id,
+        template_id,template_version,template_content_hash,template_snapshot_json,payload_snapshot_hash,
+        provider,artifact_reference,artifact_sha256,artifact_media_type,status FROM printing_jobs ORDER BY created_at,id`).all() as any[];
+      const seenOriginals = new Map<string, string>();
+      const seenActiveReprints = new Map<string, string>();
+      const activeStatuses = new Set(["QUEUED", "RENDERED", "SUBMITTED", "ACKNOWLEDGED", "DELIVERY_UNKNOWN"]);
+      const update = db.prepare("UPDATE printing_jobs SET printable_snapshot_hash=?,reprint_dedupe_hash=? WHERE id=?");
+      for (const job of jobs) {
+        const printableSnapshotHash = canonicalPayloadHash({
+          purpose: job.purpose,
+          subjectType: job.subject_type,
+          subjectId: job.subject_id,
+          subjectCode: job.subject_code,
+          template: job.template_id ? {
+            id: job.template_id,
+            version: job.template_version,
+            contentHash: job.template_content_hash,
+            snapshotHash: createHash("sha256").update(job.template_snapshot_json, "utf8").digest("hex"),
+          } : null,
+          payloadSnapshotHash: job.payload_snapshot_hash,
+          providerArtifact: job.artifact_sha256 ? {
+            provider: job.provider,
+            reference: job.artifact_reference,
+            sha256: job.artifact_sha256,
+            mediaType: job.artifact_media_type,
+          } : null,
+        });
+        if (!job.original_job_id) {
+          const duplicate = seenOriginals.get(printableSnapshotHash);
+          if (duplicate) throw new Error(`V2-14 print dedupe migration blocked: original jobs ${duplicate} and ${job.id} have the same immutable printable snapshot.`);
+          seenOriginals.set(printableSnapshotHash, job.id);
+          update.run(printableSnapshotHash, null, job.id);
+          continue;
+        }
+        const reprint = db.prepare("SELECT reason,explanation FROM printing_reprints WHERE reprint_job_id=?").get(job.id) as any;
+        if (!reprint) throw new Error(`V2-14 print dedupe migration blocked: reprint job ${job.id} has no immutable reprint history.`);
+        const reprintDedupeHash = canonicalPayloadHash({ originalJobId: job.original_job_id, printableSnapshotHash,
+          reason: reprint.reason, explanation: reprint.explanation || null });
+        if (activeStatuses.has(job.status)) {
+          const duplicate = seenActiveReprints.get(reprintDedupeHash);
+          if (duplicate) throw new Error(`V2-14 print dedupe migration blocked: active reprints ${duplicate} and ${job.id} represent the same request.`);
+          seenActiveReprints.set(reprintDedupeHash, job.id);
+        }
+        update.run(printableSnapshotHash, reprintDedupeHash, job.id);
+      }
+      db.exec(PRINT_DEDUP_GUARDS_SCHEMA_V86);
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 85;
+export const CURRENT_SCHEMA_VERSION = 86;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),
@@ -2992,7 +3047,7 @@ export type MigrationManifestEntry = {
 };
 
 const checksumFor = (migration: Migration): string => createHash("sha256")
-  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}${migration.version === 69 ? `\0${INVENTORY_SCHEMA_V69}` : ""}${migration.version === 71 ? `\0${WAREHOUSE_EXECUTION_SCHEMA_V71}` : ""}${migration.version === 74 ? `\0${SALES_FINANCIAL_SCHEMA_V74}` : ""}${migration.version === 75 ? `\0${RETURNS_SCHEMA_V75}` : ""}${migration.version === 76 ? `\0${WAREHOUSE_PACKAGE_ORIGIN_SCHEMA_V76}` : ""}${migration.version === 77 ? `\0${PUBLISHED_KIT_SCHEMA_V77}` : ""}${migration.version === 78 ? `\0${PROFILE_CUT_REMEDIATION_SCHEMA_V78}` : ""}${migration.version === 79 ? `\0${CHANNEL_GATEWAY_SCHEMA_V79}` : ""}${migration.version === 80 ? `\0${CHANNEL_GATEWAY_REMEDIATION_SCHEMA_V80}` : ""}${migration.version === 81 ? `\0${CHANNEL_GATEWAY_CORRECTNESS_SCHEMA_V81}` : ""}${migration.version === 82 ? `\0${SHIPMENT_CARRIER_SCHEMA_V82}` : ""}${migration.version === 83 ? `\0${GELIVER_REMEDIATION_SCHEMA_V83}` : ""}${migration.version === 84 ? `\0${CHANNEL_SHIPMENT_OUTBOUND_SCHEMA_V84}` : ""}${migration.version === 85 ? `\0${PRINT_STATE_SCHEMA_V85}` : ""}`)
+  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}${migration.version === 69 ? `\0${INVENTORY_SCHEMA_V69}` : ""}${migration.version === 71 ? `\0${WAREHOUSE_EXECUTION_SCHEMA_V71}` : ""}${migration.version === 74 ? `\0${SALES_FINANCIAL_SCHEMA_V74}` : ""}${migration.version === 75 ? `\0${RETURNS_SCHEMA_V75}` : ""}${migration.version === 76 ? `\0${WAREHOUSE_PACKAGE_ORIGIN_SCHEMA_V76}` : ""}${migration.version === 77 ? `\0${PUBLISHED_KIT_SCHEMA_V77}` : ""}${migration.version === 78 ? `\0${PROFILE_CUT_REMEDIATION_SCHEMA_V78}` : ""}${migration.version === 79 ? `\0${CHANNEL_GATEWAY_SCHEMA_V79}` : ""}${migration.version === 80 ? `\0${CHANNEL_GATEWAY_REMEDIATION_SCHEMA_V80}` : ""}${migration.version === 81 ? `\0${CHANNEL_GATEWAY_CORRECTNESS_SCHEMA_V81}` : ""}${migration.version === 82 ? `\0${SHIPMENT_CARRIER_SCHEMA_V82}` : ""}${migration.version === 83 ? `\0${GELIVER_REMEDIATION_SCHEMA_V83}` : ""}${migration.version === 84 ? `\0${CHANNEL_SHIPMENT_OUTBOUND_SCHEMA_V84}` : ""}${migration.version === 85 ? `\0${PRINT_STATE_SCHEMA_V85}` : ""}${migration.version === 86 ? `\0${PRINT_DEDUP_COLUMNS_SCHEMA_V86}\0${PRINT_DEDUP_GUARDS_SCHEMA_V86}` : ""}`)
   .digest("hex");
 
 export function getMigrationManifest(): MigrationManifestEntry[] {

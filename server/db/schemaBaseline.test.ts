@@ -172,7 +172,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 84);
+  assert.equal(manifest.length, 85);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -271,7 +271,7 @@ test("fresh production schema is exact, versioned and has zero business history"
     warehouse_replenishment_tasks: ["current_pct", "inventory_lot_id", "source_package_id", "status", "target_slot_id", "threshold_pct"],
     warehouse_stock_discrepancies_v2: ["inventory_lot_id", "operation_id", "reason", "status"],
     warehouse_stock_counts_v2: ["difference_base_int", "expected_quantity_base_int", "observed_quantity_base_int", "status"],
-    printing_jobs: ["artifact_sha256", "created_operation_id", "original_job_id", "payload_snapshot_hash", "payload_snapshot_json", "printer_dpi", "printer_model", "purpose", "status", "template_content_hash", "template_snapshot_json", "template_version"],
+    printing_jobs: ["artifact_sha256", "created_operation_id", "original_job_id", "payload_snapshot_hash", "payload_snapshot_json", "printable_snapshot_hash", "printer_dpi", "printer_model", "purpose", "reprint_dedupe_hash", "status", "template_content_hash", "template_snapshot_json", "template_version"],
     printing_attempts: ["attempt_identity", "attempt_number", "error_code", "job_id", "lease_expires_at", "rendered_sha256", "spool_reference", "state"],
     printing_reprints: ["actor_id", "explanation", "operation_id", "original_job_id", "reason", "reprint_job_id"],
     printing_events: ["actor_id", "attempt_id", "details_json", "event_index", "from_status", "job_id", "operation_id", "to_status"],
@@ -287,6 +287,8 @@ test("fresh production schema is exact, versioned and has zero business history"
   assert.ok(indexes(db, "command_outbox").includes("idx_command_outbox_dispatch"));
   assert.ok(indexes(db, "acquisition_lot_cost_snapshots").includes("idx_acquisition_lots_product"));
   assert.ok(indexes(db, "cash_transactions").includes("idx_cash_transactions_procurement_payment"));
+  assert.ok(indexes(db, "printing_jobs").includes("idx_printing_jobs_original_snapshot_unique"));
+  assert.ok(indexes(db, "printing_jobs").includes("idx_printing_jobs_active_reprint_unique"));
   assert.ok(indexes(db, "inventory_lots").includes("idx_inventory_lots_product_fifo"));
   assert.ok(indexes(db, "warehouse_replenishment_tasks").includes("idx_warehouse_replenishment_one_open_pick_lot"));
 
