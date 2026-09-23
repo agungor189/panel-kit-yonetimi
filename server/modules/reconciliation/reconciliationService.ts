@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
+import { canonicalPayloadHash } from "../commands/commandFoundation.js";
 
 export type FindingSeverity = "INFO" | "WARN" | "CRITICAL";
 export type FindingScope = "SKU" | "ORDER" | "SYSTEM";
@@ -15,7 +16,26 @@ export class ReconciliationError extends Error {
 }
 
 const json = (value: unknown) => JSON.stringify(value);
-const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+const stableJson = (value: any): string => {
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+};
+const roundedRatio = (amount: number, numerator: number, denominator: number) =>
+  Number((BigInt(amount) * BigInt(numerator) + BigInt(denominator) / 2n) / BigInt(denominator));
+const priceMinor = (value: unknown) => {
+  const source = String(value ?? "");
+  if (!/^\d+(?:\.\d{1,2})?$/.test(source)) return null;
+  const [whole, fraction = ""] = source.split(".");
+  const result = Number(BigInt(whole) * 100n + BigInt((fraction + "00").slice(0, 2)));
+  return Number.isSafeInteger(result) ? result : null;
+};
+const inverseCommission = (target: number, numerator: number, denominator: number) => {
+  if (denominator <= numerator) return null;
+  const divisor = BigInt(denominator - numerator);
+  return Number((BigInt(target) * BigInt(denominator) + divisor - 1n) / divisor);
+};
 const identity = (draft: Draft) => digest([draft.domain, draft.code, draft.affectedType, draft.affectedId, draft.sourceRef].join("\0"));
 const now = () => new Date().toISOString();
 const required = (value: unknown, field: string, max = 1000) => {
@@ -121,12 +141,30 @@ export class ReconciliationService {
   private financeChecks(): Draft[] {
     const rows = this.db.prepare("SELECT * FROM sale_financial_snapshots ORDER BY id").all() as any[]; const result: Draft[]=[];
     for (const row of rows) {
+      const lines = this.db.prepare(`SELECT COALESCE(SUM(gross_before_discount_minor),0) gross_before,
+        COALESCE(SUM(discount_allocation_minor),0) discount_total,COALESCE(SUM(gross_amount_minor),0) gross,
+        COALESCE(SUM(vat_amount_minor),0) vat,COALESCE(SUM(net_revenue_minor),0) net,
+        COALESCE(SUM(gross_amount_base_try_minor),0) gross_try,COALESCE(SUM(vat_amount_base_try_minor),0) vat_try,
+        COALESCE(SUM(net_revenue_base_try_minor),0) net_try FROM sale_financial_lines WHERE financial_snapshot_id=?`).get(row.id) as any;
       const formulaOk = Number(row.gross_before_discount_minor)-Number(row.discount_minor)===Number(row.gross_amount_minor)
         && Number(row.net_revenue_minor)+Number(row.vat_amount_minor)===Number(row.gross_amount_minor)
-        && Number(row.commission_amount_minor)>=0 && Number(row.commission_amount_minor)<=Number(row.gross_amount_minor);
+        && Number(row.commission_amount_minor)>=0 && Number(row.commission_amount_minor)<=Number(row.gross_amount_minor)
+        && Number(lines.gross_before)===Number(row.gross_before_discount_minor) && Number(lines.discount_total)===Number(row.discount_minor)
+        && Number(lines.gross)===Number(row.gross_amount_minor) && Number(lines.vat)===Number(row.vat_amount_minor)
+        && Number(lines.net)===Number(row.net_revenue_minor) && Number(lines.gross_try)===Number(row.gross_amount_base_try_minor)
+        && Number(lines.vat_try)===Number(row.vat_amount_base_try_minor) && Number(lines.net_try)===Number(row.net_revenue_base_try_minor);
       if (!formulaOk) result.push({domain:"FINANCE",code:"SALE_FINANCIAL_TOTAL_MISMATCH",severity:"CRITICAL",affectedType:"ORDER",affectedId:row.sale_id,sourceRef:row.id,
-        expected:{gross:Number(row.gross_before_discount_minor)-Number(row.discount_minor),netPlusVat:Number(row.gross_amount_minor),commissionMax:Number(row.gross_amount_minor)},
-        actual:{gross:Number(row.gross_amount_minor),netPlusVat:Number(row.net_revenue_minor)+Number(row.vat_amount_minor),commission:Number(row.commission_amount_minor)}});
+        expected:{gross:Number(row.gross_before_discount_minor)-Number(row.discount_minor),netPlusVat:Number(row.gross_amount_minor),commissionMax:Number(row.gross_amount_minor),lineTotals:{grossBefore:Number(row.gross_before_discount_minor),discount:Number(row.discount_minor),gross:Number(row.gross_amount_minor),vat:Number(row.vat_amount_minor),net:Number(row.net_revenue_minor),grossTry:Number(row.gross_amount_base_try_minor),vatTry:Number(row.vat_amount_base_try_minor),netTry:Number(row.net_revenue_base_try_minor)}},
+        actual:{gross:Number(row.gross_amount_minor),netPlusVat:Number(row.net_revenue_minor)+Number(row.vat_amount_minor),commission:Number(row.commission_amount_minor),lineTotals:lines}});
+    }
+    for(const row of this.db.prepare(`SELECT f.id,f.total_cogs_base_try_minor,s.sale_id,COALESCE(SUM(a.cost_base_try_minor),0) allocation_total
+      FROM sale_financial_cogs_finalizations f JOIN sale_financial_snapshots s ON s.id=f.financial_snapshot_id
+      LEFT JOIN sale_financial_cogs_allocations a ON a.financial_snapshot_id=f.financial_snapshot_id
+      GROUP BY f.id ORDER BY f.id`).all() as any[]) if(Number(row.total_cogs_base_try_minor)!==Number(row.allocation_total)) result.push({domain:"FINANCE",code:"SALE_COGS_TOTAL_MISMATCH",severity:"CRITICAL",affectedType:"ORDER",affectedId:row.sale_id,sourceRef:row.id,expected:{cogsTryMinor:Number(row.allocation_total)},actual:{cogsTryMinor:Number(row.total_cogs_base_try_minor)}});
+    for(const row of this.db.prepare(`SELECT e.*,s.sale_id FROM sale_financial_expense_facts e JOIN sale_financial_snapshots s ON s.id=e.financial_snapshot_id
+      WHERE e.state='KNOWN' ORDER BY e.id`).all() as any[]) {
+      const expected = roundedRatio(Number(row.amount_minor),Number(row.fx_rate_numerator),Number(row.fx_rate_denominator));
+      if(expected!==Number(row.amount_base_try_minor)) result.push({domain:"FINANCE",code:"SALE_EXPENSE_FX_MISMATCH",severity:"CRITICAL",affectedType:"ORDER",affectedId:row.sale_id,sourceRef:row.id,expected:{amountBaseTryMinor:expected},actual:{amountBaseTryMinor:Number(row.amount_base_try_minor)}});
     }
     return result;
   }
@@ -157,8 +195,39 @@ export class ReconciliationService {
     const result: Draft[]=[];
     for(const row of this.db.prepare(`SELECT c.id,c.external_order_id,c.sale_id,c.reservation_id FROM channel_orders c
       WHERE c.order_state IN ('ACCEPTED','RESERVED','FULFILLING','COMPLETED') AND (c.sale_id IS NULL OR c.reservation_id IS NULL) ORDER BY c.id`).all() as any[]) result.push({domain:"CHANNELS",code:"CHANNEL_CANONICAL_LINK_MISMATCH",severity:"CRITICAL",affectedType:"ORDER",affectedId:row.external_order_id,sourceRef:row.id,expected:{canonicalSale:true,reservation:true},actual:{canonicalSale:Boolean(row.sale_id),reservation:Boolean(row.reservation_id)}});
-    for(const row of this.db.prepare(`SELECT j.id,j.product_id,j.source_version,b.version,p.sku FROM channel_outbound_jobs j JOIN channel_stock_buffers b ON b.account_id=j.account_id AND b.product_id=j.product_id JOIN products p ON p.id=j.product_id
-      WHERE j.job_kind='STOCK' AND j.state IN ('PENDING','LEASED','SUCCEEDED') AND j.source_version<>CAST(b.version AS TEXT) ORDER BY j.id`).all() as any[]) result.push({domain:"CHANNELS",code:"CHANNEL_OUTBOUND_PROJECTION_MISMATCH",severity:"WARN",affectedType:"SKU",affectedId:row.sku||row.product_id,sourceRef:row.id,expected:{sourceVersion:String(row.version)},actual:{sourceVersion:String(row.source_version)}});
+    for(const row of this.db.prepare(`SELECT j.*,p.sku,p.sale_price,COALESCE(b.buffer_quantity_base_int,0) stock_buffer,
+      COALESCE((SELECT SUM(l.on_hand_base_int-l.reserved_base_int) FROM inventory_lots l WHERE l.product_id=j.product_id),0) available,
+      (SELECT v.final_sale_price_minor FROM published_kits k JOIN published_kit_versions v ON v.id=k.current_version_id WHERE k.product_id=j.product_id) kit_price
+      FROM channel_outbound_jobs j JOIN products p ON p.id=j.product_id
+      LEFT JOIN channel_stock_buffers b ON b.account_id=j.account_id AND b.product_id=j.product_id
+      WHERE j.job_kind IN ('STOCK','PRICE') AND j.state IN ('PENDING','RETRY','SUCCEEDED','BLOCKED')
+        AND NOT EXISTS (SELECT 1 FROM channel_outbound_jobs newer WHERE newer.account_id=j.account_id AND newer.product_id=j.product_id AND newer.job_kind=j.job_kind
+          AND (datetime(newer.created_at)>datetime(j.created_at) OR (newer.created_at=j.created_at AND newer.id>j.id))) ORDER BY j.id`).all() as any[]) {
+      let expected:any=null;
+      if(row.job_kind==="STOCK") expected={productId:row.product_id,quantityBaseInt:Math.max(0,Number(row.available)-Number(row.stock_buffer)),canonicalAvailableBaseInt:Number(row.available),channelStockBufferBaseInt:Number(row.stock_buffer)};
+      else {
+        const term=this.db.prepare(`SELECT * FROM channel_commission_terms WHERE account_id=? AND effective_from<=? AND (effective_to IS NULL OR effective_to>?)
+          AND (product_id=? OR product_id IS NULL) ORDER BY CASE WHEN product_id=? THEN 0 ELSE 1 END,version DESC LIMIT 1`).get(row.account_id,now(),now(),row.product_id,row.product_id) as any;
+        const target=row.kit_price===null||row.kit_price===undefined?priceMinor(row.sale_price):Number(row.kit_price);
+        const channel=term?.state==="KNOWN"&&target!==null?inverseCommission(target,Number(term.rate_numerator),Number(term.rate_denominator)):null;
+        if(channel!==null) expected={productId:row.product_id,targetPriceMinor:target,channelPriceMinor:channel,commissionTermId:term.id,commissionVersion:term.version};
+      }
+      let actual:any=null; try{actual=JSON.parse(row.payload_json);}catch{}
+      if(digest(String(row.payload_json))!==row.payload_hash||expected&&stableJson(actual)!==stableJson(expected)) result.push({domain:"CHANNELS",code:"CHANNEL_OUTBOUND_PROJECTION_MISMATCH",severity:"WARN",affectedType:"SKU",affectedId:row.sku||row.product_id,sourceRef:row.id,expected:{payload:expected,payloadHash:digest(String(row.payload_json))},actual:{payload:actual,payloadHash:row.payload_hash}});
+    }
+    for(const row of this.db.prepare(`SELECT j.*,s.order_id,s.state shipment_state,s.package_count,cs.carrier_code,cs.service_code
+      FROM channel_shipment_outbound_jobs j JOIN shipment_preparations s ON s.id=j.shipment_id
+      LEFT JOIN shipment_carrier_selections cs ON cs.id=s.carrier_selection_id
+      WHERE j.state IN ('PENDING','RETRY','SUCCEEDED','BLOCKED') AND NOT EXISTS (SELECT 1 FROM channel_shipment_outbound_jobs newer
+        WHERE newer.account_id=j.account_id AND newer.shipment_id=j.shipment_id AND newer.job_kind=j.job_kind
+        AND (datetime(newer.created_at)>datetime(j.created_at) OR (newer.created_at=j.created_at AND newer.id>j.id))) ORDER BY j.id`).all() as any[]) {
+      const packages=(this.db.prepare(`SELECT p.package_number,b.tracking_number,b.tracking_url FROM shipment_packages p
+        LEFT JOIN shipment_provider_bookings b ON b.package_id=p.id WHERE p.shipment_id=? ORDER BY p.package_number`).all(row.shipment_id) as any[])
+        .map((pack)=>({packageNumber:Number(pack.package_number),trackingNumber:pack.tracking_number,trackingUrl:pack.tracking_url}));
+      const expected={contract:"dsdst.channel-shipment-projection.v1",shipmentId:row.shipment_id,orderId:row.order_id,status:row.shipment_state,carrier:row.carrier_code,service:row.service_code,packageCount:Number(row.package_count),packages};
+      let actual:any=null; try{actual=JSON.parse(row.payload_json);}catch{}
+      if(digest(String(row.payload_json))!==row.payload_hash||stableJson(actual)!==stableJson(expected)) result.push({domain:"CHANNELS",code:"CHANNEL_TRACKING_PROJECTION_MISMATCH",severity:"WARN",affectedType:"ORDER",affectedId:row.order_id,sourceRef:row.id,expected:{payload:expected,payloadHash:digest(String(row.payload_json))},actual:{payload:actual,payloadHash:row.payload_hash}});
+    }
     return result;
   }
 
@@ -176,11 +245,17 @@ export class ReconciliationService {
     const result: Draft[]=[];
     for(const job of this.db.prepare("SELECT * FROM printing_jobs ORDER BY id").all() as any[]) {
       const payloadHash=digest(String(job.payload_snapshot_json));
+      let template:any=null; try{template=job.template_snapshot_json?JSON.parse(job.template_snapshot_json):null;}catch{}
+      const printableHash=canonicalPayloadHash({purpose:job.purpose,subjectType:job.subject_type,subjectId:job.subject_id,subjectCode:job.subject_code,
+        template:template?{id:job.template_id,version:job.template_version,contentHash:job.template_content_hash,snapshotHash:digest(String(job.template_snapshot_json))}:null,
+        payloadSnapshotHash:job.payload_snapshot_hash,providerArtifact:job.artifact_sha256?{provider:job.provider,reference:job.artifact_reference,sha256:job.artifact_sha256,mediaType:job.artifact_media_type}:null});
       const last=this.db.prepare("SELECT to_status FROM printing_events WHERE job_id=? ORDER BY event_index DESC LIMIT 1").get(job.id) as any;
       const reprintOk=!job.original_job_id||Boolean(this.db.prepare("SELECT 1 FROM printing_reprints WHERE reprint_job_id=? AND original_job_id=?").get(job.id,job.original_job_id));
-      const chainOk=payloadHash===job.payload_snapshot_hash&&last?.to_status===job.status&&reprintOk;
+      const templateOk=!template||(template.id===job.template_id&&Number(template.version)===Number(job.template_version)&&template.contentHash===job.template_content_hash);
+      const artifactOk=!job.artifact_blob||digest(job.artifact_blob)===job.artifact_sha256;
+      const chainOk=payloadHash===job.payload_snapshot_hash&&printableHash===job.printable_snapshot_hash&&last?.to_status===job.status&&reprintOk&&templateOk&&artifactOk;
       if(!chainOk) result.push({domain:"PRINT",code:"PRINT_CHAIN_MISMATCH",severity:"CRITICAL",affectedType:job.subject_type==="ORDER"?"ORDER":"SYSTEM",affectedId:job.subject_code||job.subject_id,sourceRef:job.id,
-        expected:{payloadHash,terminalStatus:job.status,reprintLinked:true},actual:{payloadHash:job.payload_snapshot_hash,lastEventStatus:last?.to_status||null,reprintLinked:reprintOk}});
+        expected:{payloadHash,printableHash,terminalStatus:job.status,reprintLinked:true,templateLinked:true,artifactHashValid:true},actual:{payloadHash:job.payload_snapshot_hash,printableHash:job.printable_snapshot_hash,lastEventStatus:last?.to_status||null,reprintLinked:reprintOk,templateLinked:templateOk,artifactHashValid:artifactOk}});
     }
     return result;
   }
