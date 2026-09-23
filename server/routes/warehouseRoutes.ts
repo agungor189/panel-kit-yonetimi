@@ -16,6 +16,7 @@ import {
 } from "../modules/shipping/shipmentService.js";
 import { GeliverFlowService, GeliverSdkTransport } from "../modules/shipping/geliverFlowService.js";
 import { WarehouseExecutionError, WarehouseExecutionService, type WarehouseTopologyInput } from "../modules/warehouse/warehouseExecutionService.js";
+import { PrintingError, PrintingService, type TemplateSnapshot, type ReprintReason } from "../modules/printing/printingService.js";
 
 type WarehouseUser = WarehousePicker & {
   role: string;
@@ -82,6 +83,7 @@ export function createWarehouseRouter({
   });
   const returnsService = new ReturnsService(db);
   const executionService = new WarehouseExecutionService(db);
+  const printingService = new PrintingService(db);
 
   const authenticate = (requiredPermissions: string | string[]) => (
     req: express.Request,
@@ -231,6 +233,9 @@ export function createWarehouseRouter({
       return errorResponse(res, error.statusCode, error.code, error.message);
     }
     if (error instanceof ShipmentValidationError) {
+      return errorResponse(res, error.statusCode, error.code, error.message);
+    }
+    if (error instanceof PrintingError) {
       return errorResponse(res, error.statusCode, error.code, error.message);
     }
     if (error instanceof ReturnsValidationError) {
@@ -731,6 +736,27 @@ export function createWarehouseRouter({
     res.json({ success: true, data: result.orders, pagination: result.pagination });
   });
 
+  router.post("/shipping/shipments/:id/packages/:packageId/print", authenticate("write:warehouse_status"), requireWarehouseUser,
+    requireWarehousePermission("warehouse:print_labels"), async (req, res) => {
+      try {
+        const label = db.prepare(`SELECT l.label_url,l.label_file_type,l.artifact_sha256,b.provider_shipment_id
+          FROM geliver_label_observations l JOIN geliver_booking_facts b ON b.provider_shipment_id=l.provider_shipment_id
+          WHERE b.shipment_id=? AND b.package_id=? ORDER BY datetime(l.observed_at) DESC,l.id DESC LIMIT 1`)
+          .get(req.params.id, req.params.packageId) as any;
+        if (!label?.label_url || !label?.artifact_sha256) throw new PrintingError("SHIPPING_LABEL_NOT_READY", "Provider-native Geliver label is not ready.", 409);
+        const artifact = Buffer.from(await geliverTransport.downloadLabel(label.label_url));
+        const payload = { shipmentId: req.params.id, packageId: req.params.packageId, artifactReference: label.label_url,
+          artifactSha256: label.artifact_sha256, printerName: req.body?.printer_name ?? null };
+        const outcome = commandExecutor.execute(commandRequest(req, res, "printing.shipping.queue.v1", "warehouse:print_labels", payload), (context) => {
+          const data = printingService.queueShippingJob({ ...payload, subjectCode: label.provider_shipment_id,
+            artifactMediaType: label.label_file_type || "application/pdf", artifact, operationId: operationIdFromRequest(req), actorId: actor(res).id });
+          context.addOutbox({ topic: "printing", eventType: "printing.job.queued.v1", aggregateType: "print_job", aggregateId: data.id, payload: { job_id: data.id, purpose: data.purpose } });
+          return { statusCode: 201, body: { success: true, contract: "dsdst.print-job.v1", data } };
+        });
+        return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
+      } catch (error) { return handleServiceError(res, error); }
+    });
+
   router.get(
     "/pick-history",
     authenticate("read:warehouse_orders"),
@@ -951,10 +977,23 @@ export function createWarehouseRouter({
     try { res.json({ success: true, data: adminService.getPackageByCode(req.params.code) }); }
     catch (error) { return handleServiceError(res, error); }
   });
+  router.get("/admin/packages/:id/print-preview", authenticate("read:products"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:print_labels", "warehouse:receive"]), (req, res) => {
+    try { res.json({ success: true, data: { purpose: "GOODS_RECEIPT_PACKAGE", ...printingService.packageSnapshot(req.params.id) } }); }
+    catch (error) { return handleServiceError(res, error); }
+  });
   router.post("/admin/packages/:id/print", authenticate("write:warehouse_status"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:print_labels", "warehouse:receive"]), (req, res) => {
     try {
-      const result = adminService.queuePrint(req.params.id, req.body || {}, actor(res));
-      res.json({ success: true, data: result, idempotent: result.idempotent });
+      const template = req.body?.template_snapshot as TemplateSnapshot;
+      const snapshot = printingService.packageSnapshot(req.params.id);
+      const payload = { packageId: snapshot.subjectId, templateId: template?.id ?? null, templateVersion: template?.version ?? null,
+        templateContentHash: template?.contentHash ?? null, printerName: req.body?.printer_name ?? null };
+      const outcome = commandExecutor.execute(commandRequest(req, res, "printing.goods-receipt-package.queue.v1", "warehouse:print_labels", payload), (context) => {
+        const data = printingService.queueTemplateJob({ purpose: "GOODS_RECEIPT_PACKAGE", ...snapshot, template,
+          operationId: operationIdFromRequest(req), actorId: actor(res).id, printerName: req.body?.printer_name });
+        context.addOutbox({ topic: "printing", eventType: "printing.job.queued.v1", aggregateType: "print_job", aggregateId: data.id, payload: { job_id: data.id, purpose: data.purpose } });
+        return { statusCode: 201, body: { success: true, contract: "dsdst.print-job.v1", data } };
+      });
+      res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
     } catch (error) { return handleServiceError(res, error); }
   });
   router.post("/admin/packages/:id/release-receiving", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:manage_receiving_sessions"), (req, res) => {
@@ -962,17 +1001,46 @@ export function createWarehouseRouter({
     catch (error) { return handleServiceError(res, error); }
   });
   router.get("/admin/print-jobs", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:print_labels"), (req, res) => {
-    res.json({ success: true, data: adminService.listPrintJobs(Number(req.query.limit) || 100) });
+    res.json({ success: true, contract: "dsdst.print-job.v1", data: printingService.listJobs(Number(req.query.limit) || 100) });
+  });
+  router.post("/admin/print-jobs/:id/reprint", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:print_labels"), (req, res) => {
+    try {
+      const payload = { originalJobId: req.params.id, reason: req.body?.reason ?? null, explanation: req.body?.explanation ?? null };
+      const outcome = commandExecutor.execute(commandRequest(req, res, "printing.job.reprint.v1", "warehouse:print_labels", payload), (context) => {
+        const data = printingService.reprint({ originalJobId: req.params.id, reason: req.body?.reason as ReprintReason,
+          explanation: req.body?.explanation, operationId: operationIdFromRequest(req), actorId: actor(res).id });
+        context.addOutbox({ topic: "printing", eventType: "printing.job.reprint-queued.v1", aggregateType: "print_job", aggregateId: data.id,
+          payload: { job_id: data.id, original_job_id: req.params.id, reason: req.body?.reason } });
+        return { statusCode: 201, body: { success: true, contract: "dsdst.print-job.v1", data } };
+      });
+      res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
+    } catch (error) { return handleServiceError(res, error); }
+  });
+  router.post("/admin/print-jobs/:id/confirm", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:print_labels"), (req, res) => {
+    try {
+      const payload = { jobId: req.params.id, physicalConfirmation: true };
+      const outcome = commandExecutor.execute(commandRequest(req, res, "printing.job.confirm.v1", "warehouse:print_labels", payload), () => ({
+        statusCode: 200, body: { success: true, contract: "dsdst.print-job.v1",
+          data: printingService.confirm(req.params.id, operationIdFromRequest(req), actor(res).id) },
+      }));
+      res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
+    } catch (error) { return handleServiceError(res, error); }
   });
 
   router.get("/admin/locations", authenticate("read:products"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:manage_locations", "warehouse:place_packages", "warehouse:move_stock"]), (_req, res) => {
     res.json({ success: true, data: adminService.listLocations() });
+  });
+  router.get("/admin/locations/:id/print-preview", authenticate("read:products"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:manage_locations", "warehouse:print_labels"]), (req, res) => {
+    try { res.json({ success: true, data: { purpose: "LOCATION", ...printingService.locationSnapshot(req.params.id) } }); }
+    catch (error) { return handleServiceError(res, error); }
   });
   router.post("/admin/locations/:id/print", authenticate("write:warehouse_status"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:manage_locations", "warehouse:print_labels"]), (req, res) => {
     try {
       const input = req.body || {};
       const operationId = operationIdFromRequest(req);
       const printerName = String(input.printer_name ?? "").trim().slice(0, 160) || null;
+      const template = input.template_snapshot as TemplateSnapshot;
+      const snapshot = printingService.locationSnapshot(req.params.id);
       const capability = userHasWarehousePermission(actor(res), "warehouse:print_labels")
         ? "warehouse:print_labels"
         : "warehouse:manage_locations";
@@ -981,10 +1049,13 @@ export function createWarehouseRouter({
         res,
         "warehouse.location-label.queue.v1",
         capability,
-        { location_id: req.params.id, printer_name: printerName },
-      ), () => {
-        const result = adminService.queueLocationPrint(req.params.id, { ...input, idempotency_key: operationId }, actor(res));
-        return { statusCode: 200, body: { success: true, data: result, idempotent: result.idempotent } };
+        { location_id: snapshot.subjectId, printer_name: printerName, template_id: template?.id ?? null,
+          template_version: template?.version ?? null, template_content_hash: template?.contentHash ?? null },
+      ), (context) => {
+        const data = printingService.queueTemplateJob({ purpose: "LOCATION", ...snapshot, template, operationId,
+          actorId: actor(res).id, printerName });
+        context.addOutbox({ topic: "printing", eventType: "printing.job.queued.v1", aggregateType: "print_job", aggregateId: data.id, payload: { job_id: data.id, purpose: data.purpose } });
+        return { statusCode: 201, body: { success: true, contract: "dsdst.print-job.v1", data } };
       });
       res.status(outcome.result.statusCode).json(outcome.result.body);
     } catch (error) { return handleServiceError(res, error); }
@@ -1041,12 +1112,11 @@ export function createWarehouseRouter({
     return errorResponse(res, 410, "V2_WAREHOUSE_EXECUTION_REQUIRED", "Legacy count mutation is closed; use /execution/counts.");
   });
 
-  router.get("/admin/label-templates", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:edit_label_templates"), (_req, res) => {
-    res.json({ success: true, data: adminService.listTemplates() });
+  router.get("/admin/label-templates", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:print_labels"), (_req, res) => {
+    return errorResponse(res, 410, "LABEL_TEMPLATE_AUTHORITY_MOVED", "Label Printer is the sole template/version authority.");
   });
-  router.post("/admin/label-templates", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:edit_label_templates"), (req, res) => {
-    try { res.json({ success: true, data: adminService.saveTemplate(req.body || {}, actor(res)) }); }
-    catch (error) { return handleServiceError(res, error); }
+  router.post("/admin/label-templates", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:print_labels"), (_req, res) => {
+    return errorResponse(res, 410, "LABEL_TEMPLATE_AUTHORITY_MOVED", "Panel does not edit label templates; use Label Printer.");
   });
 
   return router;

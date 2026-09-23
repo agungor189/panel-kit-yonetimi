@@ -17,6 +17,7 @@ import { CHANNEL_GATEWAY_CORRECTNESS_SCHEMA_V81 } from "../db/channelGatewayCorr
 import { SHIPMENT_CARRIER_SCHEMA_V82 } from "../db/shipmentCarrierSchema.js";
 import { GELIVER_REMEDIATION_SCHEMA_V83 } from "../db/geliverRemediationSchema.js";
 import { CHANNEL_SHIPMENT_OUTBOUND_SCHEMA_V84 } from "../db/channelShipmentOutboundSchema.js";
+import { PRINT_STATE_SCHEMA_V85 } from "../db/printStateSchema.js";
 import { WAREHOUSE_EXECUTION_SCHEMA_V71, WAREHOUSE_REPLENISHMENT_RUNTIME_SCHEMA_V73 } from "../db/warehouseExecutionSchema.js";
 
 interface Migration {
@@ -2958,9 +2959,25 @@ const migrations: Migration[] = [
       db.exec(CHANNEL_SHIPMENT_OUTBOUND_SCHEMA_V84);
     },
   },
+  {
+    version: 85,
+    name: "add_canonical_print_state",
+    up(db) {
+      const activeLegacyPrints = ["print_jobs", "label_print_jobs"].reduce((count, table) => {
+        const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table);
+        if (!exists) return count;
+        const active = Number(db.prepare(`SELECT COUNT(*) FROM ${table} WHERE upper(status) NOT IN ('PRINTED','FAILED','CANCELLED','COMPLETED')`).pluck().get());
+        return count + active;
+      }, 0);
+      if (activeLegacyPrints > 0) {
+        throw new Error("V2-14 migration requires legacy print queues to be drained or explicitly cancelled before canonical print state is installed.");
+      }
+      db.exec(PRINT_STATE_SCHEMA_V85);
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 84;
+export const CURRENT_SCHEMA_VERSION = 85;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),
@@ -2975,7 +2992,7 @@ export type MigrationManifestEntry = {
 };
 
 const checksumFor = (migration: Migration): string => createHash("sha256")
-  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}${migration.version === 69 ? `\0${INVENTORY_SCHEMA_V69}` : ""}${migration.version === 71 ? `\0${WAREHOUSE_EXECUTION_SCHEMA_V71}` : ""}${migration.version === 74 ? `\0${SALES_FINANCIAL_SCHEMA_V74}` : ""}${migration.version === 75 ? `\0${RETURNS_SCHEMA_V75}` : ""}${migration.version === 76 ? `\0${WAREHOUSE_PACKAGE_ORIGIN_SCHEMA_V76}` : ""}${migration.version === 77 ? `\0${PUBLISHED_KIT_SCHEMA_V77}` : ""}${migration.version === 78 ? `\0${PROFILE_CUT_REMEDIATION_SCHEMA_V78}` : ""}${migration.version === 79 ? `\0${CHANNEL_GATEWAY_SCHEMA_V79}` : ""}${migration.version === 80 ? `\0${CHANNEL_GATEWAY_REMEDIATION_SCHEMA_V80}` : ""}${migration.version === 81 ? `\0${CHANNEL_GATEWAY_CORRECTNESS_SCHEMA_V81}` : ""}${migration.version === 82 ? `\0${SHIPMENT_CARRIER_SCHEMA_V82}` : ""}${migration.version === 83 ? `\0${GELIVER_REMEDIATION_SCHEMA_V83}` : ""}${migration.version === 84 ? `\0${CHANNEL_SHIPMENT_OUTBOUND_SCHEMA_V84}` : ""}`)
+  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}${migration.version === 69 ? `\0${INVENTORY_SCHEMA_V69}` : ""}${migration.version === 71 ? `\0${WAREHOUSE_EXECUTION_SCHEMA_V71}` : ""}${migration.version === 74 ? `\0${SALES_FINANCIAL_SCHEMA_V74}` : ""}${migration.version === 75 ? `\0${RETURNS_SCHEMA_V75}` : ""}${migration.version === 76 ? `\0${WAREHOUSE_PACKAGE_ORIGIN_SCHEMA_V76}` : ""}${migration.version === 77 ? `\0${PUBLISHED_KIT_SCHEMA_V77}` : ""}${migration.version === 78 ? `\0${PROFILE_CUT_REMEDIATION_SCHEMA_V78}` : ""}${migration.version === 79 ? `\0${CHANNEL_GATEWAY_SCHEMA_V79}` : ""}${migration.version === 80 ? `\0${CHANNEL_GATEWAY_REMEDIATION_SCHEMA_V80}` : ""}${migration.version === 81 ? `\0${CHANNEL_GATEWAY_CORRECTNESS_SCHEMA_V81}` : ""}${migration.version === 82 ? `\0${SHIPMENT_CARRIER_SCHEMA_V82}` : ""}${migration.version === 83 ? `\0${GELIVER_REMEDIATION_SCHEMA_V83}` : ""}${migration.version === 84 ? `\0${CHANNEL_SHIPMENT_OUTBOUND_SCHEMA_V84}` : ""}${migration.version === 85 ? `\0${PRINT_STATE_SCHEMA_V85}` : ""}`)
   .digest("hex");
 
 export function getMigrationManifest(): MigrationManifestEntry[] {

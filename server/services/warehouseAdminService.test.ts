@@ -8,6 +8,7 @@ import { startPrintQueueWorker } from "./printQueueWorker.js";
 import { createServer } from "node:http";
 import express from "express";
 import { createWarehouseRouter, userHasWarehousePermission } from "../routes/warehouseRoutes.js";
+import { PrintingService } from "../modules/printing/printingService.js";
 
 const actor = { id: "warehouse-user", username: "Depocu", role: "admin", permissions: {} };
 let db: Database.Database;
@@ -55,6 +56,25 @@ beforeEach(() => {
 });
 
 describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
+  test("yeniden baskı warehouse:print_labels olmadan reddedilir", async () => {
+    db.prepare(`INSERT INTO panel_api_keys (id,name,key_prefix,key_hash,last4,permissions) VALUES ('print-key','Print','test','print-secret','cret',?)`)
+      .run(JSON.stringify(["write:warehouse_status"]));
+    const original = new PrintingService(db).queueTemplateJob({ purpose: "LOCATION", subjectId: "loc-1", subjectCode: "A1-K1-P1",
+      payload: { Lokasyon: "A1-K1-P1" }, operationId: "permission-original", actorId: actor.id,
+      template: { id: "location-v1", name: "Location", purpose: "location", version: 1, contentHash: "a".repeat(64), width: 100, height: 50,
+        elements: [{ id: "barcode", type: "barcode", value: "{Lokasyon}" }] } });
+    const app = express(); app.use(express.json()); app.use("/api/warehouse/v1", createWarehouseRouter({ db, hashApiKey: (value) => value,
+      logActivity: () => {}, uploadsDir: process.cwd(), authenticateUserToken: () => ({ id: "warehouse-user-2", username: "Ayşe", role: "user", permissions: {}, must_change_password: false }) }));
+    const http = createServer(app); await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
+    const address = http.address(); assert.ok(address && typeof address !== "string");
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/warehouse/v1/admin/print-jobs/${original.id}/reprint`, { method: "POST",
+      headers: { "x-api-key": "print-secret", authorization: "Bearer denied", "content-type": "application/json" },
+      body: JSON.stringify({ reason: "LOST", idempotency_key: "permission-reprint" }) });
+    assert.equal(response.status, 403);
+    assert.equal(db.prepare("SELECT COUNT(*) FROM printing_reprints").pluck().get(), 0);
+    await new Promise<void>((resolve, reject) => http.close((error) => error ? reject(error) : resolve()));
+  });
+
   test("mal kabul kapasitesi K1/K2 için üçle sınırlanır, diğer katlarda fiziksel kapasiteyi kullanır", () => {
     assert.equal(receivingCapacityForLocation("A1-K1-P1", 4), 3);
     assert.equal(receivingCapacityForLocation("A1-K2-P1", 4), 3);
@@ -288,16 +308,19 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
       assert.equal(firstMoveJson.error.code, "V2_WAREHOUSE_EXECUTION_REQUIRED");
       assert.equal((db.prepare("SELECT COUNT(*) FROM package_placements WHERE action = 'MOVE'").pluck().get()), 0);
 
-      const printBody = { idempotency_key: "command-location-print", printer_name: "dry-run-printer" };
+      const printBody = { idempotency_key: "command-location-print", printer_name: "dry-run-printer", template_snapshot: {
+        id: "location-v1", name: "Location", purpose: "location", version: 1, contentHash: "a".repeat(64), width: 100, height: 50,
+        elements: [{ id: "barcode", type: "barcode", value: "{Lokasyon}" }],
+      } };
       const firstPrint = await call(`/admin/locations/${locationC.id}/print`, printBody);
       const firstPrintJson = await firstPrint.json() as any;
-      assert.equal(firstPrint.status, 200);
+      assert.equal(firstPrint.status, 201);
       const replayPrint = await call(`/admin/locations/${locationC.id}/print`, printBody);
-      assert.equal(replayPrint.status, 200);
+      assert.equal(replayPrint.status, 201);
       assert.deepEqual(await replayPrint.json(), firstPrintJson);
       const conflictPrint = await call(`/admin/locations/${locationC.id}/print`, { ...printBody, printer_name: "other-printer" });
       assert.equal(conflictPrint.status, 409);
-      assert.equal((db.prepare("SELECT COUNT(*) FROM label_print_jobs WHERE idempotency_key = 'command-location-print'").pluck().get()), 1);
+      assert.equal((db.prepare("SELECT COUNT(*) FROM printing_jobs WHERE created_operation_id = 'command-location-print'").pluck().get()), 1);
 
       const audits = db.prepare(`SELECT human_actor_id, human_actor_name, service_actor_id, service_actor_name,
         correlation_id, request_id, command_type FROM command_audit_log ORDER BY command_type`).all() as any[];
@@ -438,16 +461,11 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
     assert.equal(reprint.package.package_code, pkg.package_code);
   });
 
-  test("baskı worker hatayı kaydeder, yeniden dener ve başarıda paketi LABELED yapar", async () => {
+  test("kanonik worker eski paket kuyruğunu fiziksel baskı olarak yorumlamaz", async () => {
     createImportedBatch(importRows({ "Paket Sayısı": 1, "Paket İçi Adet": 5, "Toplam Adet": 5 }));
     const pkg = service.claimNextPackage("SUP-1", actor) as any;
     service.queuePrint(pkg.id, { claim_token: pkg.claim_token, idempotency_key: "worker-print" }, actor);
-    let calls = 0;
-    const renderer = createServer((_req, res) => {
-      calls += 1;
-      if (calls === 1) { res.statusCode = 500; res.end("temporary"); return; }
-      res.setHeader("Content-Type", "application/pdf"); res.end(Buffer.from("%PDF-rendered"));
-    });
+    const renderer = createServer((_req, res) => { res.setHeader("Content-Type", "application/pdf"); res.end(Buffer.from("%PDF-rendered")); });
     await new Promise<void>((resolve) => renderer.listen(0, "127.0.0.1", resolve));
     const address = renderer.address();
     assert.ok(address && typeof address !== "string");
@@ -458,25 +476,17 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
       logger: { info() {}, warn() {}, error() {} },
     });
     assert.equal(await worker.runOnce(), false);
-    assert.equal((db.prepare("SELECT status, attempts FROM print_jobs WHERE idempotency_key = 'worker-print'").get() as any).status, "FAILED");
-    assert.equal(await worker.runOnce(), true);
-    assert.equal((db.prepare("SELECT status FROM print_jobs WHERE idempotency_key = 'worker-print'").get() as any).status, "PRINTED");
-    assert.equal((db.prepare("SELECT status FROM warehouse_packages WHERE id = ?").get(pkg.id) as any).status, "LABELED");
+    assert.equal((db.prepare("SELECT status, attempts FROM print_jobs WHERE idempotency_key = 'worker-print'").get() as any).status, "QUEUED");
+    assert.equal((db.prepare("SELECT status FROM warehouse_packages WHERE id = ?").get(pkg.id) as any).status, "LABEL_QUEUED");
     await new Promise<void>((resolve, reject) => renderer.close((error) => error ? reject(error) : resolve()));
   });
 
-  test("lokasyon etiketini aynı renderer ve CUPS worker kuyruğunda purpose ile işler", async () => {
+  test("kanonik worker eski purpose kuyruğunu tüketmez", async () => {
     const location = service.createLocation({ code: "A1-K1-P1", package_capacity: 2 }, actor) as any;
     const queued = service.queueLocationPrint(location.id, { idempotency_key: "location-print-1" }, actor) as any;
     const replay = service.queueLocationPrint(location.id, { idempotency_key: "location-print-1" }, actor) as any;
     assert.equal(queued.job.id, replay.job.id);
-    let requestPath = "";
-    let requestBody = "";
-    const renderer = createServer((req, res) => {
-      requestPath = req.url || "";
-      req.on("data", (chunk) => { requestBody += chunk; });
-      req.on("end", () => { res.setHeader("Content-Type", "application/pdf"); res.end(Buffer.from("%PDF-location")); });
-    });
+    const renderer = createServer((_req, res) => { res.setHeader("Content-Type", "application/pdf"); res.end(Buffer.from("%PDF-location")); });
     await new Promise<void>((resolve) => renderer.listen(0, "127.0.0.1", resolve));
     const address = renderer.address();
     assert.ok(address && typeof address !== "string");
@@ -486,10 +496,8 @@ describe("Warehouse Admin giriş, paket ve lokasyon akışı", () => {
       autoStart: false,
       logger: { info() {}, warn() {}, error() {} },
     });
-    assert.equal(await worker.runOnce(), true);
-    assert.equal(requestPath, "/api/v1/render");
-    assert.deepEqual(JSON.parse(requestBody), { purpose: "location", data: { Lokasyon: "A1-K1-P1" } });
-    assert.equal((db.prepare("SELECT status FROM label_print_jobs WHERE id = ?").get(queued.job.id) as any).status, "PRINTED");
+    assert.equal(await worker.runOnce(), false);
+    assert.equal((db.prepare("SELECT status FROM label_print_jobs WHERE id = ?").get(queued.job.id) as any).status, "QUEUED");
     await new Promise<void>((resolve, reject) => renderer.close((error) => error ? reject(error) : resolve()));
   });
 

@@ -160,6 +160,10 @@ const businessTablesThatMustStartEmpty = [
   "geliver_label_observations",
   "geliver_tracking_observations",
   "geliver_cancellation_facts",
+  "printing_jobs",
+  "printing_attempts",
+  "printing_reprints",
+  "printing_events",
 ] as const;
 
 test("fresh production schema is exact, versioned and has zero business history", () => {
@@ -168,7 +172,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 83);
+  assert.equal(manifest.length, 84);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -267,6 +271,10 @@ test("fresh production schema is exact, versioned and has zero business history"
     warehouse_replenishment_tasks: ["current_pct", "inventory_lot_id", "source_package_id", "status", "target_slot_id", "threshold_pct"],
     warehouse_stock_discrepancies_v2: ["inventory_lot_id", "operation_id", "reason", "status"],
     warehouse_stock_counts_v2: ["difference_base_int", "expected_quantity_base_int", "observed_quantity_base_int", "status"],
+    printing_jobs: ["artifact_sha256", "created_operation_id", "original_job_id", "payload_snapshot_hash", "payload_snapshot_json", "printer_dpi", "printer_model", "purpose", "status", "template_content_hash", "template_snapshot_json", "template_version"],
+    printing_attempts: ["attempt_identity", "attempt_number", "error_code", "job_id", "lease_expires_at", "rendered_sha256", "spool_reference", "state"],
+    printing_reprints: ["actor_id", "explanation", "operation_id", "original_job_id", "reason", "reprint_job_id"],
+    printing_events: ["actor_id", "attempt_id", "details_json", "event_index", "from_status", "job_id", "operation_id", "to_status"],
     schema_migrations: ["applied_at", "checksum", "name", "version"],
   };
   for (const [table, expected] of Object.entries(requiredColumns)) {
@@ -354,6 +362,19 @@ test("migration history fails closed on unknown, renamed or changed entries", ()
   changed.prepare("UPDATE schema_migrations SET checksum = ? WHERE version = 1").run("f".repeat(64));
   assert.throws(() => runMigrations(changed), /Migration v1 checksum mismatch/);
   changed.close();
+});
+
+test("v85 forward migration fails closed while a legacy print is still active", () => {
+  const db = new Database(":memory:");
+  db.pragma("foreign_keys = OFF");
+  db.exec(fs.readFileSync(path.join(fixtureDirectory, "panel-v53.sql"), "utf8"));
+  runMigrations(db, 84);
+  db.pragma("foreign_keys = OFF");
+  db.prepare(`INSERT INTO print_jobs (id,package_id,template_id,idempotency_key,status,package_status_before,created_by)
+    VALUES ('legacy-active','package-1','template-1','legacy-active-op','QUEUED','CLAIMED','user-1')`).run();
+  assert.throws(() => runMigrations(db), /legacy print queues to be drained or explicitly cancelled/i);
+  assert.equal(db.prepare("SELECT MAX(version) FROM schema_migrations").pluck().get(), 84);
+  db.close();
 });
 
 for (const start of SUPPORTED_UPGRADE_STARTS) {
