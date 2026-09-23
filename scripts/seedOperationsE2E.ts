@@ -12,10 +12,11 @@ const serviceKeys = {
   warehouse: process.env.E2E_WAREHOUSE_API_KEY,
   kitStudio: process.env.E2E_KIT_STUDIO_API_KEY,
   labelPrinter: process.env.E2E_LABEL_PRINTER_API_KEY,
+  customerHub: process.env.E2E_CUSTOMER_HUB_API_KEY,
 };
 const hashSecret = process.env.PANEL_API_HASH_SECRET;
 if (!dbPath || !hashSecret || Object.values(serviceKeys).some((value) => !value)) {
-  throw new Error("DB_PATH, E2E_WAREHOUSE_API_KEY, E2E_KIT_STUDIO_API_KEY, E2E_LABEL_PRINTER_API_KEY and PANEL_API_HASH_SECRET are required.");
+  throw new Error("DB_PATH, E2E_WAREHOUSE_API_KEY, E2E_KIT_STUDIO_API_KEY, E2E_LABEL_PRINTER_API_KEY, E2E_CUSTOMER_HUB_API_KEY and PANEL_API_HASH_SECRET are required.");
 }
 
 const db = openDatabase(dbPath);
@@ -47,6 +48,7 @@ const principals = [
   { id: "operations-e2e-warehouse", name: "Operations E2E Warehouse", key: serviceKeys.warehouse!, permissions: [...authScopes, "read:warehouse_orders", "read:products", "read:bom", "write:warehouse_status"] },
   { id: "operations-e2e-kit", name: "Operations E2E Kit Studio", key: serviceKeys.kitStudio!, permissions: [...authScopes, "kit-catalog:read"] },
   { id: "operations-e2e-label", name: "Operations E2E Label Printer", key: serviceKeys.labelPrinter!, permissions: authScopes },
+  { id: "operations-e2e-customer-hub", name: "Operations E2E Customer Hub", key: serviceKeys.customerHub!, permissions: authScopes },
 ];
 const upsertPrincipal = db.prepare(`
   INSERT INTO panel_api_keys

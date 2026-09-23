@@ -9,6 +9,7 @@ function activeSales(alias = "s"): string {
 }
 
 const ACTIVE_SALES = activeSales("s");
+const REVENUE_BASIS = "SELLER_REVENUE_AFTER_DISCOUNT_GROSS_INCL_VAT";
 
 function periodCutoff(days: number): string {
   const d = new Date();
@@ -26,17 +27,18 @@ function productSalesCte(extraWhere = ""): string {
   return `
     WITH product_sales AS (
       SELECT
-        si.product_id,
-        SUM(si.quantity) AS sold_qty,
-        SUM(si.quantity * si.unit_price) AS revenue,
-        SUM(COALESCE(si.net_profit, 0)) AS profit,
+        fl.product_id,
+        SUM(fl.quantity_base_int) AS sold_qty,
+        SUM(fl.gross_amount_base_try_minor) / 100.0 AS revenue,
+        NULL AS profit,
         COUNT(DISTINCT s.id) AS order_count,
         MAX(s.created_at) AS last_sale_date
-      FROM sale_items si
-      JOIN sales s ON s.id = si.sale_id
+      FROM sale_financial_lines fl
+      JOIN sale_financial_snapshots fs ON fs.id = fl.financial_snapshot_id
+      JOIN sales s ON s.id = fs.sale_id
       WHERE ${ACTIVE_SALES}
         ${extraWhere}
-      GROUP BY si.product_id
+      GROUP BY fl.product_id
     )
   `;
 }
@@ -87,18 +89,18 @@ export function createInsightsRouter(db: Database.Database) {
       const sales = db.prepare(`
         SELECT
           COUNT(*) AS sale_count,
-          COALESCE(SUM(s.total_amount), 0) AS revenue,
-          COALESCE(SUM(s.gross_profit), 0) AS gross_profit,
-          COALESCE(SUM(s.net_profit), 0) AS net_profit
-        FROM sales s
+          COALESCE(SUM(fs.gross_amount_base_try_minor), 0) / 100.0 AS revenue
+        FROM sale_financial_snapshots fs
+        JOIN sales s ON s.id=fs.sale_id
         WHERE ${ACTIVE_SALES} AND s.created_at >= ?
       `).get(cutoff) as any;
 
       const productSales = db.prepare(`
-        SELECT COUNT(DISTINCT si.product_id) AS distinct_products,
-               COALESCE(SUM(si.quantity), 0) AS units_sold
-        FROM sale_items si
-        JOIN sales s ON s.id = si.sale_id
+        SELECT COUNT(DISTINCT fl.product_id) AS distinct_products,
+               COALESCE(SUM(fl.quantity_base_int), 0) AS units_sold
+        FROM sale_financial_lines fl
+        JOIN sale_financial_snapshots fs ON fs.id=fl.financial_snapshot_id
+        JOIN sales s ON s.id = fs.sale_id
         WHERE ${ACTIVE_SALES} AND s.created_at >= ?
       `).get(cutoff) as any;
 
@@ -107,9 +109,10 @@ export function createInsightsRouter(db: Database.Database) {
         FROM products p
         WHERE ${SELLABLE_PRODUCT_FILTER}
           AND NOT EXISTS (
-            SELECT 1 FROM sale_items si
-            JOIN sales s ON s.id = si.sale_id
-            WHERE si.product_id = p.id AND ${ACTIVE_SALES} AND s.created_at >= ?
+            SELECT 1 FROM sale_financial_lines fl
+            JOIN sale_financial_snapshots fs ON fs.id=fl.financial_snapshot_id
+            JOIN sales s ON s.id = fs.sale_id
+            WHERE fl.product_id = p.id AND ${ACTIVE_SALES} AND s.created_at >= ?
           )
       `).get(cutoff) as any;
 
@@ -121,12 +124,13 @@ export function createInsightsRouter(db: Database.Database) {
       `).get() as any;
 
       const fastest = db.prepare(`
-        SELECT p.sku, p.name, SUM(si.quantity) AS qty
-        FROM sale_items si
-        JOIN sales s ON s.id = si.sale_id
-        JOIN products p ON p.id = si.product_id
+        SELECT p.sku, p.name, SUM(fl.quantity_base_int) AS qty
+        FROM sale_financial_lines fl
+        JOIN sale_financial_snapshots fs ON fs.id=fl.financial_snapshot_id
+        JOIN sales s ON s.id = fs.sale_id
+        JOIN products p ON p.id = fl.product_id
         WHERE ${ACTIVE_SALES} AND s.created_at >= ? AND ${SELLABLE_PRODUCT_FILTER}
-        GROUP BY si.product_id
+        GROUP BY fl.product_id
         ORDER BY qty DESC
         LIMIT 1
       `).get(cutoff) as any;
@@ -157,9 +161,11 @@ export function createInsightsRouter(db: Database.Database) {
           sale_count: sales.sale_count,
           units_sold: productSales.units_sold,
           revenue_try: sales.revenue,
-          gross_profit_try: sales.gross_profit,
-          net_profit_try: sales.net_profit,
-          margin: sales.revenue > 0 ? (sales.gross_profit / sales.revenue) : 0,
+          revenue_basis: REVENUE_BASIS,
+          gross_profit_try: null,
+          net_profit_try: null,
+          profit_state: "USE_ORDER_FINANCIAL_BREAKDOWN",
+          margin: null,
           fastest_seller: fastest,
         },
       });
@@ -179,21 +185,22 @@ export function createInsightsRouter(db: Database.Database) {
         p.id, p.sku, p.name, p.material, p.product_series, p.tube_type_code,
         p.size, p.form_code, p.purchase_price_usd,
         ${STOCK_EXPR} AS stock,
-        SUM(si.quantity) AS qty,
-        SUM(si.quantity * si.unit_price) AS revenue,
-        SUM(si.net_profit) AS profit,
-        AVG(si.unit_price) AS avg_price,
+        SUM(fl.quantity_base_int) AS qty,
+        SUM(fl.gross_amount_base_try_minor) / 100.0 AS revenue,
+        NULL AS profit,
+        (SUM(fl.gross_amount_base_try_minor) / 100.0) / SUM(fl.quantity_base_int) AS avg_price,
         COUNT(DISTINCT s.id) AS order_count,
-        SUM(si.quantity) * 1.0 / ${period} AS avg_daily_sales
-      FROM sale_items si
-      JOIN sales s ON s.id = si.sale_id
-      JOIN products p ON p.id = si.product_id
+        SUM(fl.quantity_base_int) * 1.0 / ${period} AS avg_daily_sales
+      FROM sale_financial_lines fl
+      JOIN sale_financial_snapshots fs ON fs.id=fl.financial_snapshot_id
+      JOIN sales s ON s.id = fs.sale_id
+      JOIN products p ON p.id = fl.product_id
       WHERE ${ACTIVE_SALES} AND s.created_at >= ? AND ${SELLABLE_PRODUCT_FILTER}
-      GROUP BY si.product_id
+      GROUP BY fl.product_id
       ORDER BY qty DESC
       LIMIT ?
     `).all(cutoff, limit);
-    res.json({ period_days: period, items: rows });
+    res.json({ period_days: period, revenue_basis: REVENUE_BASIS, items: rows });
   });
 
   router.get("/sales/bottom", (req, res) => {
@@ -215,7 +222,7 @@ export function createInsightsRouter(db: Database.Database) {
       ORDER BY qty ASC
       LIMIT ?
     `).all(cutoff, limit);
-    res.json({ period_days: period, items: rows });
+    res.json({ period_days: period, revenue_basis: REVENUE_BASIS, items: rows });
   });
 
   router.get("/sales/dead", (req, res) => {
@@ -228,21 +235,23 @@ export function createInsightsRouter(db: Database.Database) {
         (${STOCK_EXPR}) * COALESCE(p.purchase_price_usd, 0) AS tied_capital_usd,
         (
           SELECT MAX(s2.created_at)
-          FROM sale_items si2
-          JOIN sales s2 ON s2.id = si2.sale_id
-          WHERE si2.product_id = p.id AND ${ACTIVE_SALES.replace(/s\./g, "s2.")}
+          FROM sale_financial_lines fl2
+          JOIN sale_financial_snapshots fs2 ON fs2.id=fl2.financial_snapshot_id
+          JOIN sales s2 ON s2.id = fs2.sale_id
+          WHERE fl2.product_id = p.id AND ${ACTIVE_SALES.replace(/s\./g, "s2.")}
         ) AS last_sale
       FROM products p
       WHERE ${SELLABLE_PRODUCT_FILTER}
         AND NOT EXISTS (
-          SELECT 1 FROM sale_items si
-          JOIN sales s ON s.id = si.sale_id
-          WHERE si.product_id = p.id AND ${ACTIVE_SALES} AND s.created_at >= ?
+          SELECT 1 FROM sale_financial_lines fl
+          JOIN sale_financial_snapshots fs ON fs.id=fl.financial_snapshot_id
+          JOIN sales s ON s.id = fs.sale_id
+          WHERE fl.product_id = p.id AND ${ACTIVE_SALES} AND s.created_at >= ?
         )
         AND ${STOCK_EXPR} > 0
       ORDER BY tied_capital_usd DESC
     `).all(cutoff);
-    res.json({ period_days: period, items: rows });
+    res.json({ period_days: period, revenue_basis: REVENUE_BASIS, items: rows });
   });
 
   // -------- Sales trend (daily / weekly) -----------------------------------
@@ -252,9 +261,10 @@ export function createInsightsRouter(db: Database.Database) {
     const rows = db.prepare(`
       SELECT DATE(s.created_at) AS day,
              COUNT(*) AS sale_count,
-             COALESCE(SUM(s.total_amount), 0) AS revenue,
-             COALESCE(SUM(s.gross_profit), 0) AS gross_profit
-      FROM sales s
+             COALESCE(SUM(fs.gross_amount_base_try_minor), 0) / 100.0 AS revenue,
+             NULL AS gross_profit
+      FROM sale_financial_snapshots fs
+      JOIN sales s ON s.id=fs.sale_id
       WHERE ${ACTIVE_SALES} AND s.created_at >= ?
       GROUP BY DATE(s.created_at)
       ORDER BY day ASC
@@ -350,17 +360,18 @@ export function createInsightsRouter(db: Database.Database) {
     const rows = db.prepare(`
       WITH product_sales AS (
         SELECT
-          si.product_id,
-          SUM(CASE WHEN s.created_at >= ? THEN si.quantity ELSE 0 END) AS sold_7d,
-          SUM(CASE WHEN s.created_at >= ? THEN si.quantity ELSE 0 END) AS sold_30d,
-          SUM(CASE WHEN s.created_at >= ? THEN si.quantity ELSE 0 END) AS sold_90d,
-          SUM(CASE WHEN s.created_at >= ? THEN si.quantity ELSE 0 END) AS sold_in_period,
+          fl.product_id,
+          SUM(CASE WHEN s.created_at >= ? THEN fl.quantity_base_int ELSE 0 END) AS sold_7d,
+          SUM(CASE WHEN s.created_at >= ? THEN fl.quantity_base_int ELSE 0 END) AS sold_30d,
+          SUM(CASE WHEN s.created_at >= ? THEN fl.quantity_base_int ELSE 0 END) AS sold_90d,
+          SUM(CASE WHEN s.created_at >= ? THEN fl.quantity_base_int ELSE 0 END) AS sold_in_period,
           MAX(s.created_at) AS last_sale_date
-        FROM sale_items si
-        JOIN sales s ON s.id = si.sale_id
+        FROM sale_financial_lines fl
+        JOIN sale_financial_snapshots fs ON fs.id=fl.financial_snapshot_id
+        JOIN sales s ON s.id = fs.sale_id
         WHERE ${ACTIVE_SALES}
           AND s.created_at >= ?
-        GROUP BY si.product_id
+        GROUP BY fl.product_id
       )
       SELECT
         p.id, p.sku, p.supplier_code, p.name, p.material, p.product_series,
@@ -440,6 +451,15 @@ export function createInsightsRouter(db: Database.Database) {
     const period = num(req.query.period, 30);
     const cutoff = periodCutoff(period);
 
+    if (metric === "profit") {
+      return res.status(409).json({
+        error: {
+          code: "PROFIT_REQUIRES_ORDER_FINANCIAL_BREAKDOWN",
+          message: "Product profit cannot be derived without the immutable order financial breakdown.",
+        },
+      });
+    }
+
     const colMap: Record<string, string> = {
       material: "COALESCE(p.material, 'Bilinmiyor')",
       series: "COALESCE(p.product_series, 'Bilinmiyor')",
@@ -454,7 +474,6 @@ export function createInsightsRouter(db: Database.Database) {
     const metricMap: Record<string, string> = {
       qty: "COALESCE(SUM(ps.sold_qty), 0)",
       revenue: "COALESCE(SUM(ps.revenue), 0)",
-      profit: "COALESCE(SUM(ps.profit), 0)",
     };
     const metricExpr = metricMap[metric] || metricMap.qty;
 
@@ -477,6 +496,7 @@ export function createInsightsRouter(db: Database.Database) {
     res.json({
       dimension,
       metric,
+      revenue_basis: metric === "revenue" ? REVENUE_BASIS : null,
       period_days: period,
       total,
       items: rows.map((r) => ({ ...r, share: total > 0 ? r.value / total : 0 })),
@@ -490,12 +510,13 @@ export function createInsightsRouter(db: Database.Database) {
     const rows = db.prepare(`
       SELECT comp.id, comp.sku, comp.name, comp.central_stock,
              comp.purchase_price_usd,
-             SUM(b.quantity_per_unit * si.quantity) AS units_consumed,
-             SUM(b.quantity_per_unit * si.quantity) * 1.0 / ? AS daily_consumption
-      FROM sale_items si
-      JOIN sales s ON s.id = si.sale_id
-      JOIN product_bom b ON b.parent_product_id = si.product_id
-      JOIN products comp ON comp.id = b.component_product_id
+             SUM(c.quantity_base_int) AS units_consumed,
+             SUM(c.quantity_base_int) * 1.0 / ? AS daily_consumption
+      FROM sale_financial_line_components c
+      JOIN sale_financial_lines fl ON fl.id=c.financial_line_id
+      JOIN sale_financial_snapshots fs ON fs.id=fl.financial_snapshot_id
+      JOIN sales s ON s.id = fs.sale_id
+      JOIN products comp ON comp.id = c.component_product_id
       WHERE ${ACTIVE_SALES} AND s.created_at >= ?
       GROUP BY comp.id
       ORDER BY units_consumed DESC
@@ -534,12 +555,13 @@ export function createInsightsRouter(db: Database.Database) {
              ) AS affected_final_products
       FROM products comp
       LEFT JOIN (
-        SELECT b.component_product_id, SUM(b.quantity_per_unit * si.quantity) AS units
-        FROM sale_items si
-        JOIN sales s ON s.id = si.sale_id
-        JOIN product_bom b ON b.parent_product_id = si.product_id
+        SELECT c.component_product_id, SUM(c.quantity_base_int) AS units
+        FROM sale_financial_line_components c
+        JOIN sale_financial_lines fl ON fl.id=c.financial_line_id
+        JOIN sale_financial_snapshots fs ON fs.id=fl.financial_snapshot_id
+        JOIN sales s ON s.id = fs.sale_id
         WHERE ${ACTIVE_SALES} AND s.created_at >= ?
-        GROUP BY b.component_product_id
+        GROUP BY c.component_product_id
       ) consumed ON consumed.component_product_id = comp.id
       WHERE comp.product_type IN ('component', 'accessory')
       ORDER BY (CASE WHEN COALESCE(consumed.units, 0) > 0 THEN days_left ELSE 999999 END) ASC
@@ -606,12 +628,13 @@ export function createInsightsRouter(db: Database.Database) {
              ) AS affected_final_products
       FROM products comp
       LEFT JOIN (
-        SELECT b.component_product_id, SUM(b.quantity_per_unit * si.quantity) AS units
-        FROM sale_items si
-        JOIN sales s ON s.id = si.sale_id
-        JOIN product_bom b ON b.parent_product_id = si.product_id
+        SELECT c.component_product_id, SUM(c.quantity_base_int) AS units
+        FROM sale_financial_line_components c
+        JOIN sale_financial_lines fl ON fl.id=c.financial_line_id
+        JOIN sale_financial_snapshots fs ON fs.id=fl.financial_snapshot_id
+        JOIN sales s ON s.id = fs.sale_id
         WHERE ${ACTIVE_SALES} AND s.created_at >= ?
-        GROUP BY b.component_product_id
+        GROUP BY c.component_product_id
       ) consumed ON consumed.component_product_id = comp.id
       WHERE comp.product_type IN ('component', 'accessory')
       ORDER BY need_to_order DESC

@@ -140,7 +140,7 @@ export function createDashboardDataRouter(db: Database) {
     let productJoin = "";
     let productWhere = "";
     if (req.query.material || req.query.model || req.query.pipeType || req.query.pipeSize) {
-      productJoin = " JOIN products p ON p.id = i.product_id ";
+      productJoin = " JOIN products p ON p.id = fl.product_id ";
       productWhere += " AND COALESCE(p.exclude_from_analysis, 0) = 0 AND COALESCE(p.is_sellable, 1) = 1";
       if (req.query.material) {
         productWhere += " AND (p.material = ? OR p.normalized_material = ?)";
@@ -163,6 +163,7 @@ export function createDashboardDataRouter(db: Database) {
   };
 
   const activeSalesFilter = "s.status NOT IN ('İptal', 'İptal Edildi', 'İade', 'İade Edildi')";
+  const revenueBasis = "SELLER_REVENUE_AFTER_DISCOUNT_GROSS_INCL_VAT";
   const modelDisplayExpr = `
     CASE
       WHEN TRIM(COALESCE(p.normalized_model, '')) NOT IN ('', 'Bilinmiyor', 'Standart') THEN TRIM(p.normalized_model)
@@ -175,9 +176,10 @@ export function createDashboardDataRouter(db: Database) {
     try {
       const { q, params, productJoin, productWhere } = getProductFilters(req);
       const salesQuery = `
-        SELECT SUM(i.quantity) as total_sold, SUM(i.quantity * i.unit_price * COALESCE(s.exchange_rate_at_transaction, 1)) as total_revenue
-        FROM sale_items i
-        JOIN sales s ON s.id = i.sale_id AND ${activeSalesFilter}
+        SELECT SUM(fl.quantity_base_int) as total_sold, SUM(fl.gross_amount_base_try_minor) / 100.0 as total_revenue
+        FROM sale_financial_lines fl
+        JOIN sale_financial_snapshots fs ON fs.id = fl.financial_snapshot_id
+        JOIN sales s ON s.id = fs.sale_id AND ${activeSalesFilter}
         ${productJoin}
         WHERE 1=1 ${q} ${productWhere}
       `;
@@ -185,7 +187,8 @@ export function createDashboardDataRouter(db: Database) {
       
       res.json({
         total_sold: data.total_sold || 0,
-        total_revenue: data.total_revenue || 0
+        total_revenue: data.total_revenue || 0,
+        revenue_basis: revenueBasis
       });
     } catch(e: any) { res.status(500).json({ error: e.message }); }
   });
@@ -194,10 +197,11 @@ export function createDashboardDataRouter(db: Database) {
     try {
       const { q, params, productWhere } = getProductFilters(req);
       const data = db.prepare(`
-        SELECT COALESCE(p.material, 'Bilinmiyor') as name, SUM(i.quantity) as value
-        FROM sale_items i
-        JOIN sales s ON s.id = i.sale_id AND ${activeSalesFilter}
-        JOIN products p ON p.id = i.product_id
+        SELECT COALESCE(p.material, 'Bilinmiyor') as name, SUM(fl.quantity_base_int) as value
+        FROM sale_financial_lines fl
+        JOIN sale_financial_snapshots fs ON fs.id = fl.financial_snapshot_id
+        JOIN sales s ON s.id = fs.sale_id AND ${activeSalesFilter}
+        JOIN products p ON p.id = fl.product_id
         WHERE 1=1 ${q} ${productWhere}
           AND COALESCE(p.exclude_from_analysis, 0) = 0
           AND COALESCE(p.is_sellable, 1) = 1
@@ -212,10 +216,11 @@ export function createDashboardDataRouter(db: Database) {
     try {
       const { q, params, productWhere } = getProductFilters(req);
       const data = db.prepare(`
-        SELECT ${modelDisplayExpr} as name, SUM(i.quantity) as value
-        FROM sale_items i
-        JOIN sales s ON s.id = i.sale_id AND ${activeSalesFilter}
-        JOIN products p ON p.id = i.product_id
+        SELECT ${modelDisplayExpr} as name, SUM(fl.quantity_base_int) as value
+        FROM sale_financial_lines fl
+        JOIN sale_financial_snapshots fs ON fs.id = fl.financial_snapshot_id
+        JOIN sales s ON s.id = fs.sale_id AND ${activeSalesFilter}
+        JOIN products p ON p.id = fl.product_id
         WHERE 1=1 ${q} ${productWhere}
           AND COALESCE(p.exclude_from_analysis, 0) = 0
           AND COALESCE(p.is_sellable, 1) = 1
@@ -230,10 +235,11 @@ export function createDashboardDataRouter(db: Database) {
     try {
       const { q, params, productWhere } = getProductFilters(req);
       const data = db.prepare(`
-        SELECT COALESCE(p.normalized_pipe_size, p.pipe_size, p.size, 'Bilinmiyor') as name, SUM(i.quantity) as value
-        FROM sale_items i
-        JOIN sales s ON s.id = i.sale_id AND ${activeSalesFilter}
-        JOIN products p ON p.id = i.product_id
+        SELECT COALESCE(p.normalized_pipe_size, p.pipe_size, p.size, 'Bilinmiyor') as name, SUM(fl.quantity_base_int) as value
+        FROM sale_financial_lines fl
+        JOIN sale_financial_snapshots fs ON fs.id = fl.financial_snapshot_id
+        JOIN sales s ON s.id = fs.sale_id AND ${activeSalesFilter}
+        JOIN products p ON p.id = fl.product_id
         WHERE 1=1 ${q} ${productWhere}
           AND COALESCE(p.exclude_from_analysis, 0) = 0
           AND COALESCE(p.is_sellable, 1) = 1
@@ -248,10 +254,11 @@ export function createDashboardDataRouter(db: Database) {
     try {
       const { q, params, productWhere } = getProductFilters(req);
       const data = db.prepare(`
-        SELECT COALESCE(p.normalized_tube_type, p.connection_type, 'Bilinmiyor') as name, SUM(i.quantity) as value
-        FROM sale_items i
-        JOIN sales s ON s.id = i.sale_id AND ${activeSalesFilter}
-        JOIN products p ON p.id = i.product_id
+        SELECT COALESCE(p.normalized_tube_type, p.connection_type, 'Bilinmiyor') as name, SUM(fl.quantity_base_int) as value
+        FROM sale_financial_lines fl
+        JOIN sale_financial_snapshots fs ON fs.id = fl.financial_snapshot_id
+        JOIN sales s ON s.id = fs.sale_id AND ${activeSalesFilter}
+        JOIN products p ON p.id = fl.product_id
         WHERE 1=1 ${q} ${productWhere}
           AND COALESCE(p.exclude_from_analysis, 0) = 0
           AND COALESCE(p.is_sellable, 1) = 1
@@ -266,9 +273,10 @@ export function createDashboardDataRouter(db: Database) {
     try {
       const { q, params, productJoin, productWhere } = getProductFilters(req);
       const data = db.prepare(`
-        SELECT substr(s.created_at, 1, 10) as name, SUM(i.quantity) as value
-        FROM sale_items i
-        JOIN sales s ON s.id = i.sale_id AND ${activeSalesFilter}
+        SELECT substr(s.created_at, 1, 10) as name, SUM(fl.quantity_base_int) as value
+        FROM sale_financial_lines fl
+        JOIN sale_financial_snapshots fs ON fs.id = fl.financial_snapshot_id
+        JOIN sales s ON s.id = fs.sale_id AND ${activeSalesFilter}
         ${productJoin}
         WHERE 1=1 ${q} ${productWhere}
         GROUP BY substr(s.created_at, 1, 10)

@@ -644,12 +644,13 @@ export class ChannelGatewayService {
   }
 
   enqueueStockSync(input: { accountId: string; productId: string; sourceVersion: string; operationId: string; actor: Actor }) {
-    const availability = new InventoryService(this.db).getProductAvailability(input.productId);
+    const availability = new InventoryService(this.db).getProductPublicationAvailability(input.productId);
     const buffer = Number(this.db.prepare("SELECT buffer_quantity_base_int FROM channel_stock_buffers WHERE account_id=? AND product_id=?")
       .pluck().get(input.accountId, input.productId) || 0);
-    const publishableStock = Math.max(0, availability.availableBaseInt - buffer);
+    const publishableStock = Math.max(0, availability.publishableBaseInt - buffer);
     return this.enqueueOutbound({ ...input, kind: "STOCK", payload: { productId: input.productId, quantityBaseInt: publishableStock,
-      canonicalAvailableBaseInt: availability.availableBaseInt, channelStockBufferBaseInt: buffer } });
+      canonicalAvailableBaseInt: availability.availableBaseInt, channelStockBufferBaseInt: buffer,
+      publicationBlockedReason: availability.blockedReason } });
   }
 
   enqueuePriceSync(input: { accountId: string; productId: string; sourceVersion: string; operationId: string; actor: Actor }) {
@@ -694,7 +695,7 @@ export class ChannelGatewayService {
         (SELECT v.final_sale_price_minor FROM published_kits k JOIN published_kit_versions v ON v.id=k.current_version_id WHERE k.product_id=m.product_id) AS kitPriceMinor
         FROM channel_product_mappings m JOIN products p ON p.id=m.product_id LEFT JOIN channel_stock_buffers b ON b.account_id=m.account_id AND b.product_id=m.product_id
         ORDER BY m.account_id,p.sku`).all() as any[]).map((mapping) => {
-      const availability = new InventoryService(this.db).getProductAvailability(mapping.productId);
+      const availability = new InventoryService(this.db).getProductPublicationAvailability(mapping.productId);
       const term = this.findCommissionTerm(mapping.accountId, mapping.productId, mapping.categoryRef, now);
       const targetPriceMinor = mapping.kitPriceMinor === null || mapping.kitPriceMinor === undefined
         ? (() => { try { return this.legacyPanelPriceMinor(mapping.salePrice); } catch { return null; } })() : Number(mapping.kitPriceMinor);
@@ -702,7 +703,8 @@ export class ChannelGatewayService {
         ? calculateInverseCommissionPrice(targetPriceMinor, { numerator: Number(term.rate_numerator), denominator: Number(term.rate_denominator) }) : null;
       return { ...mapping, targetPriceMinor, calculatedChannelPriceMinor, commissionState: term?.state || "MISSING",
         canonicalAvailableBaseInt: availability.availableBaseInt,
-        publishableStockBaseInt: Math.max(0, availability.availableBaseInt - Number(mapping.stockBufferBaseInt)) };
+        publishableStockBaseInt: Math.max(0, availability.publishableBaseInt - Number(mapping.stockBufferBaseInt)),
+        publicationBlockedReason: availability.blockedReason };
     });
     return {
       contract: "dsdst.channel-dashboard.v1",

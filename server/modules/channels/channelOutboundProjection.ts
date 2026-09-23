@@ -42,7 +42,9 @@ export const enqueueCanonicalChannelChanges = (db: Database.Database, input: {
       COALESCE(b.buffer_quantity_base_int,0) AS stock_buffer,
       (SELECT v.final_sale_price_minor FROM published_kits k JOIN published_kit_versions v
         ON v.id=k.current_version_id WHERE k.product_id=m.product_id) AS kit_price_minor,
-      COALESCE((SELECT SUM(on_hand_base_int-reserved_base_int) FROM inventory_lots WHERE product_id=m.product_id),0) AS available
+      COALESCE((SELECT SUM(on_hand_base_int-reserved_base_int) FROM inventory_lots WHERE product_id=m.product_id),0) AS available,
+      EXISTS(SELECT 1 FROM inventory_lots WHERE product_id=m.product_id
+        AND status='STOCK_DISCREPANCY' AND on_hand_base_int>0) AS has_stock_discrepancy
     FROM channel_product_mappings m JOIN products p ON p.id=m.product_id
     LEFT JOIN channel_stock_buffers b ON b.account_id=m.account_id AND b.product_id=m.product_id
     WHERE m.product_id=? AND m.listing_state='ACTIVE' ORDER BY m.account_id,m.id`).all(input.productId) as any[];
@@ -52,9 +54,11 @@ export const enqueueCanonicalChannelChanges = (db: Database.Database, input: {
       let payload: any = null;
       if (kind === "STOCK") payload = {
         productId: mapping.product_id,
-        quantityBaseInt: Math.max(0, Number(mapping.available) - Number(mapping.stock_buffer)),
+        quantityBaseInt: Number(mapping.has_stock_discrepancy) === 1
+          ? 0 : Math.max(0, Number(mapping.available) - Number(mapping.stock_buffer)),
         canonicalAvailableBaseInt: Number(mapping.available),
         channelStockBufferBaseInt: Number(mapping.stock_buffer),
+        publicationBlockedReason: Number(mapping.has_stock_discrepancy) === 1 ? "STOCK_DISCREPANCY" : null,
       };
       if (kind === "PRICE") {
         const term = currentTerm(db, mapping, occurredAt);

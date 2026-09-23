@@ -149,6 +149,22 @@ test("stock buffer is outbound-only; cursor and retry state are durable and repl
   db.close();
 });
 
+test("STOCK_DISCREPANCY inventory remains physical on-hand but publishes zero sellable stock", () => {
+  const { db, gateway, inventory } = setup(5);
+  db.prepare("UPDATE inventory_lots SET status='STOCK_DISCREPANCY' WHERE product_id='part'").run();
+  assert.equal(inventory.getProductAvailability("part").availableBaseInt, 5, "physical availability remains visible for reconciliation");
+
+  const explicit = gateway.enqueueStockSync({ accountId: "account", productId: "part", sourceVersion: "inventory-discrepancy",
+    operationId: "stock-discrepancy", actor }) as any;
+  assert.equal(explicit.payload.canonicalAvailableBaseInt, 5);
+  assert.equal(explicit.payload.quantityBaseInt, 0);
+
+  const dashboard = gateway.getDashboard() as any;
+  assert.equal(dashboard.mappings[0].canonicalAvailableBaseInt, 5);
+  assert.equal(dashboard.mappings[0].publishableStockBaseInt, 0);
+  db.close();
+});
+
 test("pre-dispatch cancellation releases reservation", () => {
   const { db, gateway, inventory } = setup();
   const accepted = gateway.ingest(order(), "ingest-cancel-base", "channel-worker");

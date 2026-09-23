@@ -4,6 +4,7 @@ import Database from "better-sqlite3";
 export function createProductAnalyticsRouter(db: Database.Database) {
   const router = Router();
   const ACTIVE_SALES = "s.status NOT IN ('İptal', 'İptal Edildi', 'İade', 'İade Edildi')";
+  const REVENUE_BASIS = "SELLER_REVENUE_AFTER_DISCOUNT_GROSS_INCL_VAT";
 
   const firstQueryValue = (value: unknown): string | undefined => {
     if (Array.isArray(value)) return value[0] ? String(value[0]) : undefined;
@@ -107,15 +108,16 @@ export function createProductAnalyticsRouter(db: Database.Database) {
   const getSalesStatsJoin = (salesWhere: string, periodDays = 30) => `
     LEFT JOIN (
       SELECT
-        si.product_id,
-        SUM(si.quantity) as soldQty,
-        SUM(si.unit_price * si.quantity) as revenue,
-        SUM(si.quantity) * 1.0 / ${Math.max(1, Number(periodDays) || 30)} as avgDaily,
+        fl.product_id,
+        SUM(fl.quantity_base_int) as soldQty,
+        SUM(fl.gross_amount_base_try_minor) / 100.0 as revenue,
+        SUM(fl.quantity_base_int) * 1.0 / ${Math.max(1, Number(periodDays) || 30)} as avgDaily,
         MAX(s.created_at) as lastSaleDate
-      FROM sale_items si
-      JOIN sales s ON si.sale_id = s.id
+      FROM sale_financial_lines fl
+      JOIN sale_financial_snapshots fs ON fs.id = fl.financial_snapshot_id
+      JOIN sales s ON fs.sale_id = s.id
       WHERE ${salesWhere}
-      GROUP BY si.product_id
+      GROUP BY fl.product_id
     ) ss ON ss.product_id = p.id
   `;
 
@@ -207,6 +209,7 @@ export function createProductAnalyticsRouter(db: Database.Database) {
         totalSku: summary?.totalSku || 0,
         totalSoldQty: summary?.totalSoldQty || 0,
         totalRevenue: summary?.totalRevenue || 0,
+        revenueBasis: REVENUE_BASIS,
         totalStock: summary?.totalStock || 0,
         period_days: periodDays,
         topMaterial: topMaterial && topMaterial.qty > 0 ? `${topMaterial.name} — ${topMaterial.qty} Ad.` : 'Veri Yok',
@@ -358,11 +361,12 @@ export function createProductAnalyticsRouter(db: Database.Database) {
       const getSalesTrend = () => db.prepare(`
         SELECT 
           strftime('%Y-%m-%d', s.created_at) as date,
-          SUM(si.quantity) as qty,
-          SUM(si.unit_price * si.quantity) as revenue
-        FROM sale_items si
-        JOIN sales s ON si.sale_id = s.id
-        JOIN products p ON p.id = si.product_id
+          SUM(fl.quantity_base_int) as qty,
+          SUM(fl.gross_amount_base_try_minor) / 100.0 as revenue
+        FROM sale_financial_lines fl
+        JOIN sale_financial_snapshots fs ON fs.id = fl.financial_snapshot_id
+        JOIN sales s ON fs.sale_id = s.id
+        JOIN products p ON p.id = fl.product_id
         WHERE ${salesWhere} AND ${productWhere}
         GROUP BY date
         ORDER BY date ASC

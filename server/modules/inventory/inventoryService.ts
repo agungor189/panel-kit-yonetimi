@@ -135,6 +135,17 @@ export class InventoryService {
     };
   }
 
+  getProductPublicationAvailability(productIdValue: string) {
+    const availability = this.getProductAvailability(productIdValue);
+    const hasStockDiscrepancy = Boolean(this.db.prepare(`SELECT 1 FROM inventory_lots
+      WHERE product_id=? AND status='STOCK_DISCREPANCY' AND on_hand_base_int>0 LIMIT 1`).get(availability.productId));
+    return {
+      ...availability,
+      publishableBaseInt: hasStockDiscrepancy ? 0 : availability.availableBaseInt,
+      blockedReason: hasStockDiscrepancy ? "STOCK_DISCREPANCY" as const : null,
+    };
+  }
+
   getProductReconciliation(productIdValue: string) {
     const availability = this.getProductAvailability(productIdValue);
     const ledgerOnHandBaseInt = Number(this.db.prepare(`SELECT COALESCE(SUM(quantity_delta_base_int),0)
