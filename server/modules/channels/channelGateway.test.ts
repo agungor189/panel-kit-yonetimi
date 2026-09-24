@@ -272,8 +272,13 @@ test("canonical changes auto-enqueue claimable jobs and disabled adapters remain
   gateway.captureCanonicalProductChanges({ productId: "part", kinds: ["PRICE"], operationId: "auto-price-change", actor });
   const pricePayload = JSON.parse(String(db.prepare("SELECT payload_json FROM channel_outbound_jobs WHERE job_kind='PRICE'").pluck().get()));
   assert.equal(pricePayload.channelPriceMinor, 125_000);
+  const latestAvailableAt = String(
+    db.prepare("SELECT MAX(available_at) FROM channel_outbound_jobs").pluck().get()
+  );
+  const claimedAt = new Date(new Date(latestAvailableAt).getTime() + 1000).toISOString();
+
   const claimed = gateway.claimReadyOutboundJobs({ limit: 10, leaseSeconds: 30, operationId: "claim-ready",
-    serviceActorId: "publisher", claimedAt: "2026-09-24T10:00:00.000Z" }) as any[];
+    serviceActorId: "publisher", claimedAt }) as any[];
   assert.equal(claimed.length, 2);
   let sends = 0;
   for (const job of claimed) {

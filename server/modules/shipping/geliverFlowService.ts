@@ -14,7 +14,7 @@ type GeliverCreateRequest = {
 };
 export type RecipientInput = {
   name: string; email: string; phone?: string | null; address1: string; address2?: string | null;
-  countryCode: string; cityName: string; cityCode: string; districtName: string; districtID?: string | null; zip?: string | null;
+  countryCode: string; cityName: string; cityCode: string; districtName: string; districtID?: string | number | null; zip?: string | null;
 };
 
 const canonical = (value: any): string => {
@@ -33,6 +33,16 @@ const required = (value: unknown, field: string, max = 500): string => {
   return result;
 };
 const optional = (value: unknown, field: string, max = 500): string | null => value == null || value === "" ? null : required(value, field, max);
+const optionalInteger = (value: unknown, field: string): number | undefined => {
+  if (value == null || value === "") return undefined;
+  const source = typeof value === "number" ? String(value) : typeof value === "string" ? value.trim() : "";
+  if (!/^\d+$/.test(source)) throw new ShipmentValidationError("SHIPMENT_VALIDATION_FAILED", `${field} is invalid.`);
+  const result = Number(source);
+  if (!Number.isSafeInteger(result) || result <= 0) {
+    throw new ShipmentValidationError("SHIPMENT_VALIDATION_FAILED", `${field} is invalid.`);
+  }
+  return result;
+};
 const at = () => new Date().toISOString();
 const money = (minor: number) => `${Math.floor(minor / 100)}.${String(minor % 100).padStart(2, "0")}`;
 
@@ -67,9 +77,11 @@ export class GeliverSdkTransport implements GeliverTransport {
   private readonly client: GeliverClient | null;
   readonly senderAddressId: string | null;
   readonly sourceIdentifier: string | null;
+  readonly mode: "test" | "live";
 
-  constructor(config: { token?: string; senderAddressId?: string; sourceIdentifier?: string; baseUrl?: string; timeoutMs?: number } = {}) {
+  constructor(config: { token?: string; senderAddressId?: string; sourceIdentifier?: string; baseUrl?: string; timeoutMs?: number; mode?: string } = {}) {
     const token = config.token?.trim() || "";
+    this.mode = config.mode?.trim().toLowerCase() === "live" ? "live" : "test";
     this.senderAddressId = config.senderAddressId?.trim() || null;
     this.sourceIdentifier = config.sourceIdentifier?.trim() || null;
     this.enabled = Boolean(token && this.senderAddressId && this.sourceIdentifier);
@@ -80,13 +92,18 @@ export class GeliverSdkTransport implements GeliverTransport {
   static fromEnvironment() {
     return new GeliverSdkTransport({ token: process.env.GELIVER_TOKEN, senderAddressId: process.env.GELIVER_SENDER_ADDRESS_ID,
       sourceIdentifier: process.env.GELIVER_SOURCE_IDENTIFIER, baseUrl: process.env.GELIVER_API_BASE_URL,
-      timeoutMs: process.env.GELIVER_TIMEOUT_MS ? Number(process.env.GELIVER_TIMEOUT_MS) : undefined });
+      timeoutMs: process.env.GELIVER_TIMEOUT_MS ? Number(process.env.GELIVER_TIMEOUT_MS) : undefined,
+      mode: process.env.GELIVER_MODE });
   }
   private api() {
     if (!this.client) throw new ShipmentValidationError("GELIVER_TRANSPORT_DISABLED", this.disabledReason || "Geliver transport is disabled.", 503);
     return this.client;
   }
-  create(body: GeliverCreateRequest) { return this.api().shipments.create(body); }
+  create(body: GeliverCreateRequest) {
+    return this.mode === "test"
+      ? this.api().shipments.createTest(body)
+      : this.api().shipments.create(body);
+  }
   async listByOrderNumber(orderNumber: string) { return (await this.api().shipments.list({ orderNumber, limit: 50, page: 1 })).data; }
   get(providerShipmentId: string) { return this.api().shipments.get(providerShipmentId); }
   acceptOffer(offerId: string) { return this.api().transactions.acceptOffer(offerId); }
@@ -509,6 +526,6 @@ export class GeliverFlowService {
       address2: optional(input?.address2, "recipient.address2", 500) || undefined,
       countryCode: required(input?.countryCode, "recipient.countryCode", 3).toUpperCase(), cityName: required(input?.cityName, "recipient.cityName", 100),
       cityCode: required(input?.cityCode, "recipient.cityCode", 30), districtName: required(input?.districtName, "recipient.districtName", 100),
-      districtID: optional(input?.districtID, "recipient.districtID", 50) || undefined, zip: optional(input?.zip, "recipient.zip", 30) || undefined };
+      districtID: optionalInteger(input?.districtID, "recipient.districtID"), zip: optional(input?.zip, "recipient.zip", 30) || undefined };
   }
 }
