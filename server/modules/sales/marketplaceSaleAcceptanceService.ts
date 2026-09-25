@@ -44,7 +44,7 @@ export class MarketplaceSaleAcceptanceService {
       this.db.prepare(`INSERT INTO sales (
         id,order_code,external_order_id,customer_name,total_quantity,total_amount,platform,commission_rate,
         discount,net_total,status,created_at,updated_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?, 'Marketplace Received',?,?)`).run(
+      ) VALUES (?,?,?,?,?,?,?,?,?,?, 'Hazırlanıyor',?,?)`).run(
         saleId, orderCode, externalIdentity, `${input.channel} ${input.externalOrderId}`,
         input.lines.reduce((sum, line) => sum + line.quantityBaseInt, 0), grossMinor / 100,
         input.channel, Number(input.commission.effectiveNumerator) * 100 / Number(input.commission.effectiveDenominator),

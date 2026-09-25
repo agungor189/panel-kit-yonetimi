@@ -487,13 +487,13 @@ test("Trendyol split packages aggregate into one sale and package cancellation c
   assert.equal(cancelled.exception, 1);
   assert.deepEqual(db.prepare(`SELECT external_package_id AS id,package_state AS state FROM channel_order_packages
     ORDER BY external_package_id`).all(), [{ id: "split-package-a", state: "ACTIVE" }, { id: "split-package-b", state: "CANCELLED" }]);
-  assert.equal(db.prepare("SELECT status FROM sales WHERE platform='TRENDYOL'").pluck().get(), "Marketplace Received");
+  assert.equal(db.prepare("SELECT status FROM sales WHERE platform='TRENDYOL'").pluck().get(), "Hazırlanıyor");
   assert.equal(inventory.getProductAvailability("part").reservedBaseInt, 2);
 
   response = { content: [{ ...response.content[0], status: "Returned", lastModifiedDate: 1_795_000_000_004 }], hasMore: false };
   assert.equal((await poll("split-return-b", "2026-09-23T12:03:00.000Z")).exception, 1);
   assert.equal(db.prepare("SELECT COUNT(*) FROM return_requests").pluck().get(), 0);
-  assert.equal(db.prepare("SELECT status FROM sales WHERE platform='TRENDYOL'").pluck().get(), "Marketplace Received");
+  assert.equal(db.prepare("SELECT status FROM sales WHERE platform='TRENDYOL'").pluck().get(), "Hazırlanıyor");
   assert.equal(inventory.getProductAvailability("part").reservedBaseInt, 2);
   assert.equal(db.prepare("SELECT COUNT(*) FROM channel_order_package_versions").pluck().get(), 4);
   assert.throws(() => db.prepare("UPDATE channel_order_package_versions SET package_state='ACTIVE'").run(), /immutable/i);
