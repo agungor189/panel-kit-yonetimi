@@ -82,6 +82,36 @@ const normalizeTurkishPhone = (value: unknown): string | null => {
   return /^905\d{9}$/.test(digits) ? `+${digits}` : null;
 };
 
+const TR_CITY_CODES: Record<string, string> = {
+  "adana":"1","adıyaman":"2","afyonkarahisar":"3","ağrı":"4","amasya":"5","ankara":"6",
+  "antalya":"7","artvin":"8","aydın":"9","balıkesir":"10","bilecik":"11","bingöl":"12",
+  "bitlis":"13","bolu":"14","burdur":"15","bursa":"16","çanakkale":"17","çankırı":"18",
+  "çorum":"19","denizli":"20","diyarbakır":"21","edirne":"22","elazığ":"23","erzincan":"24",
+  "erzurum":"25","eskişehir":"26","gaziantep":"27","giresun":"28","gümüşhane":"29","hakkari":"30",
+  "hatay":"31","isparta":"32","mersin":"33","istanbul":"34","i̇stanbul":"34","izmir":"35","i̇zmir":"35",
+  "kars":"36","kastamonu":"37","kayseri":"38","kırklareli":"39","kırşehir":"40","kocaeli":"41",
+  "konya":"42","kütahya":"43","malatya":"44","manisa":"45","kahramanmaraş":"46","mardin":"47",
+  "muğla":"48","muş":"49","nevşehir":"50","niğde":"51","ordu":"52","rize":"53","sakarya":"54",
+  "samsun":"55","siirt":"56","sinop":"57","sivas":"58","tekirdağ":"59","tokat":"60",
+  "trabzon":"61","tunceli":"62","şanlıurfa":"63","uşak":"64","van":"65","yozgat":"66",
+  "zonguldak":"67","aksaray":"68","bayburt":"69","karaman":"70","kırıkkale":"71","batman":"72",
+  "şırnak":"73","bartın":"74","ardahan":"75","iğdır":"76","yalova":"77","karabük":"78",
+  "kilis":"79","osmaniye":"80","düzce":"81"
+};
+
+const geliverCityCode = (cityName: unknown, postalCode: unknown, fallback: unknown) => {
+  const city = String(cityName ?? "").trim().toLocaleLowerCase("tr-TR");
+  if (TR_CITY_CODES[city]) return TR_CITY_CODES[city];
+
+  const zip = String(postalCode ?? "").replace(/\D/g, "");
+  if (/^\d{5}$/.test(zip)) {
+    const code = Number(zip.slice(0, 2));
+    if (code >= 1 && code <= 81) return String(code);
+  }
+
+  return identifier(fallback);
+};
+
 const trendyolRecipient = (pkg: any) => {
   const address = pkg?.shipmentAddress || pkg?.invoiceAddress || {};
 
@@ -97,7 +127,11 @@ const trendyolRecipient = (pkg: any) => {
     address2: identifier(address.address2) || null,
     countryCode: identifier(address.countryCode, pkg?.orderCountryCode, "TR").toUpperCase(),
     cityName: identifier(address.city, address.stateName),
-    cityCode: identifier(address.cityCode),
+    cityCode: geliverCityCode(
+      identifier(address.city, address.stateName),
+      address.postalCode,
+      address.cityCode
+    ),
     districtName: identifier(address.countyName, address.district),
     districtID: identifier(address.countyId, address.districtId) || null,
     zip: identifier(address.postalCode) || null,

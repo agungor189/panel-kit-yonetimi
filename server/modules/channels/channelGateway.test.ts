@@ -378,7 +378,7 @@ test("verified Trendyol stream poll enters the gateway and the verified publishe
         address2: "",
         countryCode: "TR",
         city: "İstanbul",
-        cityCode: 34,
+        cityCode: 6,
         countyName: "Kadıköy",
         countyId: 347,
         district: "Caferağa",
