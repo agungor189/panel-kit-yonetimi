@@ -67,6 +67,43 @@ const occurredAt = (value: unknown, fallback: string) => {
   return Number.isFinite(date.getTime()) ? date.toISOString() : fallback;
 };
 
+const normalizeTurkishPhone = (value: unknown): string | null => {
+  let digits = String(value ?? "").replace(/\D/g, "");
+  if (!digits) return null;
+
+  if (digits.startsWith("0090")) digits = digits.slice(2);
+
+  if (digits.length === 11 && digits.startsWith("0")) {
+    digits = `90${digits.slice(1)}`;
+  } else if (digits.length === 10) {
+    digits = `90${digits}`;
+  }
+
+  return /^905\d{9}$/.test(digits) ? `+${digits}` : null;
+};
+
+const trendyolRecipient = (pkg: any) => {
+  const address = pkg?.shipmentAddress || pkg?.invoiceAddress || {};
+
+  const firstName = identifier(address.firstName, pkg?.customerFirstName);
+  const lastName = identifier(address.lastName, pkg?.customerLastName);
+  const combinedName = `${firstName} ${lastName}`.trim();
+
+  return {
+    name: identifier(address.fullName, combinedName),
+    email: identifier(pkg?.customerEmail),
+    phone: normalizeTurkishPhone(address.phone ?? pkg?.customerPhone),
+    address1: identifier(address.fullAddress, address.address1, address.shortAddress),
+    address2: identifier(address.address2) || null,
+    countryCode: identifier(address.countryCode, pkg?.orderCountryCode, "TR").toUpperCase(),
+    cityName: identifier(address.city, address.stateName),
+    cityCode: identifier(address.cityCode),
+    districtName: identifier(address.countyName, address.district),
+    districtID: identifier(address.countyId, address.districtId) || null,
+    zip: identifier(address.postalCode) || null,
+  };
+};
+
 export class TrendyolGatewayTransport {
   constructor(private readonly gateway: ChannelGatewayService, private readonly requestJson: RequestJson) {}
 
@@ -225,12 +262,15 @@ export class TrendyolGatewayTransport {
       reconcile(providerFinancial.grossMinor === providerFinancial.sellerDiscountMinor
         + providerFinancial.trendyolDiscountMinor + providerFinancial.customerTotalMinor,
       `Order ${orderNumber} does not conserve gross, discounts, and customer total.`);
+      const recipientSource = (activePackages[0] || packages[0])?.rawPayload;
+      const recipient = trendyolRecipient(recipientSource);
+
       const outcome = this.gateway.ingest({ accountId: input.accountId,
         externalEventId: `trendyol-order:${orderNumber}`, externalEventVersion: aggregateVersion, externalOrderId: orderNumber,
         eventType: aggregateType, ingestionPath: "POLL", currency: packages[0].currency,
         discountMinor: providerFinancial.sellerDiscountMinor, lines,
         packages: packages.map(({ rawPayload: _rawPayload, ...pkg }) => pkg), providerFinancial,
-        rawPayload: { orderNumber, shipmentPackages: packages.map((pkg) => pkg.rawPayload) },
+        rawPayload: { orderNumber, recipient, shipmentPackages: packages.map((pkg) => pkg.rawPayload) },
         providerOccurredAt: packages.map((pkg) => pkg.providerOccurredAt).sort().at(-1), receivedAt: input.receivedAt,
       }, `${input.operationIdPrefix}:event:${orderNumber}:${aggregateVersion}`, input.serviceActorId);
       const state = String((outcome.result.body as any).state);

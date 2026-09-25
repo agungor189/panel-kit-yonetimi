@@ -364,7 +364,28 @@ test("verified Trendyol stream poll enters the gateway and the verified publishe
   const transport = new TrendyolGatewayTransport(gateway, async (url, _headers, options) => {
     requests.push({ url, options });
     if (url.includes("/orders/stream")) return { content: [{ shipmentPackageId: "package-1", orderNumber: "trend-order-1",
-      status: "Created", currencyCode: "TRY", lastModifiedDate: 1_795_000_000_000,
+      status: "Created", currencyCode: "TRY",
+      customerEmail: "customer@example.test",
+      customerFirstName: "Test",
+      customerLastName: "Müşteri",
+      shipmentAddress: {
+        fullName: "Test Müşteri",
+        firstName: "Test",
+        lastName: "Müşteri",
+        phone: "0530 123 45 67",
+        fullAddress: "Test Sokak 1",
+        address1: "Test Sokak 1",
+        address2: "",
+        countryCode: "TR",
+        city: "İstanbul",
+        cityCode: 6,
+        countyName: "Kadıköy",
+        countyId: 347,
+        district: "Caferağa",
+        districtId: 1234,
+        postalCode: "34710"
+      },
+      lastModifiedDate: 1_795_000_000_000,
       packageGrossAmount: "1250.00", packageSellerDiscount: "0.00", packageTyDiscount: "0.00",
       packageTotalDiscount: "0.00", packageTotalPrice: "1250.00",
       lines: [{ lineId: "trend-line-1", barcode: "listing-part", quantity: 1, lineGrossAmount: "1250.00",
@@ -377,6 +398,26 @@ test("verified Trendyol stream poll enters the gateway and the verified publishe
     operationIdPrefix: "trendyol-poll-1", receivedAt: "2026-09-23T12:00:00.000Z" });
   assert.equal(first.accepted, 1);
   assert.equal(db.prepare("SELECT COUNT(*) FROM sales WHERE platform='TRENDYOL'").pluck().get(), 1);
+
+  assert.deepEqual(
+    db.prepare(`SELECT customer_name AS name,customer_phone AS phone,customer_address AS address
+      FROM sales WHERE platform='TRENDYOL'`).get(),
+    {
+      name: "Test Müşteri",
+      phone: "+905301234567",
+      address: "Test Sokak 1, Kadıköy, İstanbul, 34710",
+    },
+  );
+
+  const inboundRecipient = JSON.parse(String(
+    db.prepare("SELECT raw_payload_json FROM channel_inbound_events WHERE external_order_id='trend-order-1' ORDER BY rowid LIMIT 1")
+      .pluck().get()
+  )).recipient;
+
+  assert.equal(inboundRecipient.phone, "+905301234567");
+  assert.equal(inboundRecipient.cityCode, "6");
+  assert.equal(inboundRecipient.districtName, "Kadıköy");
+
   assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_reservations").pluck().get(), 1);
   assert.equal(db.prepare("SELECT COUNT(*) FROM marketplace_orders").pluck().get(), 0);
   await transport.poll({ accountId: "account", sellerId: "merchant", environment: "stage", headers: { Authorization: "[secret]" },
@@ -399,6 +440,24 @@ test("Trendyol split packages aggregate into one sale and package cancellation c
   const { db, gateway, inventory } = setup(5);
   let response: any = { content: [
     { shipmentPackageId: "split-package-a", orderNumber: "split-order", status: "Created", currencyCode: "TRY",
+      customerEmail: "customer@example.test", customerFirstName: "Test", customerLastName: "Müşteri",
+      shipmentAddress: {
+        fullName: "Test Müşteri",
+        firstName: "Test",
+        lastName: "Müşteri",
+        phone: "0530 123 45 67",
+        fullAddress: "Test Sokak 1",
+        address1: "Test Sokak 1",
+        address2: "",
+        countryCode: "TR",
+        city: "İstanbul",
+        cityCode: 34,
+        countyName: "Kadıköy",
+        countyId: 347,
+        district: "Caferağa",
+        districtId: 1234,
+        postalCode: "34710"
+      },
       lastModifiedDate: 1_795_000_000_001, packageGrossAmount: "1250.00", packageSellerDiscount: "0.00",
       packageTyDiscount: "0.00", packageTotalDiscount: "0.00", packageTotalPrice: "1250.00",
       lines: [{ lineId: "split-line-a", barcode: "listing-part", quantity: 1, lineGrossAmount: "1250.00",
@@ -428,13 +487,13 @@ test("Trendyol split packages aggregate into one sale and package cancellation c
   assert.equal(cancelled.exception, 1);
   assert.deepEqual(db.prepare(`SELECT external_package_id AS id,package_state AS state FROM channel_order_packages
     ORDER BY external_package_id`).all(), [{ id: "split-package-a", state: "ACTIVE" }, { id: "split-package-b", state: "CANCELLED" }]);
-  assert.equal(db.prepare("SELECT status FROM sales WHERE platform='TRENDYOL'").pluck().get(), "Marketplace Received");
+  assert.equal(db.prepare("SELECT status FROM sales WHERE platform='TRENDYOL'").pluck().get(), "Hazırlanıyor");
   assert.equal(inventory.getProductAvailability("part").reservedBaseInt, 2);
 
   response = { content: [{ ...response.content[0], status: "Returned", lastModifiedDate: 1_795_000_000_004 }], hasMore: false };
   assert.equal((await poll("split-return-b", "2026-09-23T12:03:00.000Z")).exception, 1);
   assert.equal(db.prepare("SELECT COUNT(*) FROM return_requests").pluck().get(), 0);
-  assert.equal(db.prepare("SELECT status FROM sales WHERE platform='TRENDYOL'").pluck().get(), "Marketplace Received");
+  assert.equal(db.prepare("SELECT status FROM sales WHERE platform='TRENDYOL'").pluck().get(), "Hazırlanıyor");
   assert.equal(inventory.getProductAvailability("part").reservedBaseInt, 2);
   assert.equal(db.prepare("SELECT COUNT(*) FROM channel_order_package_versions").pluck().get(), 4);
   assert.throws(() => db.prepare("UPDATE channel_order_package_versions SET package_state='ACTIVE'").run(), /immutable/i);

@@ -121,11 +121,24 @@ export function createShippingV1Router(dependencies: Dependencies) {
   });
 
   router.post("/shipments/:id/geliver/offers", dependencies.authorizeManage, async (req, res) => {
-    const payload = { shipmentId: req.params.id, recipient: req.body?.recipient ?? null };
     try {
+      const recipient = await geliver.resolveRecipient({
+        shipmentId: req.params.id,
+        recipient: req.body?.recipient ?? null,
+      });
+
+      const payload = {
+        shipmentId: req.params.id,
+        recipient,
+      };
+
       const outcome = execute(req, "shipping:manage", "shipping.geliver.create-request.v2", payload, (context) => {
-        const jobs = geliver.prepareCreateJobs({ shipmentId: req.params.id, recipient: req.body?.recipient,
-          operationId: operationId(req), actor: actor(req) });
+        const jobs = geliver.prepareCreateJobs({
+          shipmentId: req.params.id,
+          recipient,
+          operationId: operationId(req),
+          actor: actor(req),
+        });
         context.addOutbox({ topic: "carrier", eventType: "shipping.geliver.create.requested.v2", aggregateType: "shipment",
           aggregateId: req.params.id, payload: { shipment_id: req.params.id, job_ids: jobs.map((job) => job.id) } });
         return { statusCode: 202, body: { success: true, contract: "dsdst.geliver-live-offers.v2", data: { jobs } } };

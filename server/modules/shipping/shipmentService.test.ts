@@ -68,6 +68,20 @@ class VerifiedFakeGeliverTransport implements CarrierBookingTransport {
   }
 }
 
+const marketplaceRecipient = {
+  name: "Test Customer",
+  email: "customer@example.test",
+  phone: "+905551112233",
+  address1: "Test Sokak 1",
+  address2: null,
+  countryCode: "TR",
+  cityName: "İstanbul",
+  cityCode: "6",
+  districtName: "Ümraniye",
+  districtID: 0,
+  zip: "34710",
+};
+
 const setup = () => {
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
@@ -93,8 +107,8 @@ const setup = () => {
     (id,channel,merchant_account_id,environment,state,config_json) VALUES ('channel-account','TRENDYOL','merchant','STAGE','CONFIGURED','{}')`).run();
   db.prepare(`INSERT INTO channel_inbound_events
     (id,account_id,external_event_id,external_event_version,ingestion_path,event_type,raw_payload_json,raw_payload_digest,
-     received_at,processing_state,sale_id) VALUES ('channel-event','channel-account','event','1','POLL','ORDER_UPSERT','{}',?,
-     '2026-09-23T09:00:00.000Z','ACCEPTED','sale')`).run("c".repeat(64));
+     received_at,processing_state,sale_id) VALUES ('channel-event','channel-account','event','1','POLL','ORDER_UPSERT',?,?,
+     '2026-09-23T09:00:00.000Z','ACCEPTED','sale')`).run(JSON.stringify({ recipient: marketplaceRecipient }), "c".repeat(64));
   db.prepare(`INSERT INTO channel_orders
     (id,account_id,external_order_id,latest_external_version,currency,actual_discount_minor,order_state,sale_id,reservation_id,
      first_event_id,raw_order_digest) VALUES ('channel-order','channel-account','external-order','1','TRY',0,'ACCEPTED','sale',
@@ -383,6 +397,32 @@ class OfficialGeliverFixture implements GeliverTransport {
   }
   async cancel(id: string) { const shipment = this.shipments.get(id)!; shipment.cancelDate = "2026-09-23T13:00:00.000Z"; return structuredClone(shipment); }
   async downloadLabel(url: string) { return new TextEncoder().encode(`provider-native-label:${url}`); }
+
+  async listCities(countryCode: string) {
+    return [
+      { name: "İstanbul", cityCode: "34", countryCode },
+    ];
+  }
+
+  async listDistricts(countryCode: string, cityCode: string) {
+    return [
+      {
+        name: "Ümraniye",
+        districtID: 108631,
+        cityCode,
+        countryCode,
+        regionCode: "ANATOLIA",
+      },
+      {
+        name: "Kadıköy",
+        districtID: 108630,
+        cityCode,
+        countryCode,
+        regionCode: "ANATOLIA",
+      },
+    ];
+  }
+
   publishTracking(id: string) { const shipment = this.shipments.get(id)!; shipment.trackingNumber = "TRACK-LATER"; shipment.trackingUrl = "https://track.geliver.test/TRACK-LATER"; }
 }
 
@@ -397,6 +437,54 @@ const prepareLiveGeliver = () => {
   const geliver = new GeliverFlowService(fixture.db, transport, { senderAddressId: "sender-address", sourceIdentifier: "https://dsdst.example" });
   return { ...fixture, shipping, shipment, transport, geliver };
 };
+
+test("Geliver automatically resolves marketplace recipient against provider geo data", async () => {
+  const { db, shipment, geliver } = prepareLiveGeliver();
+
+  const resolvedRecipient = await geliver.resolveRecipient({
+    shipmentId: shipment.id,
+  });
+
+  assert.equal(resolvedRecipient.cityCode, "34");
+  assert.equal(resolvedRecipient.districtID, 108631);
+  assert.equal(resolvedRecipient.districtName, "Ümraniye");
+
+  const [job] = geliver.prepareCreateJobs({
+    shipmentId: shipment.id,
+    recipient: resolvedRecipient,
+    operationId: "auto-recipient-create",
+    actor,
+  });
+
+  const snapshot = db.prepare(`
+    SELECT name,email,phone,address1,country_code,city_name,city_code,district_name,zip
+    FROM shipment_recipient_snapshots
+    WHERE shipment_id=?
+  `).get(shipment.id) as any;
+
+  assert.deepEqual(snapshot, {
+    name: marketplaceRecipient.name,
+    email: marketplaceRecipient.email,
+    phone: marketplaceRecipient.phone,
+    address1: marketplaceRecipient.address1,
+    country_code: "TR",
+    city_name: "İstanbul",
+    city_code: "34",
+    district_name: "Ümraniye",
+    zip: marketplaceRecipient.zip,
+  });
+
+  const request = JSON.parse(String(
+    db.prepare("SELECT request_json FROM geliver_create_jobs WHERE id=?").pluck().get(job.id)
+  ));
+
+  assert.equal(request.recipientAddress.phone, marketplaceRecipient.phone);
+  assert.equal(request.recipientAddress.cityCode, "34");
+  assert.equal(request.recipientAddress.districtID, 108631);
+  assert.equal(request.recipientAddress.districtName, "Ümraniye");
+
+  db.close();
+});
 
 test("verified live offers are selected by the operator; booking accepts provider-native label while tracking is nullable and refreshes later", async () => {
   const { db, inventory, shipping, shipment, transport, geliver } = prepareLiveGeliver();

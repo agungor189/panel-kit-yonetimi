@@ -360,6 +360,7 @@ export class ChannelGatewayService {
             terms: { contract: "dsdst.channel-commission-snapshot.v1", lines: termsSnapshot,
               providerFinancial: event.providerFinancial || null } },
           operationId, actor: { id: serviceActorId }, acceptedAt: event.receivedAt });
+        this.projectRecipientToSale(orderId, accepted.saleId);
         this.db.prepare(`UPDATE channel_orders SET order_state='ACCEPTED',sale_id=?,reservation_id=?,latest_external_version=?,accepted_at=?,updated_at=? WHERE id=?`)
           .run(accepted.saleId, accepted.reservationId, event.externalEventVersion, event.receivedAt, event.receivedAt, orderId);
         this.db.prepare("UPDATE channel_inbound_events SET processing_state='ACCEPTED',sale_id=? WHERE id=?").run(accepted.saleId, eventId);
@@ -446,6 +447,7 @@ export class ChannelGatewayService {
             terms: { contract: "dsdst.channel-commission-snapshot.v1", lines: termsSnapshot, reprocessOperationId: input.operationId,
               providerFinancial: this.providerOrderFinancial(order.id) } },
           operationId: input.operationId, actor: input.actor, acceptedAt: input.resolvedAt });
+        this.projectRecipientToSale(order.id, accepted.saleId);
         this.db.prepare(`UPDATE channel_orders SET order_state='ACCEPTED',sale_id=?,reservation_id=?,accepted_at=?,updated_at=? WHERE id=? AND sale_id IS NULL`)
           .run(accepted.saleId, accepted.reservationId, input.resolvedAt, input.resolvedAt, order.id);
         this.db.prepare("UPDATE channel_inbound_events SET processing_state='ACCEPTED',sale_id=? WHERE id=?").run(accepted.saleId, order.first_event_id);
@@ -848,6 +850,47 @@ export class ChannelGatewayService {
     const result = Number(BigInt(whole) * 100n + BigInt((fraction + "00").slice(0, 2)));
     if (!Number.isSafeInteger(result)) throw new ChannelGatewayError("MONEY_OVERFLOW", "Panel target price exceeds safe integer precision.");
     return result;
+  }
+
+  private projectRecipientToSale(orderId: string, saleId: string) {
+    const row = this.db.prepare(`
+      SELECT e.raw_payload_json
+      FROM channel_orders o
+      JOIN channel_inbound_events e ON e.id=o.first_event_id
+      WHERE o.id=?
+    `).get(orderId) as any;
+
+    if (!row?.raw_payload_json) return;
+
+    let recipient: any = null;
+    try {
+      recipient = JSON.parse(row.raw_payload_json)?.recipient;
+    } catch (_) {
+      return;
+    }
+
+    if (!recipient || typeof recipient !== "object") return;
+
+    const clean = (value: unknown) => String(value ?? "").trim();
+    const name = clean(recipient.name);
+    const phone = clean(recipient.phone);
+
+    const address = [
+      clean(recipient.address1),
+      clean(recipient.address2),
+      clean(recipient.districtName),
+      clean(recipient.cityName),
+      clean(recipient.zip),
+    ].filter(Boolean).join(", ");
+
+    this.db.prepare(`
+      UPDATE sales
+      SET customer_name=COALESCE(NULLIF(?,''),customer_name),
+          customer_phone=COALESCE(NULLIF(?,''),customer_phone),
+          customer_address=COALESCE(NULLIF(?,''),customer_address),
+          updated_at=CURRENT_TIMESTAMP
+      WHERE id=?
+    `).run(name, phone, address, saleId);
   }
 
   private insertException(accountId: string, eventId: string | null, orderId: string | null, type: string, detail: unknown) {
