@@ -499,10 +499,15 @@ test("Trendyol financial normalization conserves gross, seller discount, funded 
       lines: [{ lineId: "bad-line", barcode: "listing-part", quantity: 1, lineGrossAmount: "100.00",
         lineSellerDiscount: "10.00", lineTyDiscount: "5.00", lineTotalDiscount: "15.00", lineUnitPrice: "85.00", vatRate: 20 }] }],
       hasMore: false }));
-    await assert.rejects(() => transport.poll({ accountId: "account", sellerId: "merchant", environment: "stage",
+    const outcome = await transport.poll({ accountId: "account", sellerId: "merchant", environment: "stage",
       headers: { Authorization: "[secret]" }, windowStartMs: 1_794_000_000_000, windowEndMs: 1_796_000_000_000,
-      serviceActorId: "trendyol-poller", operationIdPrefix: "bad-finance", receivedAt: "2026-09-23T13:10:00.000Z" }),
-    (error: unknown) => error instanceof ChannelGatewayError && error.code === "TRENDYOL_FINANCIAL_RECONCILIATION_FAILED");
+      serviceActorId: "trendyol-poller", operationIdPrefix: "bad-finance", receivedAt: "2026-09-23T13:10:00.000Z" });
+
+    assert.equal(outcome.accepted, 0);
+    assert.equal(outcome.exception, 1);
+    assert.equal(outcome.errors.length, 1);
+    assert.equal(outcome.errors[0].orderNumber, "bad-order");
+    assert.equal(outcome.errors[0].code, "TRENDYOL_FINANCIAL_RECONCILIATION_FAILED");
     assert.equal(db.prepare("SELECT COUNT(*) FROM sales").pluck().get(), 0);
     db.close();
   });
