@@ -908,7 +908,36 @@ export function createWarehouseRouter({
   router.post("/orders/:id/complete", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
     const note = typeof req.body?.note === "string" ? req.body.note.trim().slice(0, 2000) : null;
     try {
-      const result = service.completePicking(req.params.id, res.locals.warehouseUser, note);
+      const result = db.transaction(() => {
+        const completed = service.completePicking(req.params.id, res.locals.warehouseUser, note);
+
+        const reservation = db.prepare(`
+          SELECT id,status
+          FROM inventory_reservations
+          WHERE order_id=?
+          ORDER BY created_at DESC
+          LIMIT 1
+        `).get(req.params.id) as { id: string; status: string } | undefined;
+
+        if (reservation?.status === "ACTIVE") {
+          inventoryService.markPicked({
+            reservationId: reservation.id,
+            operationId: `warehouse-pick-complete:${req.params.id}`,
+          });
+        } else if (
+          reservation &&
+          !["PICKED", "PACKED", "DISPATCHED"].includes(reservation.status)
+        ) {
+          throw new InventoryValidationError(
+            "RESERVATION_STATE_CONFLICT",
+            `Warehouse picking completed but inventory reservation is ${reservation.status}.`,
+            409,
+          );
+        }
+
+        return completed;
+      })();
+
       res.json({ success: true, data: result.order, idempotent: result.idempotent });
     } catch (error) {
       return handleServiceError(res, error);
