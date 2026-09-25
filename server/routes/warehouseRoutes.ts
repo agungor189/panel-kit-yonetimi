@@ -905,6 +905,45 @@ export function createWarehouseRouter({
     },
   );
 
+
+  router.get("/orders/:id/reservation", authenticate("read:warehouse_orders"), requireWarehouseUser, requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
+    try {
+      const reservation = db.prepare(`
+        SELECT id,order_id,status,shipment_id
+        FROM inventory_reservations
+        WHERE order_id=?
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get(req.params.id) as {
+        id: string;
+        order_id: string;
+        status: string;
+        shipment_id: string | null;
+      } | undefined;
+
+      if (!reservation) {
+        return errorResponse(
+          res,
+          404,
+          "RESERVATION_NOT_FOUND",
+          "Sipariş için stok rezervasyonu bulunamadı.",
+        );
+      }
+
+      return res.json({
+        success: true,
+        data: {
+          id: reservation.id,
+          orderId: reservation.order_id,
+          status: reservation.status,
+          shipmentId: reservation.shipment_id || null,
+        },
+      });
+    } catch (error) {
+      return handleServiceError(res, error);
+    }
+  });
+
   router.post("/orders/:id/complete", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
     const note = typeof req.body?.note === "string" ? req.body.note.trim().slice(0, 2000) : null;
     try {
