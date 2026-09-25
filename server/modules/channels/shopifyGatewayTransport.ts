@@ -883,45 +883,37 @@ export class ShopifyGatewayTransport {
             email: clean(order.email),
             phone: clean(address.phone),
             address1: clean(address.address1),
-            address2: clean(address.address2) || null,
-            countryCode:
-              clean(address.countryCodeV2).toUpperCase()
-              || "TR",
+            address2: clean(address.address2),
             cityName: clean(address.city),
             districtName: "",
             province: clean(address.province),
-            provinceCode: clean(address.provinceCode),
-            zip: clean(address.zip) || null,
+            zip: clean(address.zip),
+            countryCode:
+              clean(address.countryCodeV2).toUpperCase()
+              || "TR",
           };
 
-          // Fulfillment status raw digest'e dahil edilmiyor.
-          // Böylece bizim Shopify'a göndereceğimiz fulfillment değişikliği
-          // gereksiz ORDER_VERSION_EXCEPTION üretmez.
+          // Keep the canonical raw payload stable with the V19 bootstrap
+          // ingestion already stored for existing Shopify orders.
           const rawPayload = {
             provider: "SHOPIFY",
-            shopifyOrderId: clean(order.id),
+            orderId: clean(order.id),
             orderName: clean(order.name),
             recipient,
-            lines: normalizedLines.map((line) => ({
-              externalLineId: line.externalLineId,
-              externalListingId:
-                line.externalListingId,
-              externalSku: line.externalSku,
-              quantityBaseInt:
-                line.quantityBaseInt,
-              actualUnitGrossMinor:
-                line.actualUnitGrossMinor,
-              providerSellerDiscountMinor:
-                line.providerSellerDiscountMinor,
-            })),
-            cancelledAt:
-              order.cancelledAt || null,
           };
 
           const versionHash = hash({
             updatedAt: order.updatedAt,
             cancelledAt: order.cancelledAt || null,
-            lines: rawPayload.lines,
+            lines: normalizedLines.map((line) => ({
+              externalLineId: line.externalLineId,
+              externalListingId: line.externalListingId,
+              externalSku: line.externalSku,
+              quantityBaseInt: line.quantityBaseInt,
+              actualUnitGrossMinor: line.actualUnitGrossMinor,
+              providerSellerDiscountMinor:
+                line.providerSellerDiscountMinor,
+            })),
           });
 
           const eventVersion =

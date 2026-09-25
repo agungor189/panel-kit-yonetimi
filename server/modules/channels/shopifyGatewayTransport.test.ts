@@ -424,3 +424,162 @@ test("Shopify poll normalizes a paid order and sends it to ChannelGateway", asyn
     "Istanbul",
   );
 });
+
+test("Shopify poll keeps canonical raw payload compatible with bootstrap ingestion", async () => {
+  const captured: any[] = [];
+
+  const gateway = {
+    ingest(event: any) {
+      captured.push(event);
+      return {
+        result: {
+          body: {
+            state: "DUPLICATE",
+            saleId: "sale-existing",
+          },
+        },
+      };
+    },
+  };
+
+  const fakeFetch = async (
+    input: URL | RequestInfo,
+    init?: RequestInit,
+  ) => {
+    const url = String(input);
+
+    if (url.endsWith("/admin/oauth/access_token")) {
+      return new Response(JSON.stringify({
+        access_token: "token-1",
+        expires_in: 86399,
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    const body = JSON.parse(String(init?.body || "{}"));
+
+    if (String(body.query).includes("ShopifyOrderPoll")) {
+      return new Response(JSON.stringify({
+        data: {
+          orders: {
+            nodes: [{
+              id: "gid://shopify/Order/8408602148931",
+              legacyResourceId: "8408602148931",
+              name: "#1006",
+              email: null,
+              createdAt: "2026-09-24T15:00:00Z",
+              updatedAt: "2026-09-24T15:35:56Z",
+              cancelledAt: null,
+              displayFinancialStatus: "PAID",
+              displayFulfillmentStatus: "UNFULFILLED",
+              taxesIncluded: true,
+              currentTotalPriceSet: {
+                shopMoney: {
+                  amount: "450.00",
+                  currencyCode: "TRY",
+                },
+              },
+              currentTotalDiscountsSet: {
+                shopMoney: {
+                  amount: "0.00",
+                  currencyCode: "TRY",
+                },
+              },
+              currentTotalTaxSet: {
+                shopMoney: {
+                  amount: "68.64",
+                  currencyCode: "TRY",
+                },
+              },
+              shippingAddress: null,
+              billingAddress: null,
+              lineItems: {
+                nodes: [{
+                  id: "gid://shopify/LineItem/20158028513347",
+                  name: "3 Yollu - 30mm",
+                  sku: "DSDST-4Y-7KQ30",
+                  quantity: 1,
+                  currentQuantity: 1,
+                  taxable: true,
+                  originalUnitPriceSet: {
+                    shopMoney: {
+                      amount: "450.00",
+                      currencyCode: "TRY",
+                    },
+                  },
+                  discountedUnitPriceAfterAllDiscountsSet: {
+                    shopMoney: {
+                      amount: "450.00",
+                      currencyCode: "TRY",
+                    },
+                  },
+                  totalDiscountSet: {
+                    shopMoney: {
+                      amount: "0.00",
+                      currencyCode: "TRY",
+                    },
+                  },
+                  taxLines: [{
+                    rate: 0.18,
+                    priceSet: {
+                      shopMoney: {
+                        amount: "68.64",
+                        currencyCode: "TRY",
+                      },
+                    },
+                  }],
+                  variant: {
+                    id: "gid://shopify/ProductVariant/43333979144259",
+                    title: "30mm",
+                    inventoryItem: {
+                      id: "gid://shopify/InventoryItem/45448261075011",
+                    },
+                  },
+                }],
+              },
+            }],
+            pageInfo: {
+              hasNextPage: false,
+              endCursor: null,
+            },
+          },
+        },
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    throw new Error(`UNEXPECTED_REQUEST:${url}`);
+  };
+
+  const transport = new ShopifyGatewayTransport(
+    config,
+    fakeFetch as typeof fetch,
+  );
+
+  const summary = await transport.poll({
+    gateway: gateway as any,
+    accountId: "shopify:production:2b6rcy-br",
+    query: "name:#1006",
+    serviceActorId: "shopify-poller:test",
+    operationIdPrefix: "compat-test",
+    receivedAt: "2026-09-26T00:00:00Z",
+    maxPages: 1,
+  });
+
+  assert.equal(summary.duplicate, 1);
+  assert.equal(captured.length, 1);
+
+  assert.deepEqual(
+    Object.keys(captured[0].rawPayload).sort(),
+    ["orderId", "orderName", "provider", "recipient"],
+  );
+
+  assert.equal(
+    captured[0].rawPayload.orderId,
+    "gid://shopify/Order/8408602148931",
+  );
+});
