@@ -39,6 +39,7 @@ import { SalesFinancialService, SalesFinancialValidationError } from "./server/m
 import { ChannelGatewayError, ChannelGatewayService } from "./server/modules/channels/channelGateway.js";
 import { enqueueCanonicalChannelChanges } from "./server/modules/channels/channelOutboundProjection.js";
 import { TrendyolGatewayTransport } from "./server/modules/channels/trendyolGatewayTransport.js";
+import { ShopifyGatewayTransport } from "./server/modules/channels/shopifyGatewayTransport.js";
 import { PublishedKitService } from "./server/modules/kits/publishedKitService.js";
 import { createPanelApiAuth } from "./server/middleware/panelApiAuth.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
@@ -4822,6 +4823,179 @@ async function startServer() {
         actor: { id: req.user!.id, name: req.user!.username }, resolvedAt: req.body.resolvedAt || new Date().toISOString() }));
     } catch (err: any) {
       res.status(err.statusCode || 400).json({ success: false, error: { code: err.code || "CHANNEL_REPROCESS_FAILED", message: err.message } });
+    }
+  });
+
+
+  app.get("/api/integrations/shopify/status", requireIntegrationsAdmin, apiLimiter, async (_req, res) => {
+    try {
+      const shop = String(process.env.SHOPIFY_SHOP || "").trim().toLowerCase();
+
+      const account = db.prepare(`
+        SELECT
+          id,
+          channel,
+          merchant_account_id,
+          environment,
+          state,
+          last_poll_at,
+          last_sync_at,
+          last_error_code,
+          updated_at
+        FROM channel_accounts
+        WHERE channel='SHOPIFY'
+          AND merchant_account_id=?
+          AND environment='PRODUCTION'
+        LIMIT 1
+      `).get(shop) as any;
+
+      const transport = ShopifyGatewayTransport.fromEnvironment();
+      const connection = await transport.verifyConnection();
+
+      const stats = account
+        ? db.prepare(`
+            SELECT
+              COUNT(*) AS order_count,
+              SUM(CASE WHEN order_state='ACCEPTED' THEN 1 ELSE 0 END) AS accepted_count,
+              SUM(CASE WHEN order_state='EXCEPTION' THEN 1 ELSE 0 END) AS exception_count
+            FROM channel_orders
+            WHERE account_id=?
+          `).get(account.id)
+        : {
+            order_count: 0,
+            accepted_count: 0,
+            exception_count: 0,
+          };
+
+      res.json({
+        success: true,
+        account: account || null,
+        connection,
+        stats,
+        writeEnabled:
+          String(process.env.SHOPIFY_WRITE_ENABLED || "false").toLowerCase() === "true",
+      });
+    } catch (err: any) {
+      res.status(err.statusCode || 400).json({
+        success: false,
+        error: {
+          code: err.code || "SHOPIFY_STATUS_FAILED",
+          message: err.message,
+        },
+      });
+    }
+  });
+
+  app.post("/api/integrations/shopify/sync", requireIntegrationsAdmin, apiLimiter, async (req, res) => {
+    try {
+      const operationId = saleOperationId(req);
+
+      if (!operationId) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: "OPERATION_ID_REQUIRED",
+            message: "x-operation-id header is required.",
+          },
+        });
+      }
+
+      const shop = String(process.env.SHOPIFY_SHOP || "").trim().toLowerCase();
+
+      const account = db.prepare(`
+        SELECT *
+        FROM channel_accounts
+        WHERE channel='SHOPIFY'
+          AND merchant_account_id=?
+          AND environment='PRODUCTION'
+        LIMIT 1
+      `).get(shop) as any;
+
+      if (!account) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: "SHOPIFY_ACCOUNT_NOT_CONFIGURED",
+            message: "Shopify channel account is not configured.",
+          },
+        });
+      }
+
+      const query = String(req.body?.query || "").trim();
+
+      if (!query) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: "SHOPIFY_SYNC_QUERY_REQUIRED",
+            message: "A Shopify order search query is required during V19 validation.",
+          },
+        });
+      }
+
+      const maxPages = Math.min(
+        5,
+        Math.max(
+          1,
+          Math.trunc(Number(req.body?.maxPages || 1)),
+        ),
+      );
+
+      const transport = ShopifyGatewayTransport.fromEnvironment();
+
+      await transport.verifyConnection();
+
+      const receivedAt = new Date().toISOString();
+
+      const summary = await transport.poll({
+        gateway: channelGateway,
+        accountId: account.id,
+        query,
+        serviceActorId: `shopify-poller:${account.id}`,
+        operationIdPrefix: operationId,
+        receivedAt,
+        maxPages,
+      });
+
+      db.prepare(`
+        UPDATE channel_accounts
+        SET last_sync_at=?,
+            last_error_code=NULL,
+            updated_at=?
+        WHERE id=?
+      `).run(
+        receivedAt,
+        receivedAt,
+        account.id,
+      );
+
+      logActivity(
+        "SHOPIFY_SYNCED",
+        "integration",
+        "Shopify",
+        {
+          after: {
+            query,
+            maxPages,
+            summary,
+          },
+        },
+        req.user?.id,
+      );
+
+      return res.json({
+        success: true,
+        accountId: account.id,
+        summary,
+      });
+    } catch (err: any) {
+      return res.status(err.statusCode || 400).json({
+        success: false,
+        error: {
+          code: err.code || "SHOPIFY_SYNC_FAILED",
+          message: err.message,
+        },
+      });
     }
   });
 
