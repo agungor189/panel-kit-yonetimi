@@ -258,7 +258,10 @@ export class GeliverFlowService {
       cityName: required(city.name, "geo.city.name", 100),
       cityCode: required(city.cityCode, "geo.city.cityCode", 30),
       districtName: required(district.name, "geo.district.name", 100),
-      districtID: district.districtID ?? null,
+      districtID: optionalInteger(
+        String(district.districtID).trim().replace(/\.0+$/, ""),
+        "geo.district.districtID",
+      ) ?? null,
       zip: optional(source.zip, "recipient.zip", 30),
     };
   }
