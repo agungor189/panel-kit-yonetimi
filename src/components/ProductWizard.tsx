@@ -62,7 +62,7 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
     if (settings && !productId) {
       setFormData((prev: any) => ({ 
         ...prev, 
-        category: prev.category || settings.product_categories[0],
+        category: prev.category || settings.product_categories?.[0] || '',
         exchange_rate_used: activeRate,
         buffer_percentage: settings.default_buffer_percentage,
         profit_percentage: settings.default_profit_percentage || 0
@@ -329,7 +329,7 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
             <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
               <Field label="Ürün Malzemesi">
                  <div className="flex flex-wrap gap-2">
-                   {settings?.product_categories.map(c => (
+                   {(settings?.product_categories || []).map(c => (
                      <button 
                        key={c} 
                        type="button"
@@ -656,7 +656,13 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
              </button>
              <button 
                onClick={handleSubmit}
-               disabled={loading || !formData.name || !formData.title}
+               disabled={
+                 loading ||
+                 (!formData.name_tr && !formData.name_en && !formData.title) ||
+                 formData.total_stock === '' ||
+                 formData.total_stock === null ||
+                 formData.total_stock === undefined
+               }
                className="flex-[2] sm:flex-none flex items-center justify-center px-12 py-3.5 bg-primary text-white rounded-2xl font-black text-sm shadow-2xl shadow-primary/20 hover:scale-[1.02] active:scale-95 transition-all disabled:opacity-50 disabled:scale-100 disabled:shadow-none"
              >
                {loading ? (
