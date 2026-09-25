@@ -82,7 +82,14 @@ export class TrendyolGatewayTransport {
     receivedAt: string;
     initialCursor?: string;
   }) {
-    const summary = { fetched: 0, accepted: 0, duplicate: 0, exception: 0, pages: 0 };
+    const summary = {
+      fetched: 0,
+      accepted: 0,
+      duplicate: 0,
+      exception: 0,
+      pages: 0,
+      errors: [] as Array<{ orderNumber: string; code: string; message: string }>,
+    };
     let nextCursor = input.initialCursor || "";
     const fetchedPackages: any[] = [];
     do {
@@ -108,6 +115,7 @@ export class TrendyolGatewayTransport {
     }
 
     for (const [orderNumber, entries] of [...byOrder].sort(([left], [right]) => left.localeCompare(right))) {
+      try {
       const packages = entries.map(({ raw: pkg, packageId }) => {
         const status = identifier(pkg.status, pkg.shipmentPackageStatus, pkg.packageStatus, pkg.packageItemStatus, pkg.lines?.[0]?.status);
         const state = packageState(status);
@@ -229,6 +237,14 @@ export class TrendyolGatewayTransport {
       if (state === "ACCEPTED") summary.accepted += 1;
       else if (state === "DUPLICATE") summary.duplicate += 1;
       else summary.exception += 1;
+      } catch (error: any) {
+        summary.exception += 1;
+        summary.errors.push({
+          orderNumber,
+          code: String(error?.code || "TRENDYOL_ORDER_NORMALIZATION_FAILED"),
+          message: String(error?.message || "Trendyol order normalization failed."),
+        });
+      }
     }
     this.gateway.updatePollingCursor({ accountId: input.accountId, cursorName: "trendyol-orders-stream",
       checkpointValue: JSON.stringify({ nextCursor: "", windowStartMs: input.windowStartMs, windowEndMs: input.windowEndMs }),
