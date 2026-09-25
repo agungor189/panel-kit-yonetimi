@@ -93,8 +93,8 @@ const setup = () => {
     (id,channel,merchant_account_id,environment,state,config_json) VALUES ('channel-account','TRENDYOL','merchant','STAGE','CONFIGURED','{}')`).run();
   db.prepare(`INSERT INTO channel_inbound_events
     (id,account_id,external_event_id,external_event_version,ingestion_path,event_type,raw_payload_json,raw_payload_digest,
-     received_at,processing_state,sale_id) VALUES ('channel-event','channel-account','event','1','POLL','ORDER_UPSERT','{}',?,
-     '2026-09-23T09:00:00.000Z','ACCEPTED','sale')`).run("c".repeat(64));
+     received_at,processing_state,sale_id) VALUES ('channel-event','channel-account','event','1','POLL','ORDER_UPSERT',?,?,
+     '2026-09-23T09:00:00.000Z','ACCEPTED','sale')`).run(JSON.stringify({ recipient }), "c".repeat(64));
   db.prepare(`INSERT INTO channel_orders
     (id,account_id,external_order_id,latest_external_version,currency,actual_discount_minor,order_state,sale_id,reservation_id,
      first_event_id,raw_order_digest) VALUES ('channel-order','channel-account','external-order','1','TRY',0,'ACCEPTED','sale',
@@ -397,6 +397,44 @@ const prepareLiveGeliver = () => {
   const geliver = new GeliverFlowService(fixture.db, transport, { senderAddressId: "sender-address", sourceIdentifier: "https://dsdst.example" });
   return { ...fixture, shipping, shipment, transport, geliver };
 };
+
+test("Geliver automatically uses the immutable marketplace recipient when recipient is omitted", () => {
+  const { db, shipment, geliver } = prepareLiveGeliver();
+
+  const [job] = geliver.prepareCreateJobs({
+    shipmentId: shipment.id,
+    operationId: "auto-recipient-create",
+    actor,
+  });
+
+  const snapshot = db.prepare(`
+    SELECT name,email,phone,address1,country_code,city_name,city_code,district_name,zip
+    FROM shipment_recipient_snapshots
+    WHERE shipment_id=?
+  `).get(shipment.id) as any;
+
+  assert.deepEqual(snapshot, {
+    name: recipient.name,
+    email: recipient.email,
+    phone: recipient.phone,
+    address1: recipient.address1,
+    country_code: recipient.countryCode,
+    city_name: recipient.cityName,
+    city_code: recipient.cityCode,
+    district_name: recipient.districtName,
+    zip: recipient.zip,
+  });
+
+  const request = JSON.parse(String(
+    db.prepare("SELECT request_json FROM geliver_create_jobs WHERE id=?").pluck().get(job.id)
+  ));
+
+  assert.equal(request.recipientAddress.phone, recipient.phone);
+  assert.equal(request.recipientAddress.cityCode, recipient.cityCode);
+  assert.equal(request.recipientAddress.districtName, recipient.districtName);
+
+  db.close();
+});
 
 test("verified live offers are selected by the operator; booking accepts provider-native label while tracking is nullable and refreshes later", async () => {
   const { db, inventory, shipping, shipment, transport, geliver } = prepareLiveGeliver();

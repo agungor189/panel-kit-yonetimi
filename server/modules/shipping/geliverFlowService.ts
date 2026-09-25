@@ -145,7 +145,7 @@ export class GeliverFlowService {
 
   contract() { return { ...VERIFIED_GELIVER_CONTRACT, enabled: this.transport.enabled, disabledReason: this.transport.disabledReason }; }
 
-  prepareCreateJobs(input: { shipmentId: string; recipient: RecipientInput; operationId: string; actor: Actor; requestedAt?: string }) {
+  prepareCreateJobs(input: { shipmentId: string; recipient?: RecipientInput | null; operationId: string; actor: Actor; requestedAt?: string }) {
     if (!this.transport.enabled) throw new ShipmentValidationError("GELIVER_TRANSPORT_DISABLED", this.transport.disabledReason || "Geliver is disabled.", 503);
     const senderAddressID = required(this.config.senderAddressId, "GELIVER_SENDER_ADDRESS_ID", 300);
     const sourceIdentifier = required(this.config.sourceIdentifier, "GELIVER_SOURCE_IDENTIFIER", 500);
@@ -154,7 +154,7 @@ export class GeliverFlowService {
     const operationId = required(input.operationId, "operationId", 200);
     const actorId = required(input.actor.id, "actor.id", 200);
     const requestedAt = input.requestedAt || at();
-    const recipient = this.recipient(input.recipient);
+    const recipient = this.recipient(input.recipient ?? this.recipientFromChannelOrder(shipmentId));
     return this.db.transaction(() => {
       const shipment = this.db.prepare(`SELECT p.*,s.order_code,f.currency,f.gross_amount_minor
         FROM shipment_preparations p JOIN sales s ON s.id=p.order_id
@@ -520,6 +520,69 @@ export class GeliverFlowService {
     const row = this.db.prepare("SELECT id FROM geliver_accept_jobs WHERE selection_id=?").get(id) as any;
     return this.jobAccept(row.id);
   }
+  private recipientFromChannelOrder(shipmentId: string): RecipientInput {
+    const row = this.db.prepare(`
+      SELECT e.raw_payload_json
+      FROM shipment_preparations p
+      JOIN channel_orders o ON o.sale_id=p.order_id
+      JOIN channel_inbound_events e ON e.id=o.first_event_id
+      WHERE p.id=?
+      LIMIT 1
+    `).get(shipmentId) as any;
+
+    if (!row?.raw_payload_json) {
+      throw new ShipmentValidationError(
+        "RECIPIENT_ADDRESS_INCOMPLETE",
+        "Shipment has no marketplace recipient snapshot; recipient must be supplied manually.",
+        409,
+      );
+    }
+
+    let recipient: any;
+    try {
+      recipient = JSON.parse(row.raw_payload_json)?.recipient;
+    } catch (_) {
+      recipient = null;
+    }
+
+    const requiredFields = [
+      "name",
+      "email",
+      "phone",
+      "address1",
+      "countryCode",
+      "cityName",
+      "cityCode",
+      "districtName",
+    ];
+
+    const missing = requiredFields.filter((field) =>
+      !String(recipient?.[field] ?? "").trim()
+    );
+
+    if (missing.length > 0) {
+      throw new ShipmentValidationError(
+        "RECIPIENT_ADDRESS_INCOMPLETE",
+        `Marketplace recipient is incomplete: ${missing.join(", ")}`,
+        409,
+      );
+    }
+
+    return {
+      name: String(recipient.name).trim(),
+      email: String(recipient.email).trim(),
+      phone: String(recipient.phone).trim(),
+      address1: String(recipient.address1).trim(),
+      address2: recipient.address2 ? String(recipient.address2).trim() : null,
+      countryCode: String(recipient.countryCode).trim(),
+      cityName: String(recipient.cityName).trim(),
+      cityCode: String(recipient.cityCode).trim(),
+      districtName: String(recipient.districtName).trim(),
+      districtID: recipient.districtID ?? null,
+      zip: recipient.zip ? String(recipient.zip).trim() : null,
+    };
+  }
+
   private recipient(input: RecipientInput) {
     return { name: required(input?.name, "recipient.name", 200), email: required(input?.email, "recipient.email", 320),
       phone: optional(input?.phone, "recipient.phone", 50) || undefined, address1: required(input?.address1, "recipient.address1", 500),
