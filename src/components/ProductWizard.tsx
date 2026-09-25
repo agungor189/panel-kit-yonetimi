@@ -8,7 +8,7 @@ import {
   Info,
   CheckCircle2,
 } from 'lucide-react';
-import { api, PLATFORMS } from '../lib/api';
+import { api, createRetryOperation, PLATFORMS } from '../lib/api';
 import { Settings } from '../types';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -27,13 +27,16 @@ interface ProductWizardProps {
 export default function ProductWizard({ productId, settings, onClose }: ProductWizardProps) {
   const [loading, setLoading] = useState(false);
   const { activeRate } = useCurrency();
+  const catalogMutation = useRef(createRetryOperation('catalog-product-wizard')).current;
 
   const [formData, setFormData] = useState<any>({
     name: '',
     name_tr: '',
     name_en: '',
     title: '',
-    total_stock: '',
+    total_stock: 0,
+    catalog_type: 'connector',
+    base_uom_code: 'piece',
     warehouse_location: '',
     sku: '',
     supplier_code: '',
@@ -62,7 +65,7 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
     if (settings && !productId) {
       setFormData((prev: any) => ({ 
         ...prev, 
-        category: prev.category || settings.product_categories[0],
+        category: prev.category || settings.product_categories?.[0] || '',
         exchange_rate_used: activeRate,
         buffer_percentage: settings.default_buffer_percentage,
         profit_percentage: settings.default_profit_percentage || 0
@@ -89,6 +92,8 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
         ...data,
         weight_grams: data.weight_grams ?? data.weight ?? 0,
         total_stock: totalStock,
+        catalog_type: data.catalog_type || 'connector',
+        base_uom_code: data.base_uom_code || 'piece',
         platforms: PLATFORMS.map(name => {
           const p = data.platforms?.find((dp: any) => dp.platform_name === name);
           return p ? { name, stock: 0, price: p.price, is_listed: !!p.is_listed } : { name, stock: 0, price: data.sale_price, is_listed: false };
@@ -137,33 +142,97 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
   };
 
   const handleSubmit = async () => {
-    if ((!formData.name_tr && !formData.name_en && !formData.title) || formData.total_stock === '' || formData.total_stock === null || formData.total_stock === undefined) {
-       alert("Lütfen Türkçe/İngilizce ad veya başlık ile stok bilgisini doldurunuz.");
-       return;
+    const title = String(
+      formData.title || formData.name_tr || formData.name_en || ''
+    ).trim();
+
+    const sku = String(formData.sku || '').trim();
+    const catalogType = String(formData.catalog_type || 'connector').trim();
+    const baseUomCode = String(formData.base_uom_code || 'piece').trim();
+
+    if (!title || !sku || !catalogType || !baseUomCode) {
+      alert("Başlık, SKU, katalog tipi ve temel birim zorunludur.");
+      return;
     }
+
     setLoading(true);
+
+    const canonicalProduct = {
+      sku,
+      title,
+      catalog_type: catalogType,
+      base_uom_code: baseUomCode,
+      mass_grams: Math.max(0, Math.round(Number(formData.weight_grams) || 0)),
+      status: formData.status || 'Active',
+    };
+
+    const operational = {
+      name_tr: formData.name_tr || null,
+      name_en: formData.name_en || null,
+      warehouse_location: formData.warehouse_location || null,
+      supplier_code: formData.supplier_code || null,
+      barcode: formData.barcode || null,
+      category: formData.category || null,
+      material: formData.category || null,
+      model: formData.model || null,
+      product_series: formData.product_series || null,
+      tube_type_code: formData.tube_type_code || null,
+      form_code: formData.form_code || null,
+      description: formData.description || null,
+      purchase_price_usd: Number(formData.purchase_price_usd) || 0,
+      purchase_cost: Number(formData.purchase_cost) || 0,
+      sale_price: Number(formData.sale_price) || 0,
+      buffer_percentage: Number(formData.buffer_percentage) || 0,
+      profit_percentage: Number(formData.profit_percentage) || 0,
+      exchange_rate_used: Number(formData.exchange_rate_used) || 0,
+      price_locked: Boolean(formData.price_locked),
+      notes: formData.notes || null,
+      size: formData.size || null,
+      pipe_size: formData.pipe_size || null,
+      connection_type: formData.connection_type || null,
+      usage_area: formData.usage_area || null,
+      supplier: formData.supplier || null,
+      min_stock_level: Number(formData.min_stock_level) || 0,
+      platforms: (formData.platforms || []).map((platform: any) => ({
+        name: platform.name,
+        price: Number(platform.price) || 0,
+        is_listed: Boolean(platform.is_listed),
+      })),
+    };
+
+    const commandPayload = productId
+      ? {
+          expected_catalog_version: Number(formData.catalog_version),
+          product: canonicalProduct,
+          operational,
+        }
+      : {
+          product: canonicalProduct,
+          operational,
+        };
+
+    const opId = catalogMutation.idFor(commandPayload);
+
     try {
       let savedId = productId;
-      const centralStock = parseInt(formData.total_stock) || 0;
-      const payload = {
-        ...formData,
-        name: formData.name_tr || formData.name_en || formData.title,
-        central_stock: centralStock,
-        total_stock: centralStock,
-        platforms: (formData.platforms || []).map((platform: any) => ({
-          ...platform,
-          stock: 0,
-        })),
-        images,
-        imageChanged,
-      };
-      
+
       if (productId) {
-        await api.put(`/products/${productId}`, payload);
+        const res = await api.put(
+          `/catalog-admin/v1/products/${productId}`,
+          commandPayload,
+          { operationId: opId },
+        );
+        savedId = res.data?.id || productId;
       } else {
-        const res = await api.post('/products', payload);
-        savedId = res.id;
+        const res = await api.post(
+          '/catalog-admin/v1/products',
+          commandPayload,
+          { operationId: opId },
+        );
+        savedId = res.data?.id;
       }
+
+      catalogMutation.complete(opId);
 
       if (newImages.length > 0 && savedId) {
         const fd = new FormData();
@@ -172,8 +241,8 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
       }
 
       onClose();
-    } catch (err) {
-      alert("Hata oluştu, lütfen alanları kontrol edin.");
+    } catch (err: any) {
+      alert(err?.message || "Ürün kaydedilemedi.");
     } finally {
       setLoading(false);
     }
@@ -242,7 +311,7 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                   className="form-input"
                 />
               </Field>
-              <Field label="SKU / Stok Kodu">
+              <Field label="SKU / Stok Kodu" required>
                 <input 
                   name="sku" 
                   value={formData.sku} 
@@ -286,33 +355,64 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                   className="form-input font-bold" 
                 />
               </Field>
-              <Field label="Ürün Tipi">
-                <select name="product_type" value={formData.product_type || 'simple'} onChange={handleInputChange} className="form-input font-bold">
-                  <option value="simple">Simple</option>
-                  <option value="component">Component</option>
-                  <option value="assembly">Assembly</option>
-                  <option value="accessory">Accessory</option>
+              <Field label="Katalog Tipi" required>
+                <select
+                  name="catalog_type"
+                  value={formData.catalog_type || 'connector'}
+                  onChange={handleInputChange}
+                  className="form-input font-bold"
+                >
+                  <option value="connector">Bağlantı Elemanı</option>
+                  <option value="product">Standart Ürün</option>
+                  <option value="cap">Kapak / Tapa</option>
+                  <option value="wheel">Tekerlek</option>
+                  <option value="complementary">Tamamlayıcı Ürün</option>
                 </select>
               </Field>
+
+              <Field label="Temel Birim" required>
+                <select
+                  name="base_uom_code"
+                  value={formData.base_uom_code || 'piece'}
+                  onChange={handleInputChange}
+                  className="form-input font-bold"
+                >
+                  <option value="piece">Adet</option>
+                  <option value="meter">Metre</option>
+                  <option value="square_meter">m²</option>
+                  <option value="kg">kg</option>
+                  <option value="roll">Rulo</option>
+                  <option value="package">Paket</option>
+                  <option value="box">Kutu</option>
+                </select>
+              </Field>
+
               <Field label="Kritik Stok Seviyesi">
-                <input 
+                <input
                   type="number"
-                  name="min_stock_level" 
-                  value={formData.min_stock_level} 
-                  onChange={(e) => setFormData({...formData, min_stock_level: parseInt(e.target.value) || 0})}
+                  min="0"
+                  name="min_stock_level"
+                  value={formData.min_stock_level}
+                  onChange={(e) => setFormData({
+                    ...formData,
+                    min_stock_level: parseInt(e.target.value) || 0
+                  })}
                   placeholder="Örn: 50"
-                  className="form-input font-bold" 
+                  className="form-input font-bold"
                 />
               </Field>
-              <Field label="Merkez Depo Stoğu" required>
-                <input 
+
+              <Field label="Merkez Depo Stoğu">
+                <input
                   type="number"
-                  name="total_stock" 
-                  value={formData.total_stock} 
-                  onChange={handleInputChange} 
-                  placeholder="Örn: 100"
-                  className="form-input font-bold" 
+                  value={Number(formData.total_stock) || 0}
+                  readOnly
+                  disabled
+                  className="form-input font-bold bg-bg-main/60 cursor-not-allowed"
                 />
+                <p className="mt-2 text-[10px] font-semibold text-text-muted">
+                  Stok ürün kartından değiştirilemez. Satın alma ve mal kabul işlemleriyle güncellenir.
+                </p>
               </Field>
             </div>
           </section>
@@ -329,7 +429,7 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
             <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
               <Field label="Ürün Malzemesi">
                  <div className="flex flex-wrap gap-2">
-                   {settings?.product_categories.map(c => (
+                   {(settings?.product_categories || []).map(c => (
                      <button 
                        key={c} 
                        type="button"
@@ -656,7 +756,13 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
              </button>
              <button 
                onClick={handleSubmit}
-               disabled={loading || !formData.name || !formData.title}
+               disabled={
+                 loading ||
+                 (!formData.name_tr && !formData.name_en && !formData.title) ||
+                 !String(formData.sku || '').trim() ||
+                 !String(formData.catalog_type || '').trim() ||
+                 !String(formData.base_uom_code || '').trim()
+               }
                className="flex-[2] sm:flex-none flex items-center justify-center px-12 py-3.5 bg-primary text-white rounded-2xl font-black text-sm shadow-2xl shadow-primary/20 hover:scale-[1.02] active:scale-95 transition-all disabled:opacity-50 disabled:scale-100 disabled:shadow-none"
              >
                {loading ? (
