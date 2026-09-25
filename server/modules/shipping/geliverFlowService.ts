@@ -1,5 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { GeliverClient, GeliverError, type Offer, type Shipment, type Transaction } from "@geliver/sdk";
+import {
+  GeliverClient,
+  GeliverError,
+  type City,
+  type District,
+  type Offer,
+  type Shipment,
+  type Transaction,
+} from "@geliver/sdk";
 import type Database from "better-sqlite3";
 import { ShipmentValidationError } from "./shipmentService.js";
 import { ReconciliationScopeGuard } from "../reconciliation/reconciliationGuard.js";
@@ -69,6 +77,8 @@ export interface GeliverTransport {
   acceptOffer(offerId: string): Promise<Transaction>;
   cancel(providerShipmentId: string): Promise<Shipment>;
   downloadLabel(url: string): Promise<Uint8Array>;
+  listCities(countryCode: string): Promise<City[]>;
+  listDistricts(countryCode: string, cityCode: string): Promise<District[]>;
 }
 
 export class GeliverSdkTransport implements GeliverTransport {
@@ -109,6 +119,16 @@ export class GeliverSdkTransport implements GeliverTransport {
   acceptOffer(offerId: string) { return this.api().transactions.acceptOffer(offerId); }
   cancel(providerShipmentId: string) { return this.api().shipments.cancel(providerShipmentId); }
   downloadLabel(url: string) { return this.api().shipments.downloadLabelByUrl(url); }
+
+  async listCities(countryCode: string): Promise<City[]> {
+    const result: any = await this.api().geo.listCities(countryCode);
+    return Array.isArray(result) ? result : (result?.data || []);
+  }
+
+  async listDistricts(countryCode: string, cityCode: string): Promise<District[]> {
+    const result: any = await this.api().geo.listDistricts(countryCode, cityCode);
+    return Array.isArray(result) ? result : (result?.data || []);
+  }
 }
 
 export class DisabledGeliverTransport implements GeliverTransport {
@@ -121,6 +141,8 @@ export class DisabledGeliverTransport implements GeliverTransport {
   acceptOffer(): Promise<Transaction> { return Promise.reject(this.fail()); }
   cancel(): Promise<Shipment> { return Promise.reject(this.fail()); }
   downloadLabel(): Promise<Uint8Array> { return Promise.reject(this.fail()); }
+  listCities(): Promise<City[]> { return Promise.reject(this.fail()); }
+  listDistricts(): Promise<District[]> { return Promise.reject(this.fail()); }
 }
 
 const errorInfo = (error: unknown) => {
@@ -145,7 +167,103 @@ export class GeliverFlowService {
 
   contract() { return { ...VERIFIED_GELIVER_CONTRACT, enabled: this.transport.enabled, disabledReason: this.transport.disabledReason }; }
 
-  prepareCreateJobs(input: { shipmentId: string; recipient?: RecipientInput | null; operationId: string; actor: Actor; requestedAt?: string }) {
+  private geoKey(value: unknown) {
+    return String(value ?? "")
+      .trim()
+      .toLocaleLowerCase("tr-TR")
+      .normalize("NFKD")
+      .replace(/\p{M}/gu, "")
+      .replace(/ı/g, "i");
+  }
+
+  private recipientSnapshot(shipmentId: string): RecipientInput | null {
+    const row = this.db.prepare(`
+      SELECT
+        name,email,phone,address1,address2,country_code,
+        city_name,city_code,district_name,district_id,zip
+      FROM shipment_recipient_snapshots
+      WHERE shipment_id=?
+    `).get(shipmentId) as any;
+
+    if (!row) return null;
+
+    return {
+      name: row.name,
+      email: row.email,
+      phone: row.phone,
+      address1: row.address1,
+      address2: row.address2,
+      countryCode: row.country_code,
+      cityName: row.city_name,
+      cityCode: row.city_code,
+      districtName: row.district_name,
+      districtID: row.district_id,
+      zip: row.zip,
+    };
+  }
+
+  async resolveRecipient(input: {
+    shipmentId: string;
+    recipient?: RecipientInput | null;
+  }): Promise<RecipientInput> {
+    const shipmentId = required(input.shipmentId, "shipmentId", 200);
+
+    const existing = this.recipientSnapshot(shipmentId);
+    if (existing) return existing;
+
+    const source = input.recipient ?? this.recipientFromChannelOrder(shipmentId);
+
+    const countryCode = required(source.countryCode, "recipient.countryCode", 3).toUpperCase();
+    const cityName = required(source.cityName, "recipient.cityName", 100);
+    const districtName = required(source.districtName, "recipient.districtName", 100);
+
+    const cities = await this.transport.listCities(countryCode);
+
+    const city = cities.find(
+      (candidate) => this.geoKey(candidate.name) === this.geoKey(cityName)
+    );
+
+    if (!city?.cityCode) {
+      throw new ShipmentValidationError(
+        "GELIVER_GEO_CITY_NOT_FOUND",
+        `Geliver city could not be resolved for '${cityName}'.`,
+        409,
+      );
+    }
+
+    const districts = await this.transport.listDistricts(
+      countryCode,
+      String(city.cityCode),
+    );
+
+    const district = districts.find(
+      (candidate) => this.geoKey(candidate.name) === this.geoKey(districtName)
+    );
+
+    if (!district?.districtID) {
+      throw new ShipmentValidationError(
+        "GELIVER_GEO_DISTRICT_NOT_FOUND",
+        `Geliver district could not be resolved for '${districtName}' in '${cityName}'.`,
+        409,
+      );
+    }
+
+    return {
+      name: required(source.name, "recipient.name", 200),
+      email: required(source.email, "recipient.email", 320),
+      phone: required(source.phone, "recipient.phone", 50),
+      address1: required(source.address1, "recipient.address1", 500),
+      address2: optional(source.address2, "recipient.address2", 500),
+      countryCode,
+      cityName: required(city.name, "geo.city.name", 100),
+      cityCode: required(city.cityCode, "geo.city.cityCode", 30),
+      districtName: required(district.name, "geo.district.name", 100),
+      districtID: district.districtID ?? null,
+      zip: optional(source.zip, "recipient.zip", 30),
+    };
+  }
+
+  prepareCreateJobs(input: { shipmentId: string; recipient: RecipientInput; operationId: string; actor: Actor; requestedAt?: string }) {
     if (!this.transport.enabled) throw new ShipmentValidationError("GELIVER_TRANSPORT_DISABLED", this.transport.disabledReason || "Geliver is disabled.", 503);
     const senderAddressID = required(this.config.senderAddressId, "GELIVER_SENDER_ADDRESS_ID", 300);
     const sourceIdentifier = required(this.config.sourceIdentifier, "GELIVER_SOURCE_IDENTIFIER", 500);
@@ -154,7 +272,7 @@ export class GeliverFlowService {
     const operationId = required(input.operationId, "operationId", 200);
     const actorId = required(input.actor.id, "actor.id", 200);
     const requestedAt = input.requestedAt || at();
-    const recipient = this.recipient(input.recipient ?? this.recipientFromChannelOrder(shipmentId));
+    const recipient = this.recipient(input.recipient);
     return this.db.transaction(() => {
       const shipment = this.db.prepare(`SELECT p.*,s.order_code,f.currency,f.gross_amount_minor
         FROM shipment_preparations p JOIN sales s ON s.id=p.order_id
@@ -552,7 +670,6 @@ export class GeliverFlowService {
       "address1",
       "countryCode",
       "cityName",
-      "cityCode",
       "districtName",
     ];
 

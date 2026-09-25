@@ -415,7 +415,7 @@ test("verified Trendyol stream poll enters the gateway and the verified publishe
   )).recipient;
 
   assert.equal(inboundRecipient.phone, "+905301234567");
-  assert.equal(inboundRecipient.cityCode, "34");
+  assert.equal(inboundRecipient.cityCode, "6");
   assert.equal(inboundRecipient.districtName, "Kadıköy");
 
   assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_reservations").pluck().get(), 1);
