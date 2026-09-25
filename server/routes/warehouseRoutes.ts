@@ -611,10 +611,16 @@ export function createWarehouseRouter({
 
   router.post("/shipping/shipments/:id/geliver/offers", authenticate("write:warehouse_status"), requireWarehouseUser,
     requireWarehousePermission("shipping:manage"), async (req, res) => {
-      const payload = { shipmentId: req.params.id, recipient: req.body?.recipient ?? null };
       try {
+        const recipient = await geliverService.resolveRecipient({
+          shipmentId: req.params.id,
+          recipient: req.body?.recipient ?? null,
+        });
+
+        const payload = { shipmentId: req.params.id, recipient };
+
         const outcome = commandExecutor.execute(commandRequest(req, res, "shipping.geliver.create-request.v2", "shipping:manage", payload), (context) => {
-          const jobs = geliverService.prepareCreateJobs({ shipmentId: req.params.id, recipient: req.body?.recipient,
+          const jobs = geliverService.prepareCreateJobs({ shipmentId: req.params.id, recipient,
             operationId: operationIdFromRequest(req), actor: { id: actor(res).id, name: actor(res).username } });
           context.addOutbox({ topic: "carrier", eventType: "shipping.geliver.create.requested.v2", aggregateType: "shipment",
             aggregateId: req.params.id, payload: { shipment_id: req.params.id, job_ids: jobs.map((job) => job.id) } });
