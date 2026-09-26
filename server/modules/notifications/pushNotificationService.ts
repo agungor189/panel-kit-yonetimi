@@ -1,5 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
+import {
+  DEFAULT_NOTIFICATION_TEMPLATES,
+  NOTIFICATION_CATEGORIES,
+  isNotificationCategory,
+  renderNotificationTemplate,
+  resolveNotificationTemplate,
+  validateNotificationTemplate,
+  type NotificationCategory,
+  type NotificationTemplateInput,
+} from '../../../shared/notificationTemplates.js';
 
 export type PushSubscriptionInput = {
   endpoint: string;
@@ -10,19 +20,11 @@ export type PushSubscriptionInput = {
   };
 };
 
-export type NotificationPreferences = {
-  new_order: boolean;
-  shipping_exception: boolean;
-  critical_stock: boolean;
-  system_exception: boolean;
-};
+export type NotificationPreferences = Record<NotificationCategory, boolean>;
 
-const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
-  new_order: true,
-  shipping_exception: true,
-  critical_stock: true,
-  system_exception: true,
-};
+const DEFAULT_NOTIFICATION_PREFERENCES = Object.fromEntries(
+  NOTIFICATION_CATEGORIES.map((category) => [category, true]),
+) as NotificationPreferences;
 
 type PushTransport = {
   setVapidDetails(subject: string, publicKey: string, privateKey: string): void;
@@ -50,9 +52,19 @@ type SubscriptionRow = {
 
 type NotificationPreferencesRow = {
   new_order: number;
+  order_cancel_return: number;
   shipping_exception: number;
-  critical_stock: number;
-  system_exception: number;
+  stock_exception: number;
+  goods_receipt_exception: number;
+  reconciliation_exception: number;
+  integration_exception: number;
+  backup_exception: number;
+};
+
+type NotificationTemplateRow = {
+  category: string;
+  title_template: string;
+  message_template: string;
 };
 
 export class PushValidationError extends Error {}
@@ -84,16 +96,23 @@ function validateSubscription(input: PushSubscriptionInput): PushSubscriptionInp
 }
 
 function validatePreferences(input: NotificationPreferences): NotificationPreferences {
-  const keys: Array<keyof NotificationPreferences> = [
-    'new_order',
-    'shipping_exception',
-    'critical_stock',
-    'system_exception',
-  ];
-  if (!input || typeof input !== 'object' || keys.some((key) => typeof input[key] !== 'boolean')) {
+  if (!input || typeof input !== 'object' || NOTIFICATION_CATEGORIES.some((key) => typeof input[key] !== 'boolean')) {
     throw new PushValidationError('Bildirim tercihleri geçersiz.');
   }
-  return Object.fromEntries(keys.map((key) => [key, input[key]])) as NotificationPreferences;
+  return Object.fromEntries(NOTIFICATION_CATEGORIES.map((key) => [key, input[key]])) as NotificationPreferences;
+}
+
+function validateCategory(value: unknown): NotificationCategory {
+  if (!isNotificationCategory(value)) throw new PushValidationError('Bildirim kategorisi geçersiz.');
+  return value;
+}
+
+function validateTemplate(category: NotificationCategory, input: NotificationTemplateInput) {
+  try {
+    return validateNotificationTemplate(category, input);
+  } catch (error) {
+    throw new PushValidationError(error instanceof Error ? error.message : 'Bildirim şablonu geçersiz.');
+  }
 }
 
 const hashEndpoint = (endpoint: string) => createHash('sha256').update(endpoint).digest('hex');
@@ -199,38 +218,95 @@ export function createPushNotificationService({
 
   const getPreferences = (userId: string): NotificationPreferences => {
     const row = db.prepare(`
-      SELECT new_order, shipping_exception, critical_stock, system_exception
+      SELECT new_order, order_cancel_return, shipping_exception, stock_exception,
+             goods_receipt_exception, reconciliation_exception, integration_exception, backup_exception
       FROM user_notification_preferences WHERE user_id = ?
     `).get(userId) as NotificationPreferencesRow | undefined;
     if (!row) return { ...DEFAULT_NOTIFICATION_PREFERENCES };
-    return {
-      new_order: row.new_order === 1,
-      shipping_exception: row.shipping_exception === 1,
-      critical_stock: row.critical_stock === 1,
-      system_exception: row.system_exception === 1,
-    };
+    return Object.fromEntries(
+      NOTIFICATION_CATEGORIES.map((category) => [category, row[category] === 1]),
+    ) as NotificationPreferences;
   };
 
   const updatePreferences = (userId: string, rawPreferences: NotificationPreferences) => {
     const preferences = validatePreferences(rawPreferences);
     db.prepare(`
       INSERT INTO user_notification_preferences (
-        user_id, new_order, shipping_exception, critical_stock, system_exception
-      ) VALUES (?, ?, ?, ?, ?)
+        user_id, new_order, order_cancel_return, shipping_exception, stock_exception,
+        goods_receipt_exception, reconciliation_exception, integration_exception, backup_exception
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(user_id) DO UPDATE SET
         new_order = excluded.new_order,
+        order_cancel_return = excluded.order_cancel_return,
         shipping_exception = excluded.shipping_exception,
-        critical_stock = excluded.critical_stock,
-        system_exception = excluded.system_exception,
+        stock_exception = excluded.stock_exception,
+        goods_receipt_exception = excluded.goods_receipt_exception,
+        reconciliation_exception = excluded.reconciliation_exception,
+        integration_exception = excluded.integration_exception,
+        backup_exception = excluded.backup_exception,
         updated_at = CURRENT_TIMESTAMP
     `).run(
       userId,
       Number(preferences.new_order),
+      Number(preferences.order_cancel_return),
       Number(preferences.shipping_exception),
-      Number(preferences.critical_stock),
-      Number(preferences.system_exception),
+      Number(preferences.stock_exception),
+      Number(preferences.goods_receipt_exception),
+      Number(preferences.reconciliation_exception),
+      Number(preferences.integration_exception),
+      Number(preferences.backup_exception),
     );
     return preferences;
+  };
+
+  const getTemplates = () => {
+    const rows = db.prepare(`
+      SELECT category, title_template, message_template FROM notification_templates
+    `).all() as NotificationTemplateRow[];
+    const overrides = new Map(rows.map((row) => [row.category, row]));
+    return NOTIFICATION_CATEGORIES.map((category) => {
+      const row = overrides.get(category);
+      const resolved = resolveNotificationTemplate(category, row
+        ? { title: row.title_template, message: row.message_template }
+        : null);
+      const isValidOverride = Boolean(row)
+        && resolved.title === row!.title_template.trim()
+        && resolved.message === row!.message_template.trim();
+      return { category, ...resolved, is_default: !isValidOverride };
+    });
+  };
+
+  const updateTemplate = (categoryValue: unknown, rawTemplate: NotificationTemplateInput, userId: string) => {
+    const category = validateCategory(categoryValue);
+    const template = validateTemplate(category, rawTemplate);
+    db.prepare(`
+      INSERT INTO notification_templates (category, title_template, message_template, updated_by)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(category) DO UPDATE SET
+        title_template = excluded.title_template,
+        message_template = excluded.message_template,
+        updated_by = excluded.updated_by,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(category, template.title, template.message, userId);
+    return { category, ...template, is_default: false };
+  };
+
+  const resetTemplate = (categoryValue: unknown) => {
+    const category = validateCategory(categoryValue);
+    db.prepare('DELETE FROM notification_templates WHERE category = ?').run(category);
+    return { category, ...DEFAULT_NOTIFICATION_TEMPLATES[category], is_default: true };
+  };
+
+  const renderTemplate = (categoryValue: unknown, variables: Record<string, unknown>) => {
+    const category = validateCategory(categoryValue);
+    const row = db.prepare(`
+      SELECT title_template, message_template FROM notification_templates WHERE category = ?
+    `).get(category) as Omit<NotificationTemplateRow, 'category'> | undefined;
+    return renderNotificationTemplate(
+      category,
+      variables,
+      row ? { title: row.title_template, message: row.message_template } : null,
+    );
   };
 
   const unsubscribe = (userId: string, endpoint: string) => {
@@ -293,7 +369,19 @@ export function createPushNotificationService({
     return result;
   };
 
-  return { status, subscribe, rebind, unsubscribe, getPreferences, updatePreferences, sendTest };
+  return {
+    status,
+    subscribe,
+    rebind,
+    unsubscribe,
+    getPreferences,
+    updatePreferences,
+    getTemplates,
+    updateTemplate,
+    resetTemplate,
+    renderTemplate,
+    sendTest,
+  };
 }
 
 export type PushNotificationService = ReturnType<typeof createPushNotificationService>;

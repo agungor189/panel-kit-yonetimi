@@ -7,6 +7,8 @@ import {
   getPushSupport,
   pushEndpointHash,
 } from '../lib/pushNotifications';
+import { type NotificationCategory } from '../../shared/notificationTemplates';
+import NotificationTemplateSettings from './NotificationTemplateSettings';
 
 type ServerPushStatus = {
   available: boolean;
@@ -16,18 +18,17 @@ type ServerPushStatus = {
   subscribed: boolean;
 };
 
-type NotificationPreferences = {
-  new_order: boolean;
-  shipping_exception: boolean;
-  critical_stock: boolean;
-  system_exception: boolean;
-};
+type NotificationPreferences = Record<NotificationCategory, boolean>;
 
 const preferenceOptions: Array<{ key: keyof NotificationPreferences; label: string; description: string }> = [
   { key: 'new_order', label: 'Yeni siparişler', description: 'Yeni sipariş bildirimlerini al.' },
-  { key: 'shipping_exception', label: 'Kargo istisnaları', description: 'Gönderim sürecindeki istisnaları bildir.' },
-  { key: 'critical_stock', label: 'Kritik stok', description: 'Kritik stok seviyelerini bildir.' },
-  { key: 'system_exception', label: 'Sistem istisnaları', description: 'Önemli sistem sorunlarını bildir.' },
+  { key: 'order_cancel_return', label: 'Sipariş iptal / iade', description: 'İptal ve iade taleplerini bildir.' },
+  { key: 'shipping_exception', label: 'Sevkiyat istisnaları', description: 'Gönderim sürecindeki hataları bildir.' },
+  { key: 'stock_exception', label: 'Stok istisnaları', description: 'Kritik stok ve stok sorunlarını bildir.' },
+  { key: 'goods_receipt_exception', label: 'Mal kabul istisnaları', description: 'Mal kabul farklarını bildir.' },
+  { key: 'reconciliation_exception', label: 'Sistem uyuşmazlıkları', description: 'Reconciliation bulgularını bildir.' },
+  { key: 'integration_exception', label: 'Entegrasyon istisnaları', description: 'Kanal ve entegrasyon hatalarını bildir.' },
+  { key: 'backup_exception', label: 'Backup / DR istisnaları', description: 'Yedekleme ve kurtarma hatalarını bildir.' },
 ];
 
 const OWNERSHIP_CONFIRMATION = 'Bu cihazın bildirimleri başka bir DSDST hesabına bağlı. Bu hesaba taşımak ister misiniz?';
@@ -182,6 +183,7 @@ export default function PushNotificationSettings() {
       : '';
 
   return (
+    <div className="space-y-6">
     <div className="card overflow-hidden">
       <div className="p-6 lg:p-8 space-y-5">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
@@ -258,6 +260,8 @@ export default function PushNotificationSettings() {
           </p>
         )}
       </div>
+    </div>
+    <NotificationTemplateSettings />
     </div>
   );
 }

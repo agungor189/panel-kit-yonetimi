@@ -1413,7 +1413,11 @@ async function startServer() {
   app.use("/api/auth", auth.router);
   app.use("/api", auth.authenticateApi);
   app.use("/api", auth.requireCompletedPasswordChange);
-  app.use("/api/push", auth.requireCapability("panel:read"), createPushNotificationRouter(pushNotificationService, logActivity));
+  app.use(
+    "/api/push",
+    auth.requireCapability("panel:read"),
+    createPushNotificationRouter(pushNotificationService, logActivity, auth.requireCapability("settings:admin")),
+  );
   app.use("/api", auth.authorizeApi);
   const requireIdentityAdmin = auth.requireCapability("identity:admin");
   const requireIntegrationsAdmin = auth.requireCapability("integrations:admin");

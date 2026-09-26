@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 import Database from 'better-sqlite3';
 import { NOTIFICATION_PREFERENCES_SCHEMA_V89 } from '../../db/notificationPreferencesSchema.js';
+import { NOTIFICATION_TEMPLATES_SCHEMA_V90 } from '../../db/notificationTemplatesSchema.js';
 import { PUSH_SUBSCRIPTIONS_SCHEMA_V88 } from '../../db/pushSubscriptionsSchema.js';
 import { PushOwnershipError, PushUnavailableError, createPushNotificationService } from './pushNotificationService.js';
 
@@ -18,6 +19,7 @@ function createDb() {
   db.exec('CREATE TABLE users (id TEXT PRIMARY KEY); INSERT INTO users (id) VALUES (\'user-1\'), (\'user-2\');');
   db.exec(PUSH_SUBSCRIPTIONS_SCHEMA_V88);
   db.exec(NOTIFICATION_PREFERENCES_SCHEMA_V89);
+  db.exec(NOTIFICATION_TEMPLATES_SCHEMA_V90);
   return db;
 }
 
@@ -31,9 +33,13 @@ function configuredEnv() {
 
 const disabledPreferences = {
   new_order: false,
+  order_cancel_return: false,
   shipping_exception: false,
-  critical_stock: false,
-  system_exception: false,
+  stock_exception: false,
+  goods_receipt_exception: false,
+  reconciliation_exception: false,
+  integration_exception: false,
+  backup_exception: false,
 };
 
 test('notification preferences read defaults and persist updates for the authenticated user', () => {
@@ -46,9 +52,13 @@ test('notification preferences read defaults and persist updates for the authent
 
   assert.deepEqual(service.getPreferences('user-1'), {
     new_order: true,
+    order_cancel_return: true,
     shipping_exception: true,
-    critical_stock: true,
-    system_exception: true,
+    stock_exception: true,
+    goods_receipt_exception: true,
+    reconciliation_exception: true,
+    integration_exception: true,
+    backup_exception: true,
   });
   assert.deepEqual(service.updatePreferences('user-1', disabledPreferences), disabledPreferences);
   assert.deepEqual(service.getPreferences('user-1'), disabledPreferences);
@@ -66,9 +76,13 @@ test('notification preferences remain isolated between users', () => {
   service.updatePreferences('user-1', disabledPreferences);
   assert.deepEqual(service.getPreferences('user-2'), {
     new_order: true,
+    order_cancel_return: true,
     shipping_exception: true,
-    critical_stock: true,
-    system_exception: true,
+    stock_exception: true,
+    goods_receipt_exception: true,
+    reconciliation_exception: true,
+    integration_exception: true,
+    backup_exception: true,
   });
   db.close();
 });

@@ -3,7 +3,7 @@ import { Lock, User, LogIn, Zap, KeyRound, ShieldCheck } from 'lucide-react';
 import { api } from '../lib/api';
 import type { UserRole } from '../types';
 
-type Props = { onLogin: (role: UserRole) => void };
+type Props = { onLogin: (role: UserRole, permissions?: Record<string, unknown>) => void };
 
 function normalizeRole(role: unknown): UserRole {
   return role === 'admin' || role === 'user' || role === 'readonly' ? role : 'user';
@@ -20,6 +20,7 @@ export default function LoginPage({ onLogin }: Props) {
 
   // change-password form state
   const [pendingRole, setPendingRole]   = useState<UserRole>('user');
+  const [pendingPermissions, setPendingPermissions] = useState<Record<string, unknown>>({});
   const [currentPw,  setCurrentPw]      = useState('');
   const [newPw,      setNewPw]          = useState('');
   const [confirmPw,  setConfirmPw]      = useState('');
@@ -35,11 +36,12 @@ export default function LoginPage({ onLogin }: Props) {
       if (res.success && res.user) {
         if (res.user.must_change_password) {
           setPendingRole(normalizeRole(res.user.role));
+          setPendingPermissions(res.user.permissions || {});
           setCurrentPw(password); // pre-fill current password
           setView('change-password');
         } else {
           const role = normalizeRole(res.user.role);
-          onLogin(role);
+          onLogin(role, res.user.permissions || {});
         }
       } else {
         setLoginError(res.error?.message || 'Giriş başarısız.');
@@ -66,7 +68,7 @@ export default function LoginPage({ onLogin }: Props) {
     try {
       const data = await api.post('/auth/change-password', { current_password: currentPw, new_password: newPw });
       if (data.success) {
-        onLogin(pendingRole);
+        onLogin(pendingRole, data.user?.permissions || pendingPermissions);
       } else {
         setCpError(data.error?.message || 'Şifre değiştirilemedi.');
       }

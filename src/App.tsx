@@ -66,7 +66,13 @@ import {
 
 const APP_VERSION = 'v2.5.5';
 
-export const AuthContext = createContext<{ role: UserRole, isReadOnly: boolean }>({ role: 'admin', isReadOnly: false });
+type AuthContextValue = {
+  role: UserRole;
+  isReadOnly: boolean;
+  permissions: Record<string, unknown>;
+};
+
+export const AuthContext = createContext<AuthContextValue>({ role: 'admin', isReadOnly: false, permissions: {} });
 export const useAuth = () => useContext(AuthContext);
 
 function cn(...inputs: ClassValue[]) {
@@ -84,6 +90,7 @@ export default function App() {
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
 
   const [userRole, setUserRole] = useState<UserRole>('admin');
+  const [userPermissions, setUserPermissions] = useState<Record<string, unknown>>({});
 
   const [navigation, setNavigation] = useState<NavigationState>(() => pathToNavigation(window.location.pathname));
   const currentView = navigation.view;
@@ -149,6 +156,7 @@ export default function App() {
         if (res.success) {
           setIsAuthenticated(true);
           setUserRole(normalizeRole(res.user?.role));
+          setUserPermissions(res.user?.permissions || {});
           loadSettings();
           fetchRate();
         } else {
@@ -174,9 +182,10 @@ export default function App() {
     }
   };
 
-  const handleLogin = (role: UserRole) => {
+  const handleLogin = (role: UserRole, permissions: Record<string, unknown> = {}) => {
     setIsAuthenticated(true);
     setUserRole(role);
+    setUserPermissions(permissions);
     loadSettings();
     fetchRate();
   };
@@ -194,6 +203,7 @@ export default function App() {
       return;
     }
     setIsAuthenticated(false);
+    setUserPermissions({});
     setShowLogoutConfirm(false);
   };
 
@@ -309,7 +319,7 @@ export default function App() {
   }
 
   return (
-    <AuthContext.Provider value={{ role: userRole, isReadOnly }}>
+    <AuthContext.Provider value={{ role: userRole, isReadOnly, permissions: userPermissions }}>
       <div className="min-h-screen bg-bg-main text-text-main font-sans selection:bg-primary/10" data-role={userRole} data-readonly={isReadOnly ? 'true' : 'false'}>
       {/* Sidebar */}
       <aside className={cn(

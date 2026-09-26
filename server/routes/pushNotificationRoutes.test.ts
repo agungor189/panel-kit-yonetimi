@@ -4,15 +4,20 @@ import test from 'node:test';
 import Database from 'better-sqlite3';
 import express from 'express';
 import { NOTIFICATION_PREFERENCES_SCHEMA_V89 } from '../db/notificationPreferencesSchema.js';
+import { NOTIFICATION_TEMPLATES_SCHEMA_V90 } from '../db/notificationTemplatesSchema.js';
 import { PUSH_SUBSCRIPTIONS_SCHEMA_V88 } from '../db/pushSubscriptionsSchema.js';
 import { createPushNotificationService } from '../modules/notifications/pushNotificationService.js';
 import { createPushNotificationRouter } from './pushNotificationRoutes.js';
 
 const allDisabled = {
   new_order: false,
+  order_cancel_return: false,
   shipping_exception: false,
-  critical_stock: false,
-  system_exception: false,
+  stock_exception: false,
+  goods_receipt_exception: false,
+  reconciliation_exception: false,
+  integration_exception: false,
+  backup_exception: false,
 };
 
 async function createHarness(audit?: (...args: any[]) => void) {
@@ -21,6 +26,7 @@ async function createHarness(audit?: (...args: any[]) => void) {
   db.exec('CREATE TABLE users (id TEXT PRIMARY KEY); INSERT INTO users (id) VALUES (\'user-1\'), (\'user-2\');');
   db.exec(PUSH_SUBSCRIPTIONS_SCHEMA_V88);
   db.exec(NOTIFICATION_PREFERENCES_SCHEMA_V89);
+  db.exec(NOTIFICATION_TEMPLATES_SCHEMA_V90);
   const service = createPushNotificationService({
     db,
     env: {
@@ -34,10 +40,15 @@ async function createHarness(audit?: (...args: any[]) => void) {
   app.use(express.json());
   app.use((req, _res, next) => {
     const id = String(req.headers['x-test-user'] || '');
-    req.user = { id, username: id, role: 'user', permissions: { 'panel:read': true }, must_change_password: false, session_epoch: 0 };
+    const role = String(req.headers['x-test-role'] || 'user');
+    req.user = { id, username: id, role, permissions: { 'panel:read': true }, must_change_password: false, session_epoch: 0 };
     next();
   });
-  app.use('/api/push', createPushNotificationRouter(service, audit));
+  const requireTemplateAdmin: express.RequestHandler = (req, res, next) => {
+    if (req.user?.role === 'admin' || req.user?.permissions?.['settings:admin'] === true) return next();
+    return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Yetki gerekli.' } });
+  };
+  app.use('/api/push', createPushNotificationRouter(service, audit, requireTemplateAdmin));
   const server = app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const address = server.address();
@@ -61,10 +72,48 @@ test('preference routes always scope reads and writes to the authenticated user'
   assert.deepEqual(userOne.data, allDisabled);
   assert.deepEqual(userTwo.data, {
     new_order: true,
+    order_cancel_return: true,
     shipping_exception: true,
-    critical_stock: true,
-    system_exception: true,
+    stock_exception: true,
+    goods_receipt_exception: true,
+    reconciliation_exception: true,
+    integration_exception: true,
+    backup_exception: true,
   });
+});
+
+test('admin can update and reset global notification templates', async (t) => {
+  const harness = await createHarness();
+  t.after(() => { harness.server.close(); harness.db.close(); });
+  const headers = { 'content-type': 'application/json', 'x-test-user': 'admin-user', 'x-test-role': 'admin' };
+
+  harness.db.prepare('INSERT INTO users (id) VALUES (?)').run('admin-user');
+  const update = await fetch(`${harness.baseUrl}/templates/new_order`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ title: '{{platform}} siparişi', message: '#{{order_number}} toplam {{total}} TL' }),
+  });
+  assert.equal(update.status, 200);
+  assert.equal((await update.json()).data.is_default, false);
+
+  const templates = await fetch(`${harness.baseUrl}/templates`, { headers: { 'x-test-user': 'admin-user', 'x-test-role': 'admin' } }).then((res) => res.json());
+  assert.equal(templates.data.find((item: any) => item.category === 'new_order').title, '{{platform}} siparişi');
+
+  const reset = await fetch(`${harness.baseUrl}/templates/new_order/reset`, { method: 'POST', headers });
+  assert.equal(reset.status, 200);
+  assert.equal((await reset.json()).data.is_default, true);
+});
+
+test('unauthorized users cannot update global notification templates', async (t) => {
+  const harness = await createHarness();
+  t.after(() => { harness.server.close(); harness.db.close(); });
+  const response = await fetch(`${harness.baseUrl}/templates/new_order`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', 'x-test-user': 'user-1', 'x-test-role': 'user' },
+    body: JSON.stringify({ title: 'Changed', message: '#{{order_number}}' }),
+  });
+  assert.equal(response.status, 403);
+  assert.equal((harness.db.prepare('SELECT COUNT(*) AS count FROM notification_templates').get() as { count: number }).count, 0);
 });
 
 test('explicit rebind route transfers ownership and emits an audit event', async (t) => {

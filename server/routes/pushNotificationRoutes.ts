@@ -1,4 +1,4 @@
-import express, { type Request, type Response } from 'express';
+import express, { type Request, type RequestHandler, type Response } from 'express';
 import {
   PushOwnershipError,
   PushSubscriptionNotFoundError,
@@ -13,7 +13,11 @@ const sendError = (res: Response, status: number, code: string, message: string)
   res.status(status).json({ success: false, error: { code, message } })
 );
 
-export function createPushNotificationRouter(service: PushNotificationService, audit?: AuditWriter) {
+export function createPushNotificationRouter(
+  service: PushNotificationService,
+  audit: AuditWriter | undefined,
+  requireTemplateAdmin: RequestHandler,
+) {
   const router = express.Router();
 
   router.get('/status', (req, res) => {
@@ -33,6 +37,32 @@ export function createPushNotificationRouter(service: PushNotificationService, a
     } catch (error) {
       if (error instanceof PushValidationError) return sendError(res, 400, 'PUSH_PREFERENCES_INVALID', error.message);
       return sendError(res, 500, 'PUSH_PREFERENCES_UPDATE_FAILED', 'Bildirim tercihleri güncellenemedi.');
+    }
+  });
+
+  router.get('/templates', (_req, res) => {
+    res.json({ success: true, data: service.getTemplates() });
+  });
+
+  router.put('/templates/:category', requireTemplateAdmin, (req, res) => {
+    try {
+      const template = service.updateTemplate(req.params.category, req.body, req.user!.id);
+      audit?.('PUSH_TEMPLATE_UPDATED', 'notification_template', template.category, template, req.user!.id);
+      res.json({ success: true, data: template });
+    } catch (error) {
+      if (error instanceof PushValidationError) return sendError(res, 400, 'PUSH_TEMPLATE_INVALID', error.message);
+      return sendError(res, 500, 'PUSH_TEMPLATE_UPDATE_FAILED', 'Bildirim şablonu güncellenemedi.');
+    }
+  });
+
+  router.post('/templates/:category/reset', requireTemplateAdmin, (req, res) => {
+    try {
+      const template = service.resetTemplate(req.params.category);
+      audit?.('PUSH_TEMPLATE_RESET', 'notification_template', template.category, { reset: true }, req.user!.id);
+      res.json({ success: true, data: template });
+    } catch (error) {
+      if (error instanceof PushValidationError) return sendError(res, 400, 'PUSH_TEMPLATE_INVALID', error.message);
+      return sendError(res, 500, 'PUSH_TEMPLATE_RESET_FAILED', 'Bildirim şablonu varsayılana döndürülemedi.');
     }
   });
 
