@@ -148,7 +148,30 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   useEffect(() => {
-    loadSales();
+    void loadSales();
+
+    const timer = window.setInterval(() => {
+      void loadSales(true);
+    }, 15_000);
+
+    const refreshVisible = () => {
+      if (document.visibilityState === "visible") {
+        void loadSales(true);
+      }
+    };
+
+    const refreshFocus = () => {
+      void loadSales(true);
+    };
+
+    document.addEventListener("visibilitychange", refreshVisible);
+    window.addEventListener("focus", refreshFocus);
+
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshVisible);
+      window.removeEventListener("focus", refreshFocus);
+    };
   }, [refreshKey]);
 
   useEffect(() => {
@@ -156,8 +179,9 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
     setSelectedIds(new Set());
   }, [activeTab, filters, sortKey, pageSize]);
 
-  const loadSales = async () => {
-    setLoading(true);
+  const loadSales = async (silent = false) => {
+    if (!silent) setLoading(true);
+
     try {
       const data = await api.get('/sales');
       setSales(Array.isArray(data) ? data : []);
@@ -165,7 +189,7 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
     } catch (err) {
       console.error(err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
@@ -480,7 +504,7 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
             </button>
             <button
               type="button"
-              onClick={loadSales}
+              onClick={() => void loadSales()}
               className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 px-3 text-sm font-black text-slate-600 transition hover:bg-slate-100"
             >
               <RefreshCw className="h-4 w-4" />

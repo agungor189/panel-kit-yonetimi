@@ -551,17 +551,39 @@ test("Shopify shipment tracking creates fulfillment and is replay-safe", async (
 
 test("Shopify poll keeps canonical raw payload compatible with bootstrap ingestion", async () => {
   const captured: any[] = [];
+  let recoverException = false;
+  let recoveryCalls = 0;
 
   const gateway = {
     ingest(event: any) {
       captured.push(event);
+
       return {
         result: {
           body: {
             state: "DUPLICATE",
-            saleId: "sale-existing",
+            saleId:
+              recoverException
+                ? null
+                : "sale-existing",
           },
         },
+      };
+    },
+
+    tryAutoRecoverExceptionOrder(input: any) {
+      recoveryCalls += 1;
+
+      assert.equal(
+        input.externalOrderId,
+        "8408602148931",
+      );
+
+      return {
+        state: "ACCEPTED",
+        saleId: "sale-recovered",
+        reservationId:
+          "reservation-recovered",
       };
     },
   };
@@ -706,4 +728,31 @@ test("Shopify poll keeps canonical raw payload compatible with bootstrap ingesti
     captured[0].rawPayload.orderId,
     "gid://shopify/Order/8408602148931",
   );
+
+  assert.equal(recoveryCalls, 0);
+
+  // Same provider event, but the existing local order is still EXCEPTION.
+  // Poll must invoke durable safe auto recovery instead of treating it as
+  // a terminal duplicate.
+  recoverException = true;
+
+  const recoverySummary =
+    await transport.poll({
+      gateway: gateway as any,
+      accountId:
+        "shopify:production:2b6rcy-br",
+      query: "name:#1006",
+      serviceActorId:
+        "shopify-poller:test",
+      operationIdPrefix:
+        "compat-recovery-test",
+      receivedAt:
+        "2026-09-26T00:00:15Z",
+      maxPages: 1,
+    });
+
+  assert.equal(recoverySummary.accepted, 1);
+  assert.equal(recoverySummary.duplicate, 0);
+  assert.equal(recoverySummary.exception, 0);
+  assert.equal(recoveryCalls, 1);
 });

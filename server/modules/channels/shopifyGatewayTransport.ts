@@ -1210,16 +1210,52 @@ export class ShopifyGatewayTransport {
             input.serviceActorId,
           );
 
-          const state = String(
-            (outcome.result.body as any).state,
-          );
+          const outcomeBody =
+            outcome.result.body as any;
+
+          const state =
+            String(outcomeBody.state);
 
           if (state === "ACCEPTED") {
             summary.accepted += 1;
+
+          } else if (
+            state === "DUPLICATE"
+            && !outcomeBody.saleId
+          ) {
+            /*
+             * Shopify may return the exact same provider event version
+             * after a local mapping/commission/stock remediation.
+             *
+             * ingest() correctly remains idempotent and returns DUPLICATE.
+             * Recovery is a separate durable command and only runs for
+             * explicitly recoverable exception classes.
+             */
+            const recovery =
+              input.gateway
+                .tryAutoRecoverExceptionOrder({
+                  accountId: input.accountId,
+                  externalOrderId,
+                  serviceActorId:
+                    input.serviceActorId,
+                }) as any;
+
+            if (recovery?.state === "ACCEPTED") {
+              summary.accepted += 1;
+            } else if (
+              recovery?.state === "EXCEPTION"
+            ) {
+              summary.exception += 1;
+            } else {
+              summary.duplicate += 1;
+            }
+
           } else if (state === "DUPLICATE") {
             summary.duplicate += 1;
+
           } else if (state === "CANCELLED") {
             summary.cancelled += 1;
+
           } else {
             summary.exception += 1;
           }

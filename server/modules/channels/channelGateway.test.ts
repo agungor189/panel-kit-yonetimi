@@ -174,15 +174,29 @@ test("exception order polling reuses immutable lines and automatically recovers 
     actor,
   });
 
-  const recovered = gateway.ingest(order({
-    externalEventId: "exception-poll-event-3",
+  // Shopify may return the exact same event id/version after local
+  // remediation. ingest remains idempotent and therefore returns DUPLICATE.
+  const duplicateAfterMapping = gateway.ingest(order({
+    externalEventId: "exception-poll-event-1",
     externalOrderId: "exception-poll-order",
     ingestionPath: "POLL",
     lines: [line],
-    receivedAt: "2026-09-23T09:10:30.000Z",
+    receivedAt: "2026-09-23T09:10:00.000Z",
   }), "exception-poll-ingest-3", "channel-worker");
 
-  assert.equal(recovered.result.body.state, "ACCEPTED");
+  assert.equal(
+    duplicateAfterMapping.result.body.state,
+    "DUPLICATE",
+  );
+
+  const recovered =
+    gateway.tryAutoRecoverExceptionOrder({
+      accountId: "account",
+      externalOrderId: "exception-poll-order",
+      serviceActorId: "channel-worker",
+    }) as any;
+
+  assert.equal(recovered.state, "ACCEPTED");
   assert.equal(
     db.prepare("SELECT COUNT(*) FROM channel_order_lines WHERE channel_order_id=?").pluck().get(orderId),
     1

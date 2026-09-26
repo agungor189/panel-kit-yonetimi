@@ -410,9 +410,30 @@ export class ChannelGatewayService {
     }).result.body;
   }
 
-  resolveAndReprocessOrder(input: { orderId: string; operationId: string; actor: Actor; resolvedAt: string }) {
-    return this.commands.execute<any>({ operationId: input.operationId, commandType: "channels.exception.resolve-reprocess.v1", payload: input,
-      actor: { human: input.actor }, authorization: { decision: "ALLOW", capability: "integrations:admin" } }, (context) => {
+  resolveAndReprocessOrder(input: {
+    orderId: string;
+    operationId: string;
+    actor: Actor;
+    resolvedAt: string;
+    serviceActorId?: string;
+  }) {
+    return this.commands.execute<any>({
+      operationId: input.operationId,
+      commandType: "channels.exception.resolve-reprocess.v1",
+      payload: input,
+      actor: input.serviceActorId
+        ? {
+            service: {
+              id: input.serviceActorId,
+              name: input.actor.name || null,
+            },
+          }
+        : { human: input.actor },
+      authorization: {
+        decision: "ALLOW",
+        capability: "integrations:admin",
+      },
+    }, (context) => {
       const order = this.db.prepare(`SELECT o.*,a.channel,a.merchant_account_id FROM channel_orders o
         JOIN channel_accounts a ON a.id=o.account_id WHERE o.id=?`).get(input.orderId) as any;
       if (!order) throw new ChannelGatewayError("CHANNEL_ORDER_NOT_FOUND", "Channel order was not found.", 404);
@@ -486,6 +507,185 @@ export class ChannelGatewayService {
       }
     }).result.body;
   }
+
+  tryAutoRecoverExceptionOrder(input: {
+    accountId: string;
+    externalOrderId: string;
+    serviceActorId: string;
+  }) {
+    const order = this.db.prepare(`
+      SELECT
+        o.id,
+        o.account_id,
+        o.external_order_id,
+        o.order_state,
+        o.sale_id,
+        e.received_at AS first_received_at
+      FROM channel_orders o
+      JOIN channel_inbound_events e
+        ON e.id=o.first_event_id
+      WHERE o.account_id=?
+        AND o.external_order_id=?
+      LIMIT 1
+    `).get(
+      input.accountId,
+      input.externalOrderId,
+    ) as any;
+
+    if (
+      !order
+      || order.sale_id
+      || order.order_state !== "EXCEPTION"
+    ) {
+      return null;
+    }
+
+    const exceptionTypes = (
+      this.db.prepare(`
+        SELECT DISTINCT exception_type
+        FROM channel_exceptions
+        WHERE channel_order_id=?
+          AND state='OPEN'
+        ORDER BY exception_type
+      `).all(order.id) as Array<{
+        exception_type: string;
+      }>
+    ).map((row) => row.exception_type);
+
+    const recoverableTypes = new Set([
+      "CHANNEL_MAPPING_EXCEPTION",
+      "COMMISSION_EXCEPTION",
+      "STOCK_EXCEPTION",
+    ]);
+
+    if (
+      exceptionTypes.length === 0
+      || exceptionTypes.some(
+        (type) => !recoverableTypes.has(type),
+      )
+    ) {
+      return {
+        state: "EXCEPTION",
+        saleId: null,
+        autoRecovery: "SKIPPED",
+        exceptionTypes,
+      };
+    }
+
+    const lines = this.db.prepare(`
+      SELECT
+        l.external_line_id,
+        l.external_listing_id,
+        l.quantity_base_int,
+        m.id AS mapping_id,
+        m.product_id,
+        m.category_ref,
+        m.listing_state
+      FROM channel_order_lines l
+      LEFT JOIN channel_product_mappings m
+        ON m.account_id=?
+       AND m.external_listing_id=l.external_listing_id
+       AND m.listing_state='ACTIVE'
+      WHERE l.channel_order_id=?
+      ORDER BY l.external_line_id
+    `).all(
+      input.accountId,
+      order.id,
+    ) as any[];
+
+    const inventory =
+      new InventoryService(this.db);
+
+    const remediationState = lines.map((line) => {
+      const productId =
+        line.product_id
+          ? String(line.product_id)
+          : null;
+
+      const term = productId
+        ? this.findCommissionTerm(
+            input.accountId,
+            productId,
+            line.category_ref || null,
+            String(order.first_received_at),
+          )
+        : null;
+
+      const availability = productId
+        ? inventory.getProductAvailability(productId)
+        : null;
+
+      return {
+        externalLineId: line.external_line_id,
+        externalListingId:
+          line.external_listing_id,
+        quantityBaseInt:
+          Number(line.quantity_base_int),
+
+        mapping: line.mapping_id
+          ? {
+              id: line.mapping_id,
+              productId,
+              categoryRef:
+                line.category_ref || null,
+              state:
+                line.listing_state || null,
+            }
+          : null,
+
+        commission: term
+          ? {
+              id: term.id,
+              version: term.version,
+              state: term.state,
+            }
+          : null,
+
+        availability: availability
+          ? {
+              onHandBaseInt:
+                availability.onHandBaseInt,
+              reservedBaseInt:
+                availability.reservedBaseInt,
+              availableBaseInt:
+                availability.availableBaseInt,
+            }
+          : null,
+      };
+    });
+
+    const remediationFingerprint = digest({
+      orderId: order.id,
+      exceptionTypes,
+      remediationState,
+    });
+
+    /*
+     * Same remediation state => same operation id => CommandExecutor replay.
+     * Mapping/commission/stock changes => fingerprint changes => one new
+     * recovery attempt. This avoids retry/audit spam every poll cycle.
+     */
+    return this.resolveAndReprocessOrder({
+      orderId: order.id,
+
+      operationId:
+        `channel-auto-recover:${order.id}:${remediationFingerprint}`,
+
+      actor: {
+        id: input.serviceActorId,
+        name: "Channel Automatic Recovery",
+      },
+
+      serviceActorId:
+        input.serviceActorId,
+
+      // Provider event receipt time is immutable, so command payload also
+      // remains stable while the remediation fingerprint is unchanged.
+      resolvedAt:
+        String(order.first_received_at),
+    });
+  }
+
 
   captureCanonicalProductChanges(input: { productId: string; kinds: ChannelProjectionKind[]; operationId: string; actor: Actor; occurredAt?: string }) {
     return this.commands.execute({ operationId: input.operationId, commandType: "channels.canonical-change.capture.v1", payload: input,
