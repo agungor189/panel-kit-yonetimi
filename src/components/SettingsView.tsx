@@ -30,6 +30,7 @@ import { Settings, type BackupConfig, type BackupRun, type BackupStatus, type Ma
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import PushNotificationSettings from './PushNotificationSettings';
+import { Button } from './ui';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -486,14 +487,14 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
           <h2 className="text-xl lg:text-2xl font-bold text-text-main tracking-tight">Sistem Ayarları</h2>
           <p className="text-xs lg:text-sm text-text-muted">Panel yapılandırmasını buradan özelleştirin.</p>
         </div>
-        <button 
+        <Button
           onClick={handleSave}
           disabled={loading}
-          className="btn-primary h-11 px-8 flex items-center justify-center w-full sm:w-auto"
+          className="btn-primary h-11 w-full gap-0 border-0 px-8 active:scale-95 sm:w-auto"
         >
           <span>{loading ? 'Kaydediliyor...' : saved ? 'Ayarlar Kaydedildi' : 'Değişiklikleri Kaydet'}</span>
           {saved ? <CheckCircle2 className="w-4 h-4 ml-2" /> : <Save className="w-4 h-4 ml-2" />}
-        </button>
+        </Button>
       </div>
 
       <PushNotificationSettings />
