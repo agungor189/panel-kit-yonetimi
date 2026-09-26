@@ -113,6 +113,92 @@ test("unmapped SKU and insufficient stock create explicit exceptions without pro
   db.close();
 });
 
+test("exception order polling reuses immutable lines and automatically recovers after mapping remediation", () => {
+  const { db, gateway } = setup(5);
+
+  const line = {
+    externalLineId: "exception-poll-line",
+    externalListingId: "exception-poll-listing",
+    externalSku: "EXCEPTION-POLL-SKU",
+    quantityBaseInt: 1,
+    actualUnitGrossMinor: 125_000,
+    vatRateBps: 2_000,
+  };
+
+  const first = gateway.ingest(order({
+    externalEventId: "exception-poll-event-1",
+    externalOrderId: "exception-poll-order",
+    ingestionPath: "POLL",
+    lines: [line],
+    receivedAt: "2026-09-23T09:10:00.000Z",
+  }), "exception-poll-ingest-1", "channel-worker");
+
+  assert.equal(first.result.body.state, "EXCEPTION");
+
+  const orderId = String(
+    db.prepare("SELECT id FROM channel_orders WHERE external_order_id='exception-poll-order'").pluck().get()
+  );
+
+  assert.equal(
+    db.prepare("SELECT COUNT(*) FROM channel_order_lines WHERE channel_order_id=?").pluck().get(orderId),
+    1
+  );
+
+  const retry = gateway.ingest(order({
+    externalEventId: "exception-poll-event-2",
+    externalOrderId: "exception-poll-order",
+    ingestionPath: "POLL",
+    lines: [line],
+    receivedAt: "2026-09-23T09:10:15.000Z",
+  }), "exception-poll-ingest-2", "channel-worker");
+
+  assert.equal(retry.result.body.state, "EXCEPTION");
+  assert.equal(
+    db.prepare("SELECT COUNT(*) FROM channel_order_lines WHERE channel_order_id=?").pluck().get(orderId),
+    1
+  );
+  assert.equal(
+    db.prepare(`SELECT COUNT(*) FROM channel_exceptions
+      WHERE channel_order_id=? AND exception_type='CHANNEL_MAPPING_EXCEPTION' AND state='OPEN'`).pluck().get(orderId),
+    1
+  );
+
+  gateway.mapProduct({
+    id: "exception-poll-map",
+    accountId: "account",
+    externalListingId: "exception-poll-listing",
+    externalSku: "EXCEPTION-POLL-SKU",
+    productId: "part",
+    categoryRef: "parts",
+    operationId: "exception-poll-map-create",
+    actor,
+  });
+
+  const recovered = gateway.ingest(order({
+    externalEventId: "exception-poll-event-3",
+    externalOrderId: "exception-poll-order",
+    ingestionPath: "POLL",
+    lines: [line],
+    receivedAt: "2026-09-23T09:10:30.000Z",
+  }), "exception-poll-ingest-3", "channel-worker");
+
+  assert.equal(recovered.result.body.state, "ACCEPTED");
+  assert.equal(
+    db.prepare("SELECT COUNT(*) FROM channel_order_lines WHERE channel_order_id=?").pluck().get(orderId),
+    1
+  );
+  assert.equal(db.prepare("SELECT COUNT(*) FROM sales").pluck().get(), 1);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_reservations").pluck().get(), 1);
+  assert.equal(
+    db.prepare(`SELECT COUNT(*) FROM channel_exceptions
+      WHERE channel_order_id=? AND state='OPEN'
+        AND exception_type IN ('CHANNEL_MAPPING_EXCEPTION','COMMISSION_EXCEPTION','STOCK_EXCEPTION')`).pluck().get(orderId),
+    0
+  );
+
+  db.close();
+});
+
 test("stock buffer is outbound-only; cursor and retry state are durable and replay-safe; unknown commission blocks price", () => {
   const { db, gateway, inventory } = setup();
   gateway.setStockBuffer({ id: "buffer", accountId: "account", productId: "part", bufferQuantityBaseInt: 2,

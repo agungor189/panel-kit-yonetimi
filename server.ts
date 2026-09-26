@@ -4921,17 +4921,9 @@ async function startServer() {
         });
       }
 
-      const query = String(req.body?.query || "").trim();
-
-      if (!query) {
-        return res.status(400).json({
-          success: false,
-          error: {
-            code: "SHOPIFY_SYNC_QUERY_REQUIRED",
-            message: "A Shopify order search query is required during V19 validation.",
-          },
-        });
-      }
+      const query =
+        String(req.body?.query || "status:any").trim()
+        || "status:any";
 
       const maxPages = Math.min(
         5,
@@ -6376,6 +6368,219 @@ async function startServer() {
       isRestoring = false;
     }
   });
+
+
+  // Shopify inbound polling is read-only against Shopify.
+  // Outbound writes remain separately gated by SHOPIFY_WRITE_ENABLED.
+  const shopifyPollEnabled =
+    String(process.env.SHOPIFY_POLL_ENABLED || "false")
+      .trim()
+      .toLowerCase() === "true";
+
+  const parsedShopifyPollInterval =
+    Number(process.env.SHOPIFY_POLL_INTERVAL_SECONDS || 60);
+
+  const shopifyPollIntervalSeconds =
+    Number.isFinite(parsedShopifyPollInterval)
+      ? Math.min(
+          3600,
+          Math.max(
+            15,
+            Math.trunc(parsedShopifyPollInterval),
+          ),
+        )
+      : 60;
+
+  const parsedShopifyPollMaxPages =
+    Number(process.env.SHOPIFY_POLL_MAX_PAGES || 1);
+
+  const shopifyPollMaxPages =
+    Number.isFinite(parsedShopifyPollMaxPages)
+      ? Math.min(
+          5,
+          Math.max(
+            1,
+            Math.trunc(parsedShopifyPollMaxPages),
+          ),
+        )
+      : 1;
+
+  let shopifyPollInFlight = false;
+  let shopifyScheduledTransport:
+    ShopifyGatewayTransport | null = null;
+  let shopifyConnectionVerified = false;
+
+  const runScheduledShopifyPoll = async () => {
+    if (!shopifyPollEnabled || shopifyPollInFlight) {
+      return;
+    }
+
+    shopifyPollInFlight = true;
+
+    const receivedAt = new Date().toISOString();
+    const shop = String(
+      process.env.SHOPIFY_SHOP || "",
+    ).trim().toLowerCase();
+
+    let account: any = null;
+
+    try {
+      if (!shop) {
+        throw new ChannelGatewayError(
+          "SHOPIFY_CONFIG_INVALID",
+          "SHOPIFY_SHOP is required.",
+          500,
+        );
+      }
+
+      account = db.prepare(`
+        SELECT *
+        FROM channel_accounts
+        WHERE channel='SHOPIFY'
+          AND merchant_account_id=?
+          AND environment='PRODUCTION'
+        LIMIT 1
+      `).get(shop) as any;
+
+      if (!account) {
+        throw new ChannelGatewayError(
+          "SHOPIFY_ACCOUNT_NOT_CONFIGURED",
+          "Shopify channel account is not configured.",
+          409,
+        );
+      }
+
+      if (!shopifyScheduledTransport) {
+        shopifyScheduledTransport =
+          ShopifyGatewayTransport.fromEnvironment();
+      }
+
+      // Connection/scope/location verification only needs to happen
+      // once per running process. Access-token renewal remains automatic.
+      if (!shopifyConnectionVerified) {
+        await shopifyScheduledTransport.verifyConnection();
+        shopifyConnectionVerified = true;
+      }
+
+      const summary =
+        await shopifyScheduledTransport.poll({
+          gateway: channelGateway,
+          accountId: account.id,
+          query: "status:any",
+          serviceActorId:
+            `shopify-poller:${account.id}`,
+          operationIdPrefix:
+            `shopify-auto:${receivedAt}`,
+          receivedAt,
+          maxPages: shopifyPollMaxPages,
+        });
+
+      db.prepare(`
+        UPDATE channel_accounts
+        SET state='CONNECTED',
+            last_poll_at=?,
+            last_sync_at=?,
+            last_error_code=NULL,
+            updated_at=?
+        WHERE id=?
+      `).run(
+        receivedAt,
+        receivedAt,
+        receivedAt,
+        account.id,
+      );
+
+      db.prepare(`
+        INSERT INTO settings (key,value)
+        VALUES ('shopify_last_sync_at',?)
+        ON CONFLICT(key)
+        DO UPDATE SET value=excluded.value
+      `).run(receivedAt);
+
+      db.prepare(`
+        INSERT INTO settings (key,value)
+        VALUES ('shopify_last_sync_summary',?)
+        ON CONFLICT(key)
+        DO UPDATE SET value=excluded.value
+      `).run(JSON.stringify(summary));
+
+      if (
+        summary.accepted > 0
+        || summary.cancelled > 0
+        || summary.exception > 0
+      ) {
+        AppLogger.info(
+          "SHOPIFY_POLL",
+          "Shopify automatic order poll completed.",
+          {
+            accountId: account.id,
+            summary,
+          },
+        );
+      }
+    } catch (error: any) {
+      const code = String(
+        error?.code || "SHOPIFY_POLL_FAILED",
+      ).slice(0, 100);
+
+      if (account?.id) {
+        db.prepare(`
+          UPDATE channel_accounts
+          SET last_error_code=?,
+              updated_at=?
+          WHERE id=?
+        `).run(
+          code,
+          receivedAt,
+          account.id,
+        );
+      }
+
+      // Force a fresh verification on the next attempt.
+      shopifyConnectionVerified = false;
+
+      AppLogger.error(
+        "SHOPIFY_POLL",
+        `Shopify automatic poll failed (${code}).`,
+        error,
+      );
+    } finally {
+      shopifyPollInFlight = false;
+    }
+  };
+
+  if (shopifyPollEnabled) {
+    AppLogger.info(
+      "SHOPIFY_POLL",
+      "SHOPIFY_AUTOMATIC_POLL_STARTED",
+      {
+        intervalSeconds:
+          shopifyPollIntervalSeconds,
+        maxPages:
+          shopifyPollMaxPages,
+        writeEnabled:
+          String(
+            process.env.SHOPIFY_WRITE_ENABLED
+              || "false",
+          ).toLowerCase() === "true",
+      },
+    );
+
+    const initialShopifyPollTimer =
+      setTimeout(
+        () => void runScheduledShopifyPoll(),
+        10_000,
+      );
+
+    const shopifyPollTimer =
+      setInterval(
+        () => void runScheduledShopifyPoll(),
+        shopifyPollIntervalSeconds * 1000,
+      );
+
+    initialShopifyPollTimer.unref?.();
+    shopifyPollTimer.unref?.();
+  }
 
   startBackupScheduler();
   startDailyReconciliationScheduler(db, AppLogger);

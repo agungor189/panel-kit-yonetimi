@@ -287,17 +287,31 @@ export class ChannelGatewayService {
           FROM channel_product_mappings m JOIN products p ON p.id=m.product_id
           WHERE m.account_id=? AND m.external_listing_id=? AND m.listing_state='ACTIVE'`).get(event.accountId, line.externalListingId) as any;
         const lineDigest = digest(line);
-        const lineId = randomUUID();
+        const existingLine = this.db.prepare(`SELECT * FROM channel_order_lines
+          WHERE channel_order_id=? AND external_line_id=?`).get(orderId, line.externalLineId) as any;
+        const lineId = existingLine?.id || randomUUID();
         const quantity = integer(line.quantityBaseInt, `lines[${index}].quantityBaseInt`, 1);
         const actual = integer(line.actualUnitGrossMinor, `lines[${index}].actualUnitGrossMinor`);
         const vatRateBps = integer(line.vatRateBps, `lines[${index}].vatRateBps`);
         const providerFinancial = this.providerLineFinancial(line, quantity, actual);
+
+        if (existingLine && existingLine.raw_line_digest !== lineDigest) {
+          this.insertException(event.accountId, eventId, orderId, "ORDER_VERSION_EXCEPTION", {
+            code: "EXCEPTION_ORDER_LINE_CHANGED",
+            externalLineId: line.externalLineId,
+            storedDigest: existingLine.raw_line_digest,
+            receivedDigest: lineDigest,
+          });
+          blocking = true;
+          continue;
+        }
         if (!mapping) {
           this.db.prepare(`INSERT INTO channel_order_lines
             (id,channel_order_id,external_line_id,external_package_id,external_listing_id,external_sku,quantity_base_int,
              actual_unit_gross_minor,vat_rate_bps,raw_line_digest,provider_gross_minor,provider_seller_discount_minor,
              provider_ty_discount_minor,provider_customer_total_minor,provider_financial_provenance_json)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(lineId, orderId, line.externalLineId, line.externalPackageId || null,
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(channel_order_id,external_line_id) DO NOTHING`).run(lineId, orderId, line.externalLineId, line.externalPackageId || null,
             line.externalListingId, line.externalSku || null, quantity, actual, vatRateBps, lineDigest, providerFinancial?.grossMinor ?? null,
             providerFinancial?.sellerDiscountMinor ?? null, providerFinancial?.tyDiscountMinor ?? null,
             providerFinancial?.customerTotalMinor ?? null, providerFinancial?.provenanceJson ?? null);
@@ -312,7 +326,8 @@ export class ChannelGatewayService {
             (id,channel_order_id,external_line_id,external_package_id,external_listing_id,external_sku,mapping_id,product_id,
              quantity_base_int,actual_unit_gross_minor,vat_rate_bps,raw_line_digest,provider_gross_minor,
              provider_seller_discount_minor,provider_ty_discount_minor,provider_customer_total_minor,provider_financial_provenance_json)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(lineId, orderId, line.externalLineId, line.externalPackageId || null,
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(channel_order_id,external_line_id) DO NOTHING`).run(lineId, orderId, line.externalLineId, line.externalPackageId || null,
             line.externalListingId, line.externalSku || null, mapping.id, mapping.product_id, quantity, actual, vatRateBps, lineDigest,
             providerFinancial?.grossMinor ?? null, providerFinancial?.sellerDiscountMinor ?? null,
             providerFinancial?.tyDiscountMinor ?? null, providerFinancial?.customerTotalMinor ?? null,
@@ -329,7 +344,8 @@ export class ChannelGatewayService {
           (id,channel_order_id,external_line_id,external_package_id,external_listing_id,external_sku,mapping_id,product_id,quantity_base_int,
            actual_unit_gross_minor,vat_rate_bps,commission_term_id,expected_unit_gross_minor,raw_line_digest,provider_gross_minor,
            provider_seller_discount_minor,provider_ty_discount_minor,provider_customer_total_minor,provider_financial_provenance_json)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(lineId, orderId, line.externalLineId, line.externalPackageId || null,
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          ON CONFLICT(channel_order_id,external_line_id) DO NOTHING`).run(lineId, orderId, line.externalLineId, line.externalPackageId || null,
           line.externalListingId, line.externalSku || null, mapping.id, mapping.product_id, quantity, actual, vatRateBps, term.id, expected,
           lineDigest, providerFinancial?.grossMinor ?? null, providerFinancial?.sellerDiscountMinor ?? null,
           providerFinancial?.tyDiscountMinor ?? null, providerFinancial?.customerTotalMinor ?? null,
@@ -337,7 +353,8 @@ export class ChannelGatewayService {
         if (actual !== expected) {
           this.db.prepare(`INSERT INTO channel_price_variances
             (id,channel_order_line_id,target_price_minor,expected_channel_price_minor,actual_channel_price_minor,difference_minor,provenance_json)
-            VALUES (?,?,?,?,?,?,?)`).run(randomUUID(), lineId, targetMinor, expected, actual, actual - expected,
+            VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(channel_order_line_id) DO NOTHING`).run(randomUUID(), lineId, targetMinor, expected, actual, actual - expected,
             stableJson({ source: "PROVIDER_ORDER", eventId: event.externalEventId, commissionTermId: term.id }));
           this.insertException(event.accountId, eventId, orderId, "PRICE_VARIANCE", { externalLineId: line.externalLineId, expected, actual });
         }
@@ -364,6 +381,11 @@ export class ChannelGatewayService {
         this.db.prepare(`UPDATE channel_orders SET order_state='ACCEPTED',sale_id=?,reservation_id=?,latest_external_version=?,accepted_at=?,updated_at=? WHERE id=?`)
           .run(accepted.saleId, accepted.reservationId, event.externalEventVersion, event.receivedAt, event.receivedAt, orderId);
         this.db.prepare("UPDATE channel_inbound_events SET processing_state='ACCEPTED',sale_id=? WHERE id=?").run(accepted.saleId, eventId);
+        this.db.prepare(`UPDATE channel_exceptions
+          SET state='RESOLVED',resolved_at=?,resolved_operation_id=?
+          WHERE channel_order_id=? AND state='OPEN'
+            AND exception_type IN ('CHANNEL_MAPPING_EXCEPTION','COMMISSION_EXCEPTION','STOCK_EXCEPTION')`)
+          .run(event.receivedAt, operationId, orderId);
         context.addOutbox({ topic: "channels", eventType: "channel.order.accepted.v1", aggregateType: "sale", aggregateId: accepted.saleId,
           payload: { sale_id: accepted.saleId, reservation_id: accepted.reservationId, channel_order_id: orderId } });
         return { statusCode: 201, body: { state: "ACCEPTED", saleId: accepted.saleId, reservationId: accepted.reservationId, eventId } };
@@ -894,9 +916,21 @@ export class ChannelGatewayService {
   }
 
   private insertException(accountId: string, eventId: string | null, orderId: string | null, type: string, detail: unknown) {
+    const detailJson = stableJson(detail);
+
+    if (orderId) {
+      const existing = this.db.prepare(`SELECT id FROM channel_exceptions
+        WHERE account_id=? AND channel_order_id=? AND exception_type=?
+          AND state='OPEN' AND detail_json=?
+        ORDER BY created_at DESC LIMIT 1`)
+        .get(accountId, orderId, type, detailJson) as any;
+
+      if (existing?.id) return String(existing.id);
+    }
+
     const id = randomUUID();
     this.db.prepare(`INSERT INTO channel_exceptions (id,account_id,inbound_event_id,channel_order_id,exception_type,detail_json)
-      VALUES (?,?,?,?,?,?)`).run(id, accountId, eventId, orderId, type, stableJson(detail));
+      VALUES (?,?,?,?,?,?)`).run(id, accountId, eventId, orderId, type, detailJson);
     return id;
   }
 
