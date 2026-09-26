@@ -10,6 +10,20 @@ export type PushSubscriptionInput = {
   };
 };
 
+export type NotificationPreferences = {
+  new_order: boolean;
+  shipping_exception: boolean;
+  critical_stock: boolean;
+  system_exception: boolean;
+};
+
+const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
+  new_order: true,
+  shipping_exception: true,
+  critical_stock: true,
+  system_exception: true,
+};
+
 type PushTransport = {
   setVapidDetails(subject: string, publicKey: string, privateKey: string): void;
   sendNotification(
@@ -32,6 +46,13 @@ type SubscriptionRow = {
   endpoint: string;
   p256dh: string;
   auth: string;
+};
+
+type NotificationPreferencesRow = {
+  new_order: number;
+  shipping_exception: number;
+  critical_stock: number;
+  system_exception: number;
 };
 
 export class PushValidationError extends Error {}
@@ -62,6 +83,21 @@ function validateSubscription(input: PushSubscriptionInput): PushSubscriptionInp
   return { endpoint, expirationTime, keys: { p256dh, auth } };
 }
 
+function validatePreferences(input: NotificationPreferences): NotificationPreferences {
+  const keys: Array<keyof NotificationPreferences> = [
+    'new_order',
+    'shipping_exception',
+    'critical_stock',
+    'system_exception',
+  ];
+  if (!input || typeof input !== 'object' || keys.some((key) => typeof input[key] !== 'boolean')) {
+    throw new PushValidationError('Bildirim tercihleri geçersiz.');
+  }
+  return Object.fromEntries(keys.map((key) => [key, input[key]])) as NotificationPreferences;
+}
+
+const hashEndpoint = (endpoint: string) => createHash('sha256').update(endpoint).digest('hex');
+
 export function createPushNotificationService({
   db,
   transport,
@@ -83,29 +119,7 @@ export function createPushNotificationService({
     }
   }
 
-  const status = (userId: string, endpointHash?: string) => {
-    const endpoints = db.prepare('SELECT endpoint FROM push_subscriptions WHERE user_id = ?')
-      .all(userId) as Array<{ endpoint: string }>;
-    const subscribed = Boolean(endpointHash && /^[a-f0-9]{64}$/.test(endpointHash) && endpoints.some(({ endpoint }) => (
-      createHash('sha256').update(endpoint).digest('hex') === endpointHash
-    )));
-    return {
-      available: unavailableReason === null,
-      reason: unavailableReason,
-      publicKey: unavailableReason === null ? publicKey : null,
-      subscriptionCount: endpoints.length,
-      subscribed,
-    };
-  };
-
-  const subscribe = (userId: string, rawSubscription: PushSubscriptionInput) => {
-    if (unavailableReason) throw new PushUnavailableError('Web Push sunucu yapılandırması hazır değil.');
-    const subscription = validateSubscription(rawSubscription);
-    const endpointOwner = db.prepare('SELECT user_id FROM push_subscriptions WHERE endpoint = ?')
-      .get(subscription.endpoint) as { user_id: string } | undefined;
-    if (endpointOwner && endpointOwner.user_id !== userId) {
-      throw new PushOwnershipError('Bu cihaz endpoint’i başka bir kullanıcıya kayıtlı.');
-    }
+  const saveOwnedSubscription = (userId: string, subscription: PushSubscriptionInput) => {
     const existing = Boolean(db.prepare(
       'SELECT 1 FROM push_subscriptions WHERE user_id = ? AND endpoint = ?',
     ).get(userId, subscription.endpoint));
@@ -127,6 +141,96 @@ export function createPushNotificationService({
       subscription.expirationTime ?? null,
     );
     return { created: !existing, subscribed: true };
+  };
+
+  const transferSubscription = db.transaction((userId: string, subscription: PushSubscriptionInput) => {
+    const owner = db.prepare('SELECT user_id FROM push_subscriptions WHERE endpoint = ?')
+      .get(subscription.endpoint) as { user_id: string } | undefined;
+    if (!owner || owner.user_id === userId) {
+      return {
+        ...saveOwnedSubscription(userId, subscription),
+        rebound: false,
+        previousOwnerId: owner?.user_id ?? null,
+        endpointHash: hashEndpoint(subscription.endpoint),
+      };
+    }
+
+    db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(subscription.endpoint);
+    saveOwnedSubscription(userId, subscription);
+    return {
+      created: false,
+      subscribed: true,
+      rebound: true,
+      previousOwnerId: owner.user_id,
+      endpointHash: hashEndpoint(subscription.endpoint),
+    };
+  });
+
+  const status = (userId: string, endpointHash?: string) => {
+    const endpoints = db.prepare('SELECT endpoint FROM push_subscriptions WHERE user_id = ?')
+      .all(userId) as Array<{ endpoint: string }>;
+    const subscribed = Boolean(endpointHash && /^[a-f0-9]{64}$/.test(endpointHash) && endpoints.some(({ endpoint }) => (
+      hashEndpoint(endpoint) === endpointHash
+    )));
+    return {
+      available: unavailableReason === null,
+      reason: unavailableReason,
+      publicKey: unavailableReason === null ? publicKey : null,
+      subscriptionCount: endpoints.length,
+      subscribed,
+    };
+  };
+
+  const subscribe = (userId: string, rawSubscription: PushSubscriptionInput) => {
+    if (unavailableReason) throw new PushUnavailableError('Web Push sunucu yapılandırması hazır değil.');
+    const subscription = validateSubscription(rawSubscription);
+    const endpointOwner = db.prepare('SELECT user_id FROM push_subscriptions WHERE endpoint = ?')
+      .get(subscription.endpoint) as { user_id: string } | undefined;
+    if (endpointOwner && endpointOwner.user_id !== userId) {
+      throw new PushOwnershipError('Bu cihaz endpoint’i başka bir kullanıcıya kayıtlı.');
+    }
+    return saveOwnedSubscription(userId, subscription);
+  };
+
+  const rebind = (userId: string, rawSubscription: PushSubscriptionInput) => {
+    if (unavailableReason) throw new PushUnavailableError('Web Push sunucu yapılandırması hazır değil.');
+    return transferSubscription(userId, validateSubscription(rawSubscription));
+  };
+
+  const getPreferences = (userId: string): NotificationPreferences => {
+    const row = db.prepare(`
+      SELECT new_order, shipping_exception, critical_stock, system_exception
+      FROM user_notification_preferences WHERE user_id = ?
+    `).get(userId) as NotificationPreferencesRow | undefined;
+    if (!row) return { ...DEFAULT_NOTIFICATION_PREFERENCES };
+    return {
+      new_order: row.new_order === 1,
+      shipping_exception: row.shipping_exception === 1,
+      critical_stock: row.critical_stock === 1,
+      system_exception: row.system_exception === 1,
+    };
+  };
+
+  const updatePreferences = (userId: string, rawPreferences: NotificationPreferences) => {
+    const preferences = validatePreferences(rawPreferences);
+    db.prepare(`
+      INSERT INTO user_notification_preferences (
+        user_id, new_order, shipping_exception, critical_stock, system_exception
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET
+        new_order = excluded.new_order,
+        shipping_exception = excluded.shipping_exception,
+        critical_stock = excluded.critical_stock,
+        system_exception = excluded.system_exception,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(
+      userId,
+      Number(preferences.new_order),
+      Number(preferences.shipping_exception),
+      Number(preferences.critical_stock),
+      Number(preferences.system_exception),
+    );
+    return preferences;
   };
 
   const unsubscribe = (userId: string, endpoint: string) => {
@@ -189,7 +293,7 @@ export function createPushNotificationService({
     return result;
   };
 
-  return { status, subscribe, unsubscribe, sendTest };
+  return { status, subscribe, rebind, unsubscribe, getPreferences, updatePreferences, sendTest };
 }
 
 export type PushNotificationService = ReturnType<typeof createPushNotificationService>;

@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import Database from 'better-sqlite3';
+import { NOTIFICATION_PREFERENCES_SCHEMA_V89 } from '../../db/notificationPreferencesSchema.js';
 import { PUSH_SUBSCRIPTIONS_SCHEMA_V88 } from '../../db/pushSubscriptionsSchema.js';
-import { PushUnavailableError, createPushNotificationService } from './pushNotificationService.js';
+import { PushOwnershipError, PushUnavailableError, createPushNotificationService } from './pushNotificationService.js';
 
 const subscription = (endpoint = 'https://push.example.test/device-1') => ({
   endpoint,
@@ -16,6 +17,7 @@ function createDb() {
   db.pragma('foreign_keys = ON');
   db.exec('CREATE TABLE users (id TEXT PRIMARY KEY); INSERT INTO users (id) VALUES (\'user-1\'), (\'user-2\');');
   db.exec(PUSH_SUBSCRIPTIONS_SCHEMA_V88);
+  db.exec(NOTIFICATION_PREFERENCES_SCHEMA_V89);
   return db;
 }
 
@@ -26,6 +28,102 @@ function configuredEnv() {
     VAPID_SUBJECT: 'mailto:ops@example.test',
   };
 }
+
+const disabledPreferences = {
+  new_order: false,
+  shipping_exception: false,
+  critical_stock: false,
+  system_exception: false,
+};
+
+test('notification preferences read defaults and persist updates for the authenticated user', () => {
+  const db = createDb();
+  const service = createPushNotificationService({
+    db,
+    env: configuredEnv(),
+    transport: { setVapidDetails() {}, async sendNotification() {} },
+  });
+
+  assert.deepEqual(service.getPreferences('user-1'), {
+    new_order: true,
+    shipping_exception: true,
+    critical_stock: true,
+    system_exception: true,
+  });
+  assert.deepEqual(service.updatePreferences('user-1', disabledPreferences), disabledPreferences);
+  assert.deepEqual(service.getPreferences('user-1'), disabledPreferences);
+  db.close();
+});
+
+test('notification preferences remain isolated between users', () => {
+  const db = createDb();
+  const service = createPushNotificationService({
+    db,
+    env: configuredEnv(),
+    transport: { setVapidDetails() {}, async sendNotification() {} },
+  });
+
+  service.updatePreferences('user-1', disabledPreferences);
+  assert.deepEqual(service.getPreferences('user-2'), {
+    new_order: true,
+    shipping_exception: true,
+    critical_stock: true,
+    system_exception: true,
+  });
+  db.close();
+});
+
+test('device endpoint ownership conflict does not silently transfer ownership', () => {
+  const db = createDb();
+  const service = createPushNotificationService({
+    db,
+    env: configuredEnv(),
+    transport: { setVapidDetails() {}, async sendNotification() {} },
+  });
+
+  service.subscribe('user-1', subscription());
+  assert.throws(() => service.subscribe('user-2', subscription()), PushOwnershipError);
+  assert.equal(
+    (db.prepare('SELECT user_id FROM push_subscriptions WHERE endpoint = ?').get(subscription().endpoint) as { user_id: string }).user_id,
+    'user-1',
+  );
+  db.close();
+});
+
+test('explicit device rebind transfers the endpoint to the authenticated user', () => {
+  const db = createDb();
+  const service = createPushNotificationService({
+    db,
+    env: configuredEnv(),
+    transport: { setVapidDetails() {}, async sendNotification() {} },
+  });
+
+  service.subscribe('user-1', subscription());
+  const result = service.rebind('user-2', subscription());
+  assert.equal(result.rebound, true);
+  assert.equal(result.previousOwnerId, 'user-1');
+  assert.equal(
+    (db.prepare('SELECT user_id FROM push_subscriptions WHERE endpoint = ?').get(subscription().endpoint) as { user_id: string }).user_id,
+    'user-2',
+  );
+  db.close();
+});
+
+test('previous user no longer owns an endpoint after explicit rebind', () => {
+  const db = createDb();
+  const service = createPushNotificationService({
+    db,
+    env: configuredEnv(),
+    transport: { setVapidDetails() {}, async sendNotification() {} },
+  });
+
+  service.subscribe('user-1', subscription());
+  service.rebind('user-2', subscription());
+  const endpointHash = createHash('sha256').update(subscription().endpoint).digest('hex');
+  assert.equal(service.status('user-1', endpointHash).subscribed, false);
+  assert.equal(service.status('user-2', endpointHash).subscribed, true);
+  db.close();
+});
 
 test('subscription create is idempotent per user and endpoint', () => {
   const db = createDb();

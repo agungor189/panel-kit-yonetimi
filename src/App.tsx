@@ -37,6 +37,7 @@ import ProductAnalyticsPage from './pages/ProductAnalyticsPage';
 import InsightsPage from './pages/InsightsPage';
 import RecurringPayments from './components/RecurringPayments';
 import SettingsView from './components/SettingsView';
+import PushNotificationSettings from './components/PushNotificationSettings';
 import ActivityLogs from './components/ActivityLogs';
 import LoginPage from './components/LoginPage';
 import FinanceModule from './components/FinanceModule';
@@ -226,7 +227,7 @@ export default function App() {
   ];
   const navItems = [...mainNavItems, ...analyticsNavItems];
   const isReadOnly = userRole === 'readonly';
-  const restrictedReadonlyViews: View[] = ['settings', 'api-keys', 'panel-api', 'trendyol', 'channels', 'product-wizard', 'b2b'];
+  const restrictedReadonlyViews: View[] = ['api-keys', 'panel-api', 'trendyol', 'channels', 'product-wizard', 'b2b'];
   const visibleMainNavItems = mainNavItems.filter(item => !isReadOnly || item.id !== 'b2b');
   const visibleAnalyticsNavItems = analyticsNavItems;
   const primaryNavItems = visibleMainNavItems.filter(item => ['dashboard', 'products', 'sales', 'b2b', 'cash'].includes(item.id));
@@ -370,7 +371,7 @@ export default function App() {
           {renderSectionLabel('Sistem')}
           {renderNavItem({ id: 'reconciliation', label: 'Sistem Kontrolü', icon: ShieldAlert })}
           {renderNavItem({ id: 'activity-logs', label: 'Aktivite Logları', icon: Activity })}
-          {!isReadOnly && renderNavItem({ id: 'settings', label: 'Ayarlar', icon: SettingsIcon })}
+          {renderNavItem({ id: 'settings', label: 'Ayarlar', icon: SettingsIcon })}
         </nav>
 
         <div className="shrink-0 border-t border-white/10 pb-4 pt-3">
@@ -612,7 +613,15 @@ export default function App() {
           {currentView === 'insights' && <InsightsPage />}
           {currentView === 'activity-logs' && <ActivityLogs />}
           {currentView === 'reconciliation' && <ReconciliationCenter />}
-          {!isReadOnly && currentView === 'settings' && <SettingsView onUpdate={loadSettings} />}
+          {currentView === 'settings' && (isReadOnly ? (
+            <div className="space-y-6">
+              <div>
+                <h2 className="text-xl font-bold tracking-tight text-text-main lg:text-2xl">Ayarlar</h2>
+                <p className="mt-1 text-sm text-text-muted">Kendi cihaz bildirimlerinizi yönetin.</p>
+              </div>
+              <PushNotificationSettings />
+            </div>
+          ) : <SettingsView onUpdate={loadSettings} />)}
           {!isReadOnly && currentView === 'api-keys' && <ApiKeys />}
           {!isReadOnly && currentView === 'panel-api' && <PanelApiKeys />}
           {!isReadOnly && currentView === 'trendyol' && <TrendyolIntegration />}

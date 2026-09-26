@@ -21,6 +21,21 @@ export function createPushNotificationRouter(service: PushNotificationService, a
     res.json({ success: true, data: service.status(req.user!.id, endpointHash) });
   });
 
+  router.get('/preferences', (req, res) => {
+    res.json({ success: true, data: service.getPreferences(req.user!.id) });
+  });
+
+  router.put('/preferences', (req, res) => {
+    try {
+      const preferences = service.updatePreferences(req.user!.id, req.body);
+      audit?.('PUSH_PREFERENCES_UPDATED', 'user_notification_preferences', req.user!.id, preferences, req.user!.id);
+      res.json({ success: true, data: preferences });
+    } catch (error) {
+      if (error instanceof PushValidationError) return sendError(res, 400, 'PUSH_PREFERENCES_INVALID', error.message);
+      return sendError(res, 500, 'PUSH_PREFERENCES_UPDATE_FAILED', 'Bildirim tercihleri güncellenemedi.');
+    }
+  });
+
   router.post('/subscribe', (req, res) => {
     try {
       const result = service.subscribe(req.user!.id, req.body);
@@ -31,6 +46,27 @@ export function createPushNotificationRouter(service: PushNotificationService, a
       if (error instanceof PushOwnershipError) return sendError(res, 409, 'PUSH_ENDPOINT_OWNERSHIP_CONFLICT', error.message);
       if (error instanceof PushUnavailableError) return sendError(res, 503, 'PUSH_UNAVAILABLE', error.message);
       return sendError(res, 500, 'PUSH_SUBSCRIBE_FAILED', 'Push subscription kaydedilemedi.');
+    }
+  });
+
+  router.post('/rebind', (req, res) => {
+    try {
+      const result = service.rebind(req.user!.id, req.body);
+      audit?.(
+        'PUSH_SUBSCRIPTION_REBOUND',
+        'push_subscription',
+        result.endpointHash,
+        { previous_user_id: result.previousOwnerId, new_user_id: req.user!.id, rebound: result.rebound },
+        req.user!.id,
+      );
+      res.json({
+        success: true,
+        data: { created: result.created, subscribed: result.subscribed, rebound: result.rebound },
+      });
+    } catch (error) {
+      if (error instanceof PushValidationError) return sendError(res, 400, 'PUSH_SUBSCRIPTION_INVALID', error.message);
+      if (error instanceof PushUnavailableError) return sendError(res, 503, 'PUSH_UNAVAILABLE', error.message);
+      return sendError(res, 500, 'PUSH_REBIND_FAILED', 'Push subscription bu hesaba taşınamadı.');
     }
   });
 

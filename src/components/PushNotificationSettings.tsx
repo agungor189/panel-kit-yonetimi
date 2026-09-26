@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, BellOff, BellRing, CheckCircle2, Loader2, Send } from 'lucide-react';
-import { api } from '../lib/api';
+import { ApiError, api } from '../lib/api';
 import {
   enableBrowserPush,
   getExistingPushSubscription,
@@ -16,6 +16,22 @@ type ServerPushStatus = {
   subscribed: boolean;
 };
 
+type NotificationPreferences = {
+  new_order: boolean;
+  shipping_exception: boolean;
+  critical_stock: boolean;
+  system_exception: boolean;
+};
+
+const preferenceOptions: Array<{ key: keyof NotificationPreferences; label: string; description: string }> = [
+  { key: 'new_order', label: 'Yeni siparişler', description: 'Yeni sipariş bildirimlerini al.' },
+  { key: 'shipping_exception', label: 'Kargo istisnaları', description: 'Gönderim sürecindeki istisnaları bildir.' },
+  { key: 'critical_stock', label: 'Kritik stok', description: 'Kritik stok seviyelerini bildir.' },
+  { key: 'system_exception', label: 'Sistem istisnaları', description: 'Önemli sistem sorunlarını bildir.' },
+];
+
+const OWNERSHIP_CONFIRMATION = 'Bu cihazın bildirimleri başka bir DSDST hesabına bağlı. Bu hesaba taşımak ister misiniz?';
+
 const responseData = <T,>(response: T | { data: T }): T => {
   if (response && typeof response === 'object' && 'data' in response) {
     return (response as { data: T }).data;
@@ -26,23 +42,25 @@ const responseData = <T,>(response: T | { data: T }): T => {
 export default function PushNotificationSettings() {
   const support = getPushSupport();
   const [serverStatus, setServerStatus] = useState<ServerPushStatus | null>(null);
+  const [preferences, setPreferences] = useState<NotificationPreferences | null>(null);
   const [enabled, setEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [preferenceSaving, setPreferenceSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
 
   const refresh = useCallback(async () => {
-    if (!support.supported) {
-      setLoading(false);
-      return;
-    }
     try {
-      const subscription = await getExistingPushSubscription();
+      const subscription = support.supported ? await getExistingPushSubscription() : null;
       const endpointHash = subscription ? await pushEndpointHash(subscription.endpoint) : '';
       const query = endpointHash ? `?endpoint_hash=${endpointHash}` : '';
-      const response = await api.get(`/push/status${query}`);
-      const status = responseData<ServerPushStatus>(response);
+      const [statusResponse, preferencesResponse] = await Promise.all([
+        api.get(`/push/status${query}`),
+        api.get('/push/preferences'),
+      ]);
+      const status = responseData<ServerPushStatus>(statusResponse);
       setServerStatus(status);
+      setPreferences(responseData<NotificationPreferences>(preferencesResponse));
       setEnabled(Boolean(subscription && status.subscribed));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Bildirim durumu alınamadı.');
@@ -61,6 +79,7 @@ export default function PushNotificationSettings() {
     setError('');
     setMessage('');
     let createdSubscription: PushSubscription | null = null;
+    let registered = false;
     try {
       const browserResult = await enableBrowserPush(serverStatus.publicKey);
       if (browserResult.created) createdSubscription = browserResult.subscription;
@@ -68,12 +87,22 @@ export default function PushNotificationSettings() {
       if (!subscriptionJson.keys?.p256dh || !subscriptionJson.keys?.auth) {
         throw new Error('Tarayıcı geçerli push anahtarları üretmedi.');
       }
-      await api.post('/push/subscribe', subscriptionJson);
+      try {
+        await api.post('/push/subscribe', subscriptionJson);
+      } catch (err) {
+        if (!(err instanceof ApiError) || err.code !== 'PUSH_ENDPOINT_OWNERSHIP_CONFLICT') throw err;
+        if (!window.confirm(OWNERSHIP_CONFIRMATION)) {
+          setMessage('Cihaz sahipliği değişikliği iptal edildi.');
+          return;
+        }
+        await api.post('/push/rebind', subscriptionJson);
+      }
+      registered = true;
       setEnabled(true);
       setMessage('Bu cihaz için bildirimler açıldı.');
       await refresh();
     } catch (err) {
-      if (createdSubscription) await createdSubscription.unsubscribe().catch(() => false);
+      if (createdSubscription && !registered) await createdSubscription.unsubscribe().catch(() => false);
       setError(err instanceof Error ? err.message : 'Bildirimler açılamadı.');
     } finally {
       setLoading(false);
@@ -87,7 +116,11 @@ export default function PushNotificationSettings() {
     try {
       const subscription = await getExistingPushSubscription();
       if (subscription) {
-        await api.post('/push/unsubscribe', { endpoint: subscription.endpoint });
+        const response = await api.post('/push/unsubscribe', { endpoint: subscription.endpoint });
+        const result = responseData<{ removed: boolean }>(response);
+        if (!result.removed) {
+          throw new Error('Bu cihaz subscription’ı giriş yapan kullanıcıya ait değil.');
+        }
         await subscription.unsubscribe();
       }
       setEnabled(false);
@@ -97,6 +130,23 @@ export default function PushNotificationSettings() {
       setError(err instanceof Error ? err.message : 'Bildirimler kapatılamadı.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const updatePreference = async (key: keyof NotificationPreferences, value: boolean) => {
+    if (!preferences) return;
+    const next = { ...preferences, [key]: value };
+    setPreferenceSaving(true);
+    setError('');
+    setMessage('');
+    try {
+      const response = await api.put('/push/preferences', next);
+      setPreferences(responseData<NotificationPreferences>(response));
+      setMessage('Bildirim tercihleri kaydedildi.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Bildirim tercihleri kaydedilemedi.');
+    } finally {
+      setPreferenceSaving(false);
     }
   };
 
@@ -165,6 +215,29 @@ export default function PushNotificationSettings() {
             </button>
           </div>
         </div>
+
+        {preferences && (
+          <fieldset className="grid gap-3 border-t border-border-color pt-5 sm:grid-cols-2" disabled={preferenceSaving}>
+            <legend className="sr-only">Bildirim tercihleri</legend>
+            {preferenceOptions.map((option) => (
+              <label
+                key={option.key}
+                className="flex cursor-pointer items-start gap-3 rounded-xl border border-border-color bg-bg-main p-4 transition-colors hover:border-primary/30"
+              >
+                <input
+                  type="checkbox"
+                  checked={preferences[option.key]}
+                  onChange={(event) => void updatePreference(option.key, event.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-border-color text-primary focus:ring-primary"
+                />
+                <span>
+                  <span className="block text-xs font-black text-text-main">{option.label}</span>
+                  <span className="mt-1 block text-[11px] font-medium text-text-muted">{option.description}</span>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+        )}
 
         {loading && !serverStatus && support.supported && (
           <p className="flex items-center text-xs text-text-muted"><Loader2 className="mr-2 h-4 w-4 animate-spin" />Bildirim durumu kontrol ediliyor…</p>

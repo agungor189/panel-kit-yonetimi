@@ -4,6 +4,13 @@ export type MutationOptions = {
   operationId?: string;
 };
 
+export class ApiError extends Error {
+  constructor(message: string, public readonly code?: string, public readonly status?: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 const canonicalActionPayload = (value: unknown): string => {
   if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
     return JSON.stringify(value) ?? String(value);
@@ -74,11 +81,15 @@ const handleResponse = async (res: Response, skip401Reload = false) => {
   }
   
   if (jsonError && !res.ok) {
-    throw new Error(res.statusText || 'Bir hata oluştu');
+    throw new ApiError(res.statusText || 'Bir hata oluştu', undefined, res.status);
   }
 
   if (!res.ok || data?.success === false) {
-     throw new Error(data?.error?.message || data?.error || 'Bir hata oluştu');
+     throw new ApiError(
+       data?.error?.message || data?.error || 'Bir hata oluştu',
+       data?.error?.code,
+       res.status,
+     );
   }
   return data;
 };
