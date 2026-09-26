@@ -7,6 +7,50 @@ import { ReconciliationScopeGuard } from "../reconciliation/reconciliationGuard.
 
 type Actor = { id: string; name?: string | null };
 type ShipmentState = "PREPARING" | "CARRIER_SELECTED" | "BOOKED" | "LABEL_READY" | "HANDED_OFF" | "DISPATCHED" | "CANCELLED" | "EXCEPTION";
+export type ShipmentDiagnosticStage = "booking" | "provider" | "label" | "tracking_outbound" | "other";
+export type ShipmentActiveDiagnostic = { code: string; stage: ShipmentDiagnosticStage; message: string };
+
+const SAFE_DIAGNOSTIC_MESSAGES = {
+  BOOKING_OUTCOME_UNCERTAIN: "Kargo rezervasyon sonucu belirsiz. Otomatik yeniden deneme durduruldu.",
+  BOOKING_RETRY_PENDING: "Kargo rezervasyonu tamamlanamadı. Otomatik yeniden deneme bekleniyor.",
+  BOOKING_FAILED: "Kargo rezervasyonu tamamlanamadı. Operatör incelemesi gerekiyor.",
+  PROVIDER_ERROR: "Kargo sağlayıcı rezervasyonu tamamlayamadı. Operatör incelemesi gerekiyor.",
+  GELIVER_OUTCOME_UNCERTAIN: "Geliver işleminin sonucu belirsiz. Otomatik yeniden deneme durduruldu.",
+  GELIVER_CREATE_RECONCILIATION_PENDING: "Geliver gönderi oluşturma sonucu doğrulanamadı. Otomatik yeniden deneme durduruldu.",
+  GELIVER_ACCEPT_RECONCILIATION_PENDING: "Geliver rezervasyon sonucu doğrulanamadı. Otomatik yeniden deneme durduruldu.",
+  GELIVER_DUPLICATE_PROVIDER_SHIPMENT: "Geliver tarafında birden fazla eşleşen gönderi bulundu. Operatör incelemesi gerekiyor.",
+  GELIVER_TRANSPORT_DISABLED: "Geliver bağlantısı kullanılamıyor. Yapılandırmayı kontrol edin.",
+  PROVIDER_OUTCOME_UNCERTAIN: "Kargo sağlayıcı işleminin sonucu belirsiz. Otomatik yeniden deneme durduruldu.",
+  PROVIDER_OPERATION_FAILED: "Kargo sağlayıcı işlemi tamamlanamadı. Operatör incelemesi gerekiyor.",
+  CHANNEL_TRACKING_PENDING: "Takip bilgisi henüz hazır değil. Kanal güncellemesi bekliyor.",
+  CHANNEL_TRACKING_URL_INVALID: "Takip bağlantısı doğrulanamadı. Kanal güncellemesi durduruldu.",
+  CHANNEL_SHIPMENT_MAPPING_UNVERIFIED: "Pazaryeri paket eşlemesi doğrulanamadı. Kanal güncellemesi durduruldu.",
+  CHANNEL_SHIPMENT_CONTRACT_INVALID: "Kanal sevkiyat verisi doğrulanamadı. Operatör incelemesi gerekiyor.",
+  CHANNEL_SHIPMENT_PAYLOAD_TAMPERED: "Kanal sevkiyat verisinin bütünlüğü doğrulanamadı. Operatör incelemesi gerekiyor.",
+  SHOPIFY_EXTERNAL_ORDER_ID_REQUIRED: "Shopify sipariş eşlemesi eksik. Kanal güncellemesi durduruldu.",
+  SHOPIFY_ORDER_NOT_FOUND: "Shopify siparişi bulunamadı. Kanal güncellemesi durduruldu.",
+  SHOPIFY_FULFILLMENT_ORDER_NOT_OPEN: "Shopify fulfillment kaydı sevke açık değil. Kanal güncellemesi durduruldu.",
+  RATE_LIMITED: "Kanal geçici olarak istekleri sınırladı. Otomatik yeniden deneme bekleniyor.",
+  PROVIDER_PUBLISH_FAILED: "Kanal sevkiyat güncellemesi tamamlanamadı. Otomatik yeniden deneme bekleniyor.",
+  TRACKING_OUTBOUND_BLOCKED: "Takip ve sevkiyat bilgisi kanala gönderilemedi. Operatör incelemesi gerekiyor.",
+  TRACKING_OUTBOUND_RETRY: "Takip ve sevkiyat bilgisi kanala gönderilemedi. Otomatik yeniden deneme bekleniyor.",
+  LABEL_DELIVERY_UNKNOWN: "Etiket yazdırma sonucu doğrulanamadı. Fiziksel çıktıyı kontrol edin.",
+  LABEL_PRINT_FAILED: "Etiket yazdırılamadı. Yazıcı ve bağlantıyı kontrol edin.",
+  SHIPMENT_EXCEPTION: "Sevkiyat işlemi operatör incelemesi gerektiriyor.",
+} as const satisfies Record<string, string>;
+type SafeDiagnosticCode = keyof typeof SAFE_DIAGNOSTIC_MESSAGES;
+
+const safeDiagnostic = (
+  stage: ShipmentDiagnosticStage,
+  rawCode: unknown,
+  fallbackCode: SafeDiagnosticCode,
+): ShipmentActiveDiagnostic => {
+  const candidate = typeof rawCode === "string" ? rawCode.trim() : "";
+  const code: SafeDiagnosticCode = Object.prototype.hasOwnProperty.call(SAFE_DIAGNOSTIC_MESSAGES, candidate)
+    ? candidate as SafeDiagnosticCode
+    : fallbackCode;
+  return { code, stage, message: SAFE_DIAGNOSTIC_MESSAGES[code] };
+};
 type RecipeMeasurement = {
   lengthMm: number;
   widthMm: number;
@@ -138,6 +182,55 @@ export class ShipmentService {
     const error = (message: string) => new ShipmentValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409);
     this.reconciliationGuard.assertOrderForShipment(shipmentId, error);
     this.reconciliationGuard.assertShipmentSkus(shipmentId, error);
+  }
+
+  private activeDiagnostic(shipmentId: string, shipmentState: ShipmentState): ShipmentActiveDiagnostic | null {
+    const outbound = this.db.prepare(`SELECT state,last_error_code FROM channel_shipment_outbound_jobs
+      WHERE shipment_id=? ORDER BY datetime(updated_at) DESC,id DESC LIMIT 1`).get(shipmentId) as any;
+    if (outbound && ["BLOCKED", "FAILED", "RETRY"].includes(outbound.state)) {
+      return safeDiagnostic("tracking_outbound", outbound.last_error_code,
+        ["BLOCKED", "FAILED"].includes(outbound.state) ? "TRACKING_OUTBOUND_BLOCKED" : "TRACKING_OUTBOUND_RETRY");
+    }
+
+    const provider = this.db.prepare(`SELECT state,last_error_code FROM geliver_create_jobs
+      WHERE shipment_id=? AND state IN ('PROCESSING','RECONCILE_REQUIRED','DEFINITIVE_FAILURE')
+      ORDER BY datetime(updated_at) DESC,id DESC LIMIT 1`).get(shipmentId) as any;
+    if (provider) {
+      return safeDiagnostic("provider", provider.last_error_code,
+        provider.state === "DEFINITIVE_FAILURE" ? "PROVIDER_OPERATION_FAILED" : "PROVIDER_OUTCOME_UNCERTAIN");
+    }
+
+    const booking = this.db.prepare(`SELECT source,state,last_error_code FROM (
+        SELECT 'geliver' AS source,id,state,last_error_code,updated_at FROM geliver_accept_jobs WHERE shipment_id=?
+        UNION ALL
+        SELECT 'carrier' AS source,id,state,last_error_code,updated_at FROM shipment_booking_jobs WHERE shipment_id=?
+      ) WHERE state IN ('PROCESSING','RECONCILE_REQUIRED','BLOCKED_UNCERTAIN','RETRY','FAILED','DEFINITIVE_FAILURE')
+      ORDER BY datetime(updated_at) DESC,id DESC LIMIT 1`).get(shipmentId, shipmentId) as any;
+    if (booking) {
+      const uncertain = ["PROCESSING", "RECONCILE_REQUIRED", "BLOCKED_UNCERTAIN"].includes(booking.state);
+      const fallback = uncertain ? "BOOKING_OUTCOME_UNCERTAIN"
+        : booking.state === "RETRY" ? "BOOKING_RETRY_PENDING" : "BOOKING_FAILED";
+      return safeDiagnostic("booking", booking.last_error_code, fallback);
+    }
+
+    const label = this.db.prepare(`SELECT j.status,j.error_code FROM printing_jobs j
+      JOIN shipment_packages p ON p.id=j.subject_id
+      WHERE p.shipment_id=? AND j.purpose='SHIPPING' AND j.status IN ('FAILED','DELIVERY_UNKNOWN')
+        AND NOT EXISTS (
+          SELECT 1 FROM printing_jobs newer
+          WHERE newer.purpose='SHIPPING' AND newer.subject_id=j.subject_id
+            AND (datetime(newer.created_at)>datetime(j.created_at)
+              OR (datetime(newer.created_at)=datetime(j.created_at) AND newer.id>j.id))
+        )
+      ORDER BY datetime(j.updated_at) DESC,j.id DESC LIMIT 1`).get(shipmentId) as any;
+    if (label) {
+      return safeDiagnostic("label", label.error_code,
+        label.status === "DELIVERY_UNKNOWN" ? "LABEL_DELIVERY_UNKNOWN" : "LABEL_PRINT_FAILED");
+    }
+
+    return shipmentState === "EXCEPTION"
+      ? safeDiagnostic("other", null, "SHIPMENT_EXCEPTION")
+      : null;
   }
 
   packAndPrepare(input: { reservationId: string; operationId: string; actor: Actor; packedAt?: string }) {
@@ -580,6 +673,7 @@ export class ShipmentService {
       state: row.state as ShipmentState,
       packageCount: Number(row.package_count),
       customerName: row.customer_name || null,
+      activeDiagnostic: this.activeDiagnostic(row.id, row.state as ShipmentState),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }));
@@ -638,6 +732,7 @@ export class ShipmentService {
           serviceCode: selection.service_code, quote: { id: selection.quote_id, amountMinor: Number(selection.quote_amount_minor),
             currency: selection.quote_currency, provenance: JSON.parse(selection.quote_provenance_json) }, selectedAt: selection.selected_at }) : null,
       handedOffAt: row.handed_off_at, dispatchedAt: row.dispatched_at, cancelledAt: row.cancelled_at, version: Number(row.version),
+      activeDiagnostic: this.activeDiagnostic(row.id, row.state as ShipmentState),
     };
   }
 

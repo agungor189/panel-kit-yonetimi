@@ -766,3 +766,88 @@ test("pre-handoff Geliver cancellation records provider evidence and never dispa
   assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_ledger_events WHERE event_type='DISPATCH'").pluck().get(), 0);
   db.close();
 });
+
+test("safe shipment diagnostic exposes booking uncertainty consistently in list and detail", () => {
+  const { db } = setup();
+  const shipping = new ShipmentService(db);
+  const shipment = shipping.packAndPrepare({ reservationId: "reservation", operationId: "diagnostic-pack", actor }).shipment;
+  shipping.definePackages({ shipmentId: shipment.id, operationId: "diagnostic-packages", actor, packages: [{ packageNumber: 1,
+    measured: { lengthMm: 300, widthMm: 200, heightMm: 100, weightGrams: 1200 }, contents: [{ productId: "part", quantityBaseInt: 2 }] }] });
+  shipping.selectCarrier({ shipmentId: shipment.id, provider: "GELIVER", carrierCode: "FIXTURE", serviceCode: "STANDARD",
+    quote: { quoteId: "diagnostic-quote", amountMinor: 9000, currency: "TRY", provenance: { source: "fixture" } },
+    operationId: "diagnostic-select", actor });
+  const booking = shipping.requestBooking({ shipmentId: shipment.id, operationId: "diagnostic-book", actor });
+  db.prepare("UPDATE shipment_booking_jobs SET state='BLOCKED_UNCERTAIN',last_error_code='BOOKING_OUTCOME_UNCERTAIN' WHERE id=?")
+    .run(booking.jobs[0].id);
+
+  const expected = {
+    code: "BOOKING_OUTCOME_UNCERTAIN",
+    stage: "booking",
+    message: "Kargo rezervasyon sonucu belirsiz. Otomatik yeniden deneme durduruldu.",
+  };
+  assert.deepEqual(shipping.getShipment(shipment.id).activeDiagnostic, expected);
+  assert.deepEqual(shipping.listShipments().find((item) => item.id === shipment.id)?.activeDiagnostic, expected);
+  db.close();
+});
+
+test("safe shipment diagnostic prioritizes blocked tracking outbound", () => {
+  const { db } = setup();
+  const shipping = new ShipmentService(db);
+  const shipment = shipping.packAndPrepare({ reservationId: "reservation", operationId: "outbound-diagnostic-pack", actor }).shipment;
+  const [shipmentPackage] = shipping.definePackages({ shipmentId: shipment.id, operationId: "outbound-diagnostic-packages", actor,
+    packages: [{ packageNumber: 1, measured: { lengthMm: 300, widthMm: 200, heightMm: 100, weightGrams: 1200 },
+      contents: [{ productId: "part", quantityBaseInt: 2 }] }] });
+  db.prepare(`INSERT INTO geliver_create_jobs
+    (id,shipment_id,package_id,request_identity,provider_order_number,request_json,request_hash,state,last_error_code,
+     created_operation_id,created_at,updated_at)
+    VALUES ('diagnostic-provider',?,?,'diagnostic-provider-request','diagnostic-provider-order','{}',?,
+      'RECONCILE_REQUIRED','GELIVER_OUTCOME_UNCERTAIN','diagnostic-provider-create',
+      '2026-09-26T12:01:00.000Z','2026-09-26T12:01:00.000Z')`)
+    .run(shipment.id, shipmentPackage.id, "c".repeat(64));
+  db.prepare(`INSERT INTO channel_shipment_outbound_jobs
+    (id,account_id,shipment_id,channel_order_id,job_kind,source_version,payload_json,payload_hash,state,created_operation_id,
+     available_at,last_error_code,created_at,updated_at)
+    VALUES ('diagnostic-outbound','channel-account',?,'channel-order','TRACKING_STATUS','diagnostic-v1','{}',?,'BLOCKED',
+      'diagnostic-outbound-create','2026-09-26T12:00:00.000Z','CHANNEL_TRACKING_PENDING','2026-09-26T12:00:00.000Z','2026-09-26T12:00:00.000Z')`)
+    .run(shipment.id, "a".repeat(64));
+
+  assert.deepEqual(shipping.getShipment(shipment.id).activeDiagnostic, {
+    code: "CHANNEL_TRACKING_PENDING",
+    stage: "tracking_outbound",
+    message: "Takip bilgisi henüz hazır değil. Kanal güncellemesi bekliyor.",
+  });
+  db.close();
+});
+
+test("safe shipment diagnostic is null for normal shipment", () => {
+  const { db } = setup();
+  const shipping = new ShipmentService(db);
+  const shipment = shipping.packAndPrepare({ reservationId: "reservation", operationId: "normal-diagnostic-pack", actor }).shipment;
+  assert.equal(shipping.getShipment(shipment.id).activeDiagnostic, null);
+  assert.equal(shipping.listShipments().find((item) => item.id === shipment.id)?.activeDiagnostic, null);
+  db.close();
+});
+
+test("safe shipment diagnostic never exposes unknown provider code or payload", () => {
+  const { db } = setup();
+  const shipping = new ShipmentService(db);
+  const shipment = shipping.packAndPrepare({ reservationId: "reservation", operationId: "secret-diagnostic-pack", actor }).shipment;
+  const [shipmentPackage] = shipping.definePackages({ shipmentId: shipment.id, operationId: "secret-diagnostic-packages", actor,
+    packages: [{ packageNumber: 1, measured: { lengthMm: 300, widthMm: 200, heightMm: 100, weightGrams: 1200 },
+      contents: [{ productId: "part", quantityBaseInt: 2 }] }] });
+  db.prepare(`INSERT INTO geliver_create_jobs
+    (id,shipment_id,package_id,request_identity,provider_order_number,request_json,request_hash,state,attempt_count,
+     reconciliation_count,last_error_code,created_operation_id,created_at,updated_at)
+    VALUES ('secret-job',?,?,'secret-request','secret-order',?,?,'RECONCILE_REQUIRED',1,1,?,
+      'secret-job-create','2026-09-26T12:00:00.000Z','2026-09-26T12:00:00.000Z')`)
+    .run(shipment.id, shipmentPackage.id, JSON.stringify({ authorization: "Bearer provider-secret" }), "b".repeat(64), "TOKEN_provider-secret");
+
+  const response = JSON.stringify(shipping.getShipment(shipment.id));
+  assert.equal(response.includes("provider-secret"), false);
+  assert.deepEqual(shipping.getShipment(shipment.id).activeDiagnostic, {
+    code: "PROVIDER_OUTCOME_UNCERTAIN",
+    stage: "provider",
+    message: "Kargo sağlayıcı işleminin sonucu belirsiz. Otomatik yeniden deneme durduruldu.",
+  });
+  db.close();
+});
