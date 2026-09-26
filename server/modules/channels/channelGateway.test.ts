@@ -348,7 +348,7 @@ test("exception orders resolve and reprocess exactly once after mapping or stock
   db.close();
 });
 
-test("canonical changes auto-enqueue claimable jobs and disabled adapters remain fail-closed", async () => {
+test("canonical changes auto-enqueue claimable jobs while Shopify product writes remain unclaimable", async () => {
   const { db, gateway, inventory } = setup(5);
   db.prepare("DELETE FROM channel_outbound_jobs").run();
   inventory.reserveOrder({ reservationId: "auto-reservation", orderId: "auto-order",
@@ -385,9 +385,28 @@ test("canonical changes auto-enqueue claimable jobs and disabled adapters remain
   const disabledJob = gateway.captureCanonicalProductChanges({ productId: "part", kinds: ["STOCK"], operationId: "disabled-stock", actor })
     .find((job: any) => job.accountId === "disabled-shopify");
   assert.ok(disabledJob);
-  assert.throws(() => gateway.claimReadyOutboundJobs({ accountId: "disabled-shopify", limit: 1, leaseSeconds: 30,
-    operationId: "disabled-claim", serviceActorId: "publisher", claimedAt: "2026-09-23T10:00:00.000Z" }),
-  (error: unknown) => error instanceof ChannelGatewayError && error.code === "ADAPTER_TRANSPORT_DISABLED");
+  const disabledClaim = gateway.claimReadyOutboundJobs({
+    accountId: "disabled-shopify",
+    limit: 1,
+    leaseSeconds: 30,
+    operationId: "disabled-claim",
+    serviceActorId: "publisher",
+    claimedAt: "2026-09-23T10:00:00.000Z",
+  }) as any[];
+
+  // Shopify V19 allows SHIPMENT outbound only.
+  // Canonical PRODUCT/STOCK jobs remain fail-closed by never becoming claimable.
+  assert.equal(disabledClaim.length, 0);
+
+  assert.equal(
+    db.prepare(`
+      SELECT state
+      FROM channel_outbound_jobs
+      WHERE id=?
+    `).pluck().get(disabledJob.id),
+    "PENDING",
+  );
+
   db.close();
 });
 

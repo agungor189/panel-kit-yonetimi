@@ -501,8 +501,20 @@ export class ChannelGatewayService {
     if (input.accountId) {
       const account = this.db.prepare("SELECT channel FROM channel_accounts WHERE id=?").get(input.accountId) as any;
       if (!account) throw new ChannelGatewayError("CHANNEL_ACCOUNT_NOT_FOUND", "Channel account was not found.", 404);
-      if (!CHANNEL_ADAPTERS[account.channel as ChannelCode]?.enabledTransport) {
-        throw new ChannelGatewayError("ADAPTER_TRANSPORT_DISABLED", "The channel adapter transport is disabled.", 409);
+      const channel = String(account.channel);
+
+      // V19: Shopify product/stock publishing remains disabled.
+      // Only Shopify shipment/fulfillment jobs are claimable.
+      // The candidate query below still restricts PRODUCT jobs to TRENDYOL.
+      if (
+        channel !== "SHOPIFY"
+        && !CHANNEL_ADAPTERS[channel as ChannelCode]?.enabledTransport
+      ) {
+        throw new ChannelGatewayError(
+          "ADAPTER_TRANSPORT_DISABLED",
+          "The channel adapter transport is disabled.",
+          409,
+        );
       }
     }
     return this.commands.execute({ operationId: input.operationId, commandType: "channels.outbound.claim.v1", payload: input,
@@ -518,7 +530,8 @@ export class ChannelGatewayService {
           SELECT j.id,'SHIPMENT' AS outbound_type,j.available_at,j.created_at FROM channel_shipment_outbound_jobs j
           JOIN channel_accounts a ON a.id=j.account_id
           WHERE j.state IN ('PENDING','RETRY') AND datetime(j.available_at)<=datetime(?)
-            AND (j.lease_token IS NULL OR datetime(j.lease_expires_at)<=datetime(?)) AND a.channel='TRENDYOL'
+            AND (j.lease_token IS NULL OR datetime(j.lease_expires_at)<=datetime(?))
+            AND a.channel IN ('TRENDYOL','SHOPIFY')
             AND (? IS NULL OR j.account_id=?)
         ) ORDER BY datetime(available_at),created_at,id LIMIT ?`)
         .all(input.claimedAt, input.claimedAt, input.accountId || null, input.accountId || null,
@@ -582,8 +595,12 @@ export class ChannelGatewayService {
       JOIN channel_accounts a ON a.id=j.account_id WHERE j.id=?`).get(input.jobId) as any;
     if (!job) throw new ChannelGatewayError("OUTBOUND_JOB_NOT_FOUND", "Outbound job was not found.", 404);
     if (job.state === "SUCCEEDED") return { id: job.id, state: "SUCCEEDED", replayed: true };
-    if (!CHANNEL_ADAPTERS[job.channel as ChannelCode]?.enabledTransport) {
-      throw new ChannelGatewayError("ADAPTER_TRANSPORT_DISABLED", "The channel adapter transport is disabled.", 409);
+    if (!["TRENDYOL", "SHOPIFY"].includes(String(job.channel))) {
+      throw new ChannelGatewayError(
+        "ADAPTER_TRANSPORT_DISABLED",
+        "The channel shipment adapter transport is disabled.",
+        409,
+      );
     }
     if (job.lease_token !== input.leaseToken || !job.lease_expires_at
       || new Date(job.lease_expires_at).getTime() < new Date(input.occurredAt).getTime()) {
@@ -613,24 +630,122 @@ export class ChannelGatewayService {
       if (!['https:', 'http:'].includes(parsedTrackingUrl.protocol)) {
         throw new ChannelGatewayError("CHANNEL_TRACKING_URL_INVALID", "Tracking URL protocol is invalid.", 409);
       }
-      const marketplacePackages = this.db.prepare(`SELECT external_package_id AS externalPackageId
-        FROM channel_order_packages WHERE channel_order_id=? AND package_state='ACTIVE' ORDER BY external_package_id`)
-        .all(job.channel_order_id) as Array<{ externalPackageId: string }>;
-      if (marketplacePackages.length !== 1) {
-        throw new ChannelGatewayError("CHANNEL_SHIPMENT_MAPPING_UNVERIFIED",
-          "Exactly one active marketplace package is required for the verified shipment publication path.", 409);
+      const trackingNumber =
+        typeof payload.packages[0]?.trackingNumber === "string"
+          ? payload.packages[0].trackingNumber.trim()
+          : "";
+
+      if (!trackingNumber) {
+        throw new ChannelGatewayError(
+          "CHANNEL_TRACKING_PENDING",
+          "Tracking number is not available yet.",
+          409,
+        );
       }
-      const externalPackageId = marketplacePackages[0].externalPackageId;
-      providerMutationId = `trendyol:alternative-delivery:${job.account_id}:${externalPackageId}:${job.payload_hash}`;
-      const response = await input.publish({ id: job.id, outboundType: "SHIPMENT", accountId: job.account_id,
-        shipmentId: job.shipment_id, channelOrderId: job.channel_order_id, kind: job.job_kind, payload,
-        payloadHash: job.payload_hash, channel: job.channel, externalPackageId, providerMutationId });
-      return this.recordShipmentOutboundAttempt({ jobId: job.id, providerMutationId, state: "SUCCEEDED", response,
-        operationId: input.operationId, serviceActorId: input.serviceActorId, occurredAt: input.occurredAt });
+
+      if (job.channel === "SHOPIFY") {
+        const channelOrder = this.db.prepare(`
+          SELECT external_order_id
+          FROM channel_orders
+          WHERE id=?
+        `).get(job.channel_order_id) as any;
+
+        const externalOrderId =
+          String(channelOrder?.external_order_id || "").trim();
+
+        if (!externalOrderId) {
+          throw new ChannelGatewayError(
+            "SHOPIFY_EXTERNAL_ORDER_ID_REQUIRED",
+            "Shopify channel order has no external order id.",
+            409,
+          );
+        }
+
+        providerMutationId =
+          `shopify:fulfillment:${job.account_id}:${externalOrderId}:${job.payload_hash}`;
+
+        const response = await input.publish({
+          id: job.id,
+          outboundType: "SHIPMENT",
+          accountId: job.account_id,
+          shipmentId: job.shipment_id,
+          channelOrderId: job.channel_order_id,
+          externalOrderId,
+          kind: job.job_kind,
+          payload,
+          payloadHash: job.payload_hash,
+          channel: job.channel,
+          trackingNumber,
+          trackingUrl,
+          company: payload.carrier || "Geliver",
+          providerMutationId,
+        });
+
+        return this.recordShipmentOutboundAttempt({
+          jobId: job.id,
+          providerMutationId,
+          state: "SUCCEEDED",
+          response,
+          operationId: input.operationId,
+          serviceActorId: input.serviceActorId,
+          occurredAt: input.occurredAt,
+        });
+      }
+
+      const marketplacePackages = this.db.prepare(`
+        SELECT external_package_id AS externalPackageId
+        FROM channel_order_packages
+        WHERE channel_order_id=?
+          AND package_state='ACTIVE'
+        ORDER BY external_package_id
+      `).all(job.channel_order_id) as Array<{
+        externalPackageId: string
+      }>;
+
+      if (marketplacePackages.length !== 1) {
+        throw new ChannelGatewayError(
+          "CHANNEL_SHIPMENT_MAPPING_UNVERIFIED",
+          "Exactly one active marketplace package is required for the verified shipment publication path.",
+          409,
+        );
+      }
+
+      const externalPackageId =
+        marketplacePackages[0].externalPackageId;
+
+      providerMutationId =
+        `trendyol:alternative-delivery:${job.account_id}:${externalPackageId}:${job.payload_hash}`;
+
+      const response = await input.publish({
+        id: job.id,
+        outboundType: "SHIPMENT",
+        accountId: job.account_id,
+        shipmentId: job.shipment_id,
+        channelOrderId: job.channel_order_id,
+        kind: job.job_kind,
+        payload,
+        payloadHash: job.payload_hash,
+        channel: job.channel,
+        externalPackageId,
+        providerMutationId,
+      });
+
+      return this.recordShipmentOutboundAttempt({
+        jobId: job.id,
+        providerMutationId,
+        state: "SUCCEEDED",
+        response,
+        operationId: input.operationId,
+        serviceActorId: input.serviceActorId,
+        occurredAt: input.occurredAt,
+      });
     } catch (error: any) {
       const blocked = ["CHANNEL_TRACKING_PENDING", "CHANNEL_SHIPMENT_MAPPING_UNVERIFIED", "CHANNEL_SHIPMENT_CONTRACT_INVALID",
         "CHANNEL_SHIPMENT_PAYLOAD_TAMPERED",
-        "CHANNEL_TRACKING_URL_INVALID"].includes(String(error?.code));
+        "CHANNEL_TRACKING_URL_INVALID",
+        "SHOPIFY_EXTERNAL_ORDER_ID_REQUIRED",
+        "SHOPIFY_ORDER_NOT_FOUND",
+        "SHOPIFY_FULFILLMENT_ORDER_NOT_OPEN"].includes(String(error?.code));
       const rateLimited = Number(error?.statusCode) === 429;
       const retryAt = blocked ? null : new Date(new Date(input.occurredAt).getTime()
         + Math.min(15 * 60, 30 * 2 ** Math.min(attemptNumber - 1, 5)) * 1000).toISOString();

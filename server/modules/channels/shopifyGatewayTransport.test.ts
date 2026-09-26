@@ -425,6 +425,130 @@ test("Shopify poll normalizes a paid order and sends it to ChannelGateway", asyn
   );
 });
 
+test("Shopify shipment tracking creates fulfillment and is replay-safe", async () => {
+  let mutationVariables: any = null;
+
+  const fakeFetch = async (
+    input: URL | RequestInfo,
+    init?: RequestInit,
+  ) => {
+    const url = String(input);
+
+    if (url.endsWith("/admin/oauth/access_token")) {
+      return new Response(JSON.stringify({
+        access_token: "token-1",
+        expires_in: 86399,
+      }), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+    }
+
+    const body = JSON.parse(
+      String(init?.body || "{}"),
+    );
+
+    if (
+      String(body.query)
+        .includes("ShopifyFulfillmentCheck")
+    ) {
+      return new Response(JSON.stringify({
+        data: {
+          order: {
+            id: "gid://shopify/Order/8412576448579",
+            name: "#1007",
+            displayFulfillmentStatus: "UNFULFILLED",
+            fulfillmentOrders: {
+              nodes: [{
+                id: "gid://shopify/FulfillmentOrder/1",
+                status: "OPEN",
+                requestStatus: "UNSUBMITTED",
+              }],
+            },
+            fulfillments: [],
+          },
+        },
+      }), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+    }
+
+    if (
+      String(body.query)
+        .includes("ShopifyFulfillmentCreate")
+    ) {
+      mutationVariables = body.variables;
+
+      return new Response(JSON.stringify({
+        data: {
+          fulfillmentCreate: {
+            fulfillment: {
+              id: "gid://shopify/Fulfillment/1",
+              status: "SUCCESS",
+              trackingInfo: [{
+                company: "Geliver",
+                number: "85198249",
+                url: "https://tracking.example/85198249",
+              }],
+            },
+            userErrors: [],
+          },
+        },
+      }), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+    }
+
+    throw new Error(`UNEXPECTED_REQUEST:${url}`);
+  };
+
+  const transport =
+    new ShopifyGatewayTransport(
+      config,
+      fakeFetch as typeof fetch,
+    );
+
+  const result =
+    await transport.publishShipmentTracking({
+      externalOrderId: "8412576448579",
+      trackingNumber: "85198249",
+      trackingUrl:
+        "https://tracking.example/85198249",
+      company: "GELIVER",
+      notifyCustomer: false,
+    });
+
+  assert.equal(result.state, "SUCCEEDED");
+  assert.equal(result.replayed, false);
+  assert.equal(
+    mutationVariables
+      .fulfillment
+      .lineItemsByFulfillmentOrder[0]
+      .fulfillmentOrderId,
+    "gid://shopify/FulfillmentOrder/1",
+  );
+  assert.equal(
+    mutationVariables.fulfillment.trackingInfo.company,
+    "Geliver",
+  );
+  assert.equal(
+    mutationVariables.fulfillment.trackingInfo.number,
+    "85198249",
+  );
+  assert.equal(
+    mutationVariables.fulfillment.notifyCustomer,
+    false,
+  );
+});
+
 test("Shopify poll keeps canonical raw payload compatible with bootstrap ingestion", async () => {
   const captured: any[] = [];
 

@@ -500,6 +500,212 @@ export class ShopifyGatewayTransport {
   }
 
 
+  async publishShipmentTracking(input: {
+    externalOrderId: string;
+    trackingNumber: string;
+    trackingUrl: string;
+    company?: string | null;
+    notifyCustomer?: boolean;
+  }) {
+    const externalOrderId = clean(input.externalOrderId);
+    const trackingNumber = clean(input.trackingNumber);
+    const trackingUrl = clean(input.trackingUrl);
+
+    if (!externalOrderId) {
+      throw new ChannelGatewayError(
+        "SHOPIFY_EXTERNAL_ORDER_ID_REQUIRED",
+        "Shopify external order id is required.",
+        409,
+      );
+    }
+
+    if (!trackingNumber || !trackingUrl) {
+      throw new ChannelGatewayError(
+        "SHOPIFY_TRACKING_REQUIRED",
+        "Shopify fulfillment requires tracking number and URL.",
+        409,
+      );
+    }
+
+    const orderId = externalOrderId.startsWith(
+      "gid://shopify/Order/",
+    )
+      ? externalOrderId
+      : `gid://shopify/Order/${externalOrderId}`;
+
+    const companySource =
+      clean(input.company) || "Geliver";
+
+    const company =
+      companySource.toUpperCase() === "GELIVER"
+        ? "Geliver"
+        : companySource;
+
+    const check = await this.graphql<any>(
+      `
+        query ShopifyFulfillmentCheck($id: ID!) {
+          order(id: $id) {
+            id
+            name
+            displayFulfillmentStatus
+
+            fulfillmentOrders(first: 20) {
+              nodes {
+                id
+                status
+                requestStatus
+              }
+            }
+
+            fulfillments(first: 20) {
+              id
+              status
+              trackingInfo(first: 20) {
+                company
+                number
+                url
+              }
+            }
+          }
+        }
+      `,
+      { id: orderId },
+    );
+
+    if (!check.order) {
+      throw new ChannelGatewayError(
+        "SHOPIFY_ORDER_NOT_FOUND",
+        `Shopify order ${externalOrderId} was not found.`,
+        404,
+      );
+    }
+
+    const existingFulfillment =
+      (check.order.fulfillments || []).find(
+        (fulfillment: any) =>
+          (fulfillment.trackingInfo || []).some(
+            (tracking: any) =>
+              clean(tracking.number) === trackingNumber
+              && clean(tracking.url) === trackingUrl,
+          ),
+      );
+
+    if (existingFulfillment) {
+      return {
+        state: "SUCCEEDED",
+        replayed: true,
+        fulfillmentId: existingFulfillment.id,
+        status: existingFulfillment.status,
+        tracking: {
+          company,
+          number: trackingNumber,
+          url: trackingUrl,
+        },
+      };
+    }
+
+    const fulfillmentOrder =
+      (check.order.fulfillmentOrders?.nodes || [])
+        .find(
+          (candidate: any) =>
+            clean(candidate.status).toUpperCase()
+              === "OPEN",
+        );
+
+    if (!fulfillmentOrder) {
+      throw new ChannelGatewayError(
+        "SHOPIFY_FULFILLMENT_ORDER_NOT_OPEN",
+        `Shopify order ${externalOrderId} has no open fulfillment order.`,
+        409,
+      );
+    }
+
+    const result = await this.graphql<any>(
+      `
+        mutation ShopifyFulfillmentCreate(
+          $fulfillment: FulfillmentInput!
+        ) {
+          fulfillmentCreate(
+            fulfillment: $fulfillment
+          ) {
+            fulfillment {
+              id
+              status
+              trackingInfo(first: 20) {
+                company
+                number
+                url
+              }
+            }
+
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `,
+      {
+        fulfillment: {
+          lineItemsByFulfillmentOrder: [
+            {
+              fulfillmentOrderId:
+                fulfillmentOrder.id,
+            },
+          ],
+          notifyCustomer:
+            input.notifyCustomer === true,
+          trackingInfo: {
+            company,
+            number: trackingNumber,
+            url: trackingUrl,
+          },
+        },
+      },
+    );
+
+    const userErrors =
+      result.fulfillmentCreate?.userErrors || [];
+
+    if (userErrors.length > 0) {
+      throw new ChannelGatewayError(
+        "SHOPIFY_FULFILLMENT_CREATE_REJECTED",
+        userErrors
+          .map(
+            (error: any) =>
+              clean(error.message)
+              || "Unknown fulfillment error",
+          )
+          .join("; "),
+        409,
+      );
+    }
+
+    const fulfillment =
+      result.fulfillmentCreate?.fulfillment;
+
+    if (!fulfillment?.id) {
+      throw new ChannelGatewayError(
+        "SHOPIFY_FULFILLMENT_RESPONSE_INVALID",
+        "Shopify fulfillmentCreate returned no fulfillment.",
+        502,
+      );
+    }
+
+    return {
+      state: "SUCCEEDED",
+      replayed: false,
+      fulfillmentId: fulfillment.id,
+      status: fulfillment.status,
+      tracking: {
+        company,
+        number: trackingNumber,
+        url: trackingUrl,
+      },
+    };
+  }
+
+
   async poll(input: {
     gateway: ChannelGatewayService;
     accountId: string;

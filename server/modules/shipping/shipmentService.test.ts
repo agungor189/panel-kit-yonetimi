@@ -82,7 +82,7 @@ const marketplaceRecipient = {
   zip: "34710",
 };
 
-const setup = () => {
+const setup = (recipientFixture = marketplaceRecipient) => {
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
   initializeDatabase(db);
@@ -108,7 +108,7 @@ const setup = () => {
   db.prepare(`INSERT INTO channel_inbound_events
     (id,account_id,external_event_id,external_event_version,ingestion_path,event_type,raw_payload_json,raw_payload_digest,
      received_at,processing_state,sale_id) VALUES ('channel-event','channel-account','event','1','POLL','ORDER_UPSERT',?,?,
-     '2026-09-23T09:00:00.000Z','ACCEPTED','sale')`).run(JSON.stringify({ recipient: marketplaceRecipient }), "c".repeat(64));
+     '2026-09-23T09:00:00.000Z','ACCEPTED','sale')`).run(JSON.stringify({ recipient: recipientFixture }), "c".repeat(64));
   db.prepare(`INSERT INTO channel_orders
     (id,account_id,external_order_id,latest_external_version,currency,actual_discount_minor,order_state,sale_id,reservation_id,
      first_event_id,raw_order_digest) VALUES ('channel-order','channel-account','external-order','1','TRY',0,'ACCEPTED','sale',
@@ -307,8 +307,8 @@ test("tracking absent at dispatch blocks without mutation; later Geliver refresh
   db.close();
 });
 
-test("unverified Hepsiburada, N11, and Shopify shipment adapters cannot publish", async () => {
-  for (const channel of ["HEPSIBURADA", "N11", "SHOPIFY"] as const) {
+test("unverified Hepsiburada and N11 shipment adapters cannot publish", async () => {
+  for (const channel of ["HEPSIBURADA", "N11"] as const) {
     const { db } = setup();
     const shipping = new ShipmentService(db);
     const shipment = shipping.packAndPrepare({ reservationId: "reservation", operationId: `disabled-pack-${channel}`, actor }).shipment;
@@ -342,6 +342,147 @@ test("unverified Hepsiburada, N11, and Shopify shipment adapters cannot publish"
     assert.equal(db.prepare("SELECT COUNT(*) FROM channel_shipment_outbound_attempts").pluck().get(), 0);
     db.close();
   }
+});
+
+test("Shopify shipment outbound is claimable and publishes tracking without marketplace package mapping", async () => {
+  const { db } = setup();
+
+  db.prepare(`
+    UPDATE channel_accounts
+    SET channel='SHOPIFY'
+    WHERE id='channel-account'
+  `).run();
+
+  const shipping = new ShipmentService(db);
+
+  const shipment = shipping.packAndPrepare({
+    reservationId: "reservation",
+    operationId: "shopify-pack",
+    actor,
+  }).shipment;
+
+  shipping.definePackages({
+    shipmentId: shipment.id,
+    operationId: "shopify-packages",
+    actor,
+    packages: [{
+      packageNumber: 1,
+      measured: {
+        lengthMm: 300,
+        widthMm: 200,
+        heightMm: 100,
+        weightGrams: 1200,
+      },
+      contents: [{
+        productId: "part",
+        quantityBaseInt: 2,
+      }],
+    }],
+  });
+
+  shipping.selectCarrier({
+    shipmentId: shipment.id,
+    provider: "GELIVER",
+    carrierCode: "GELIVER",
+    serviceCode: "STANDARD",
+    quote: {
+      quoteId: "shopify-q",
+      amountMinor: 0,
+      currency: "TRY",
+      provenance: {
+        source: "fixture",
+      },
+    },
+    operationId: "shopify-carrier",
+    actor,
+  });
+
+  const transport =
+    new VerifiedFakeGeliverTransport();
+
+  const booking = shipping.requestBooking({
+    shipmentId: shipment.id,
+    operationId: "shopify-book",
+    actor,
+  });
+
+  for (const job of booking.jobs) {
+    shipping.processBookingJob({
+      jobId: job.id,
+      transport,
+      serviceActorId: "geliver-worker",
+    });
+  }
+
+  shipping.confirmHandoff({
+    shipmentId: shipment.id,
+    handedOffAt:
+      "2026-09-23T16:00:00.000Z",
+    handoffEvidence: {
+      test: true,
+    },
+    operationId: "shopify-handoff",
+    actor,
+  });
+
+  const gateway = new ChannelGatewayService(db);
+
+  const claimed =
+    gateway.claimReadyOutboundJobs({
+      accountId: "channel-account",
+      limit: 10,
+      leaseSeconds: 30,
+      operationId: "shopify-claim",
+      serviceActorId: "shopify-worker",
+      claimedAt:
+        "2026-09-23T16:00:01.000Z",
+    }) as any[];
+
+  assert.equal(claimed.length, 1);
+  assert.equal(claimed[0].channel, "SHOPIFY");
+  assert.equal(claimed[0].outboundType, "SHIPMENT");
+
+  let published: any = null;
+
+  await gateway.processClaimedOutboundJob({
+    jobId: claimed[0].id,
+    leaseToken: claimed[0].leaseToken,
+    operationId: "shopify-process",
+    serviceActorId: "shopify-worker",
+    occurredAt:
+      "2026-09-23T16:00:02.000Z",
+    publish: async (job) => {
+      published = job;
+      return {
+        state: "SUCCEEDED",
+      };
+    },
+  });
+
+  assert.equal(
+    published.externalOrderId,
+    "external-order",
+  );
+
+  assert.equal(
+    published.trackingNumber,
+    "TRACK-1",
+  );
+
+  assert.equal(
+    published.trackingUrl,
+    "https://tracking.invalid/1",
+  );
+
+  assert.equal(
+    db.prepare(`
+      SELECT state
+      FROM channel_shipment_outbound_jobs
+    `).pluck().get(),
+    "SUCCEEDED",
+  );
+
+  db.close();
 });
 
 test("COD is rejected", () => {
@@ -426,8 +567,8 @@ class OfficialGeliverFixture implements GeliverTransport {
   publishTracking(id: string) { const shipment = this.shipments.get(id)!; shipment.trackingNumber = "TRACK-LATER"; shipment.trackingUrl = "https://track.geliver.test/TRACK-LATER"; }
 }
 
-const prepareLiveGeliver = () => {
-  const fixture = setup();
+const prepareLiveGeliver = (recipientFixture = marketplaceRecipient) => {
+  const fixture = setup(recipientFixture);
   const shipping = new ShipmentService(fixture.db);
   const shipment = shipping.packAndPrepare({ reservationId: "reservation", operationId: "live-pack", actor }).shipment;
   shipping.definePackages({ shipmentId: shipment.id, operationId: "live-packages", actor, packages: [{ packageNumber: 1,
@@ -437,6 +578,31 @@ const prepareLiveGeliver = () => {
   const geliver = new GeliverFlowService(fixture.db, transport, { senderAddressId: "sender-address", sourceIdentifier: "https://dsdst.example" });
   return { ...fixture, shipping, shipment, transport, geliver };
 };
+
+test("Geliver infers missing Turkish Shopify district from address1 and verifies it against provider geo data", async () => {
+  const { db, shipment, geliver } = prepareLiveGeliver({
+    ...marketplaceRecipient,
+    address1: "Ümraniye, Test Sokak 1",
+    phone: "5325401212",
+    cityName: "İstanbul",
+    countryCode: "TR",
+    districtName: "",
+    cityCode: "",
+    districtID: null,
+  });
+
+  const resolvedRecipient = await geliver.resolveRecipient({
+    shipmentId: shipment.id,
+  });
+
+  assert.equal(resolvedRecipient.phone, "+905325401212");
+  assert.equal(resolvedRecipient.cityName, "İstanbul");
+  assert.equal(resolvedRecipient.cityCode, "34");
+  assert.equal(resolvedRecipient.districtName, "Ümraniye");
+  assert.equal(resolvedRecipient.districtID, 108631);
+
+  db.close();
+});
 
 test("Geliver automatically resolves marketplace recipient against provider geo data", async () => {
   const { db, shipment, geliver } = prepareLiveGeliver();

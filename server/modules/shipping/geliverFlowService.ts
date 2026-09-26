@@ -51,6 +51,39 @@ const optionalInteger = (value: unknown, field: string): number | undefined => {
   }
   return result;
 };
+const normalizeRecipientPhone = (
+  value: unknown,
+  countryCode: string,
+) => {
+  const raw = required(value, "recipient.phone", 50);
+
+  if (countryCode !== "TR") return raw;
+
+  let digits = raw.replace(/\D/g, "");
+
+  if (digits.startsWith("0090")) {
+    digits = digits.slice(2);
+  }
+
+  if (digits.startsWith("90") && digits.length === 12) {
+    return `+${digits}`;
+  }
+
+  if (digits.startsWith("0") && digits.length === 11) {
+    return `+90${digits.slice(1)}`;
+  }
+
+  if (digits.length === 10) {
+    return `+90${digits}`;
+  }
+
+  throw new ShipmentValidationError(
+    "RECIPIENT_PHONE_INVALID",
+    "Turkish recipient phone must resolve to +90XXXXXXXXXX format.",
+    409,
+  );
+};
+
 const at = () => new Date().toISOString();
 const money = (minor: number) => `${Math.floor(minor / 100)}.${String(minor % 100).padStart(2, "0")}`;
 
@@ -251,7 +284,10 @@ export class GeliverFlowService {
     return {
       name: required(source.name, "recipient.name", 200),
       email: required(source.email, "recipient.email", 320),
-      phone: required(source.phone, "recipient.phone", 50),
+      phone: normalizeRecipientPhone(
+        source.phone,
+        countryCode,
+      ),
       address1: required(source.address1, "recipient.address1", 500),
       address2: optional(source.address2, "recipient.address2", 500),
       countryCode,
@@ -666,6 +702,36 @@ export class GeliverFlowService {
       recipient = null;
     }
 
+    const countryCode = String(
+      recipient?.countryCode ?? "",
+    ).trim().toUpperCase();
+
+    const explicitDistrict = String(
+      recipient?.districtName ?? "",
+    ).trim();
+
+    // Shopify MailingAddress does not provide a dedicated Turkish
+    // district field. For TR orders only, use the first address1
+    // segment as a district candidate when districtName is missing.
+    // resolveRecipient() still verifies this candidate against
+    // Geliver's provider-native district list before shipment creation.
+    const address1 = String(
+      recipient?.address1 ?? "",
+    ).trim();
+
+    const inferredDistrict =
+      !explicitDistrict
+      && countryCode === "TR"
+        ? String(address1.split(",")[0] ?? "").trim()
+        : explicitDistrict;
+
+    const normalizedRecipient = {
+      ...recipient,
+      countryCode,
+      address1,
+      districtName: inferredDistrict,
+    };
+
     const requiredFields = [
       "name",
       "email",
@@ -677,7 +743,7 @@ export class GeliverFlowService {
     ];
 
     const missing = requiredFields.filter((field) =>
-      !String(recipient?.[field] ?? "").trim()
+      !String(normalizedRecipient?.[field] ?? "").trim()
     );
 
     if (missing.length > 0) {
@@ -689,17 +755,21 @@ export class GeliverFlowService {
     }
 
     return {
-      name: String(recipient.name).trim(),
-      email: String(recipient.email).trim(),
-      phone: String(recipient.phone).trim(),
-      address1: String(recipient.address1).trim(),
-      address2: recipient.address2 ? String(recipient.address2).trim() : null,
-      countryCode: String(recipient.countryCode).trim(),
-      cityName: String(recipient.cityName).trim(),
-      cityCode: String(recipient.cityCode).trim(),
-      districtName: String(recipient.districtName).trim(),
-      districtID: recipient.districtID ?? null,
-      zip: recipient.zip ? String(recipient.zip).trim() : null,
+      name: String(normalizedRecipient.name).trim(),
+      email: String(normalizedRecipient.email).trim(),
+      phone: String(normalizedRecipient.phone).trim(),
+      address1: String(normalizedRecipient.address1).trim(),
+      address2: normalizedRecipient.address2
+        ? String(normalizedRecipient.address2).trim()
+        : null,
+      countryCode: String(normalizedRecipient.countryCode).trim(),
+      cityName: String(normalizedRecipient.cityName).trim(),
+      cityCode: String(normalizedRecipient.cityCode ?? "").trim(),
+      districtName: String(normalizedRecipient.districtName).trim(),
+      districtID: normalizedRecipient.districtID ?? null,
+      zip: normalizedRecipient.zip
+        ? String(normalizedRecipient.zip).trim()
+        : null,
     };
   }
 

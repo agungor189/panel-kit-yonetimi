@@ -5714,7 +5714,74 @@ async function startServer() {
         UNION ALL SELECT account_id FROM channel_shipment_outbound_jobs WHERE id=? LIMIT 1)`)
         .get(req.params.id, req.params.id) as any;
       if (!account) throw new ChannelGatewayError("OUTBOUND_JOB_NOT_FOUND", "Outbound job was not found.", 404);
-      if (account.channel !== "TRENDYOL") throw new ChannelGatewayError("ADAPTER_TRANSPORT_DISABLED", "The channel adapter transport is disabled.", 409);
+
+      if (account.channel === "SHOPIFY") {
+        const isShipmentJob = Boolean(db.prepare(
+          "SELECT 1 FROM channel_shipment_outbound_jobs WHERE id=?"
+        ).get(req.params.id));
+
+        if (!isShipmentJob) {
+          throw new ChannelGatewayError(
+            "SHOPIFY_PRODUCT_WRITE_DISABLED",
+            "Shopify product/stock outbound writes are not enabled in V19.",
+            409,
+          );
+        }
+
+        const writeEnabled =
+          String(process.env.SHOPIFY_WRITE_ENABLED || "false")
+            .trim()
+            .toLowerCase() === "true";
+
+        if (!writeEnabled) {
+          throw new ChannelGatewayError(
+            "SHOPIFY_WRITE_DISABLED",
+            "SHOPIFY_WRITE_ENABLED is false.",
+            409,
+          );
+        }
+
+        const transport =
+          ShopifyGatewayTransport.fromEnvironment();
+
+        await transport.verifyConnection();
+
+        const outcome =
+          await channelGateway.processClaimedOutboundJob({
+            jobId: req.params.id,
+            leaseToken:
+              String(req.body.leaseToken || ""),
+            operationId,
+            serviceActorId:
+              `panel-api:${req.panelApiKey!.id}`,
+            occurredAt:
+              req.body.occurredAt
+              || new Date().toISOString(),
+            publish: (job) =>
+              transport.publishShipmentTracking({
+                externalOrderId:
+                  job.externalOrderId,
+                trackingNumber:
+                  job.trackingNumber,
+                trackingUrl:
+                  job.trackingUrl,
+                company:
+                  job.company,
+                notifyCustomer: false,
+              }),
+          });
+
+        return res.json(outcome);
+      }
+
+      if (account.channel !== "TRENDYOL") {
+        throw new ChannelGatewayError(
+          "ADAPTER_TRANSPORT_DISABLED",
+          "The channel adapter transport is disabled.",
+          409,
+        );
+      }
+
       const environment: TrendyolEnvironment = account.environment === "PRODUCTION" ? "prod" : "stage";
       const config = { ...getTrendyolConfig(), environment };
       const credentials = getTrendyolCredentials(config);
@@ -6377,6 +6444,11 @@ async function startServer() {
       .trim()
       .toLowerCase() === "true";
 
+  const shopifyWriteEnabled =
+    String(process.env.SHOPIFY_WRITE_ENABLED || "false")
+      .trim()
+      .toLowerCase() === "true";
+
   const parsedShopifyPollInterval =
     Number(process.env.SHOPIFY_POLL_INTERVAL_SECONDS || 60);
 
@@ -6475,6 +6547,66 @@ async function startServer() {
           maxPages: shopifyPollMaxPages,
         });
 
+      if (shopifyWriteEnabled) {
+        const jobs =
+          channelGateway.claimReadyOutboundJobs({
+            accountId: account.id,
+            limit: 10,
+            leaseSeconds: 60,
+            operationId:
+              `shopify-fulfillment-claim:${receivedAt}`,
+            serviceActorId:
+              `shopify-fulfillment-worker:${account.id}`,
+            claimedAt: receivedAt,
+          }) as any[];
+
+        for (const job of jobs) {
+          if (job.outboundType !== "SHIPMENT") {
+            continue;
+          }
+
+          try {
+            await channelGateway.processClaimedOutboundJob({
+              jobId: job.id,
+              leaseToken: job.leaseToken,
+              operationId:
+                `shopify-fulfillment-publish:${job.id}:${receivedAt}`,
+              serviceActorId:
+                `shopify-fulfillment-worker:${account.id}`,
+              occurredAt: receivedAt,
+              publish: (publishJob) =>
+                shopifyScheduledTransport!
+                  .publishShipmentTracking({
+                    externalOrderId:
+                      publishJob.externalOrderId,
+                    trackingNumber:
+                      publishJob.trackingNumber,
+                    trackingUrl:
+                      publishJob.trackingUrl,
+                    company:
+                      publishJob.company,
+                    notifyCustomer: false,
+                  }),
+            });
+
+            AppLogger.info(
+              "SHOPIFY_FULFILLMENT",
+              "Shopify fulfillment tracking published.",
+              {
+                jobId: job.id,
+                shipmentId: job.shipmentId,
+              },
+            );
+          } catch (error: any) {
+            AppLogger.error(
+              "SHOPIFY_FULFILLMENT",
+              `Shopify fulfillment publish failed (${String(error?.code || "UNKNOWN")}).`,
+              error,
+            );
+          }
+        }
+      }
+
       db.prepare(`
         UPDATE channel_accounts
         SET state='CONNECTED',
@@ -6559,10 +6691,7 @@ async function startServer() {
         maxPages:
           shopifyPollMaxPages,
         writeEnabled:
-          String(
-            process.env.SHOPIFY_WRITE_ENABLED
-              || "false",
-          ).toLowerCase() === "true",
+          shopifyWriteEnabled,
       },
     );
 
