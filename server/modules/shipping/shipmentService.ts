@@ -499,6 +499,92 @@ export class ShipmentService {
     return this.notificationPolicy(sourceChannel);
   }
 
+  listShipments(input: { scope?: string; query?: string; limit?: number } = {}) {
+    const scope = String(input.scope || "pending").trim().toLowerCase();
+    if (!["pending", "completed", "all"].includes(scope)) {
+      throw new ShipmentValidationError("SHIPMENT_VALIDATION_FAILED", "scope must be pending, completed or all.");
+    }
+
+    const query = String(input.query || "").trim();
+    const limit = Number.isSafeInteger(input.limit) && Number(input.limit) > 0
+      ? Math.min(Number(input.limit), 500)
+      : 200;
+
+    const where: string[] = [];
+    const params: unknown[] = [];
+
+    if (scope === "pending") {
+      where.push(`s.state IN ('PREPARING','CARRIER_SELECTED','BOOKED','LABEL_READY','HANDED_OFF','EXCEPTION')`);
+    } else if (scope === "completed") {
+      where.push(`s.state IN ('DISPATCHED','CANCELLED')`);
+    }
+
+    if (query) {
+      const like = `%${query}%`;
+      where.push(`(
+        s.id LIKE ?
+        OR o.order_code LIKE ?
+        OR COALESCE(o.customer_name,'') LIKE ?
+        OR COALESCE(o.platform,'') LIKE ?
+      )`);
+      params.push(like, like, like, like);
+    }
+
+    params.push(limit);
+
+    const rows = this.db.prepare(`
+      SELECT
+        s.id,
+        s.order_id,
+        s.reservation_id,
+        s.state,
+        s.package_count,
+        s.created_at,
+        s.updated_at,
+        o.order_code,
+        COALESCE(o.platform,'DIRECT') AS source_channel,
+        COALESCE(
+          NULLIF((SELECT r.name
+            FROM shipment_recipient_snapshots r
+            WHERE r.shipment_id=s.id
+            LIMIT 1),''),
+          NULLIF(o.customer_name,''),
+          ''
+        ) AS customer_name
+      FROM shipment_preparations s
+      JOIN sales o ON o.id=s.order_id
+      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+      ORDER BY
+        CASE s.state
+          WHEN 'EXCEPTION' THEN 0
+          WHEN 'LABEL_READY' THEN 1
+          WHEN 'BOOKED' THEN 2
+          WHEN 'CARRIER_SELECTED' THEN 3
+          WHEN 'PREPARING' THEN 4
+          WHEN 'HANDED_OFF' THEN 5
+          WHEN 'DISPATCHED' THEN 6
+          WHEN 'CANCELLED' THEN 7
+          ELSE 8
+        END,
+        datetime(s.updated_at) DESC,
+        s.id DESC
+      LIMIT ?
+    `).all(...params) as any[];
+
+    return rows.map((row) => ({
+      id: row.id,
+      orderId: row.order_id,
+      orderNumber: row.order_code,
+      sourceChannel: row.source_channel,
+      reservationId: row.reservation_id,
+      state: row.state as ShipmentState,
+      packageCount: Number(row.package_count),
+      customerName: row.customer_name || null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
   getShipment(shipmentIdValue: string): any {
     const shipmentId = text(shipmentIdValue, "shipmentId");
     const row = this.db.prepare(`SELECT s.*,o.order_code,o.platform FROM shipment_preparations s

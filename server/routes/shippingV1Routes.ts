@@ -53,6 +53,24 @@ export function createShippingV1Router(dependencies: Dependencies) {
 
   router.get("/provider-contracts/geliver", dependencies.authorizeRead, (_req, res) =>
     res.json({ success: true, contract: "dsdst.carrier-provider-contract.v2", data: geliver.contract() }));
+
+  router.get("/shipments", dependencies.authorizeRead, (req, res) => {
+    try {
+      const data = service.listShipments({
+        scope: String(req.query.scope || "pending"),
+        query: String(req.query.q || ""),
+        limit: req.query.limit ? Number(req.query.limit) : 200,
+      });
+      return res.json({
+        success: true,
+        contract: "dsdst.shipment-list.v1",
+        data,
+      });
+    } catch (error) {
+      return sendError(error, res);
+    }
+  });
+
   router.get("/shipments/:id", dependencies.authorizeRead, (req, res) => {
     try { return res.json({ success: true, contract: "dsdst.shipment.v1", data: service.getShipment(req.params.id) }); }
     catch (error) { return sendError(error, res); }
