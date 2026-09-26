@@ -6,6 +6,7 @@ import { NOTIFICATION_PREFERENCES_SCHEMA_V89 } from '../../db/notificationPrefer
 import { NOTIFICATION_TEMPLATES_SCHEMA_V90 } from '../../db/notificationTemplatesSchema.js';
 import { PUSH_SUBSCRIPTIONS_SCHEMA_V88 } from '../../db/pushSubscriptionsSchema.js';
 import { PUSH_NOTIFICATION_DISPATCH_SCHEMA_V91 } from '../../db/pushNotificationDispatchSchema.js';
+import { PUSH_NOTIFICATION_DISPATCH_CATEGORIES_SCHEMA_V92 } from '../../db/pushNotificationDispatchCategoriesSchema.js';
 import { PushOwnershipError, PushUnavailableError, createPushNotificationService } from './pushNotificationService.js';
 
 const subscription = (endpoint = 'https://push.example.test/device-1') => ({
@@ -22,6 +23,7 @@ function createDb() {
   db.exec(NOTIFICATION_PREFERENCES_SCHEMA_V89);
   db.exec(NOTIFICATION_TEMPLATES_SCHEMA_V90);
   db.exec(PUSH_NOTIFICATION_DISPATCH_SCHEMA_V91);
+  db.exec(PUSH_NOTIFICATION_DISPATCH_CATEGORIES_SCHEMA_V92);
   return db;
 }
 
@@ -321,5 +323,51 @@ test('operational push removes expired subscriptions after 404 or 410', async ()
   });
   assert.equal(result.expired, 1);
   assert.equal(db.prepare('SELECT COUNT(*) FROM push_subscriptions').pluck().get(), 0);
+  db.close();
+});
+
+test('new operational categories use per-user preferences', async () => {
+  const db = createDb();
+  const payloads: any[] = [];
+  const service = createPushNotificationService({
+    db,
+    env: configuredEnv(),
+    transport: {
+      setVapidDetails() {},
+      async sendNotification(_target, payload) { payloads.push(JSON.parse(payload)); },
+    },
+  });
+  service.subscribe('user-1', subscription());
+  service.updatePreferences('user-1', {
+    new_order: true,
+    order_cancel_return: false,
+    shipping_exception: true,
+    stock_exception: true,
+    goods_receipt_exception: true,
+    reconciliation_exception: true,
+    integration_exception: true,
+    backup_exception: true,
+  });
+
+  const cancelled = await service.sendOperational({
+    category: 'order_cancel_return',
+    variables: { order_number: 'O-1', action: 'İptal' },
+    targetUrl: '/sales?order=sale-1',
+    tag: 'order-transition-sale-1',
+    dedupeKey: 'channel.order.cancelled.v1:sale-1',
+  });
+  assert.equal(cancelled.sent, 0);
+  assert.equal(cancelled.skipped, 1);
+
+  const stock = await service.sendOperational({
+    category: 'stock_exception',
+    variables: { sku: 'SKU-1', message: 'Sipariş rezervasyonu oluşturulamadı' },
+    targetUrl: '/products/product-1',
+    tag: 'stock-exception-1',
+    dedupeKey: 'stock_exception:order-1:product-1',
+  });
+  assert.equal(stock.sent, 1);
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].title, 'Stok Uyarısı');
   db.close();
 });

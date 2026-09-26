@@ -161,6 +161,8 @@ const pushNotificationService = createPushNotificationService({ db, transport: w
 const operationalPushNotifications = createOperationalPushNotifications(db, pushNotificationService);
 const channelGateway = new ChannelGatewayService(db, {
   onOrderAccepted: operationalPushNotifications.orderAccepted,
+  onOrderTransition: operationalPushNotifications.orderCancelReturn,
+  onStockException: operationalPushNotifications.stockException,
 });
 const {
   getProductBomComponents,

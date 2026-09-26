@@ -23,7 +23,7 @@ export type PushSubscriptionInput = {
 export type NotificationPreferences = Record<NotificationCategory, boolean>;
 
 export type OperationalNotificationInput = {
-  category: 'new_order' | 'shipping_exception';
+  category: 'new_order' | 'order_cancel_return' | 'shipping_exception' | 'stock_exception';
   variables: Record<string, unknown>;
   targetUrl: string;
   tag: string;
@@ -127,7 +127,9 @@ function validateTemplate(category: NotificationCategory, input: NotificationTem
 const hashEndpoint = (endpoint: string) => createHash('sha256').update(endpoint).digest('hex');
 const operationalPreferenceColumns = {
   new_order: 'new_order',
+  order_cancel_return: 'order_cancel_return',
   shipping_exception: 'shipping_exception',
+  stock_exception: 'stock_exception',
 } as const;
 
 function operationalText(value: unknown, field: string, maxLength: number): string {
@@ -458,7 +460,7 @@ export function createPushNotificationService({
         await transport.sendNotification(
           { endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth } },
           payload,
-          { TTL: 300, urgency: category === 'shipping_exception' ? 'high' : 'normal', topic },
+          { TTL: 300, urgency: category === 'shipping_exception' || category === 'stock_exception' ? 'high' : 'normal', topic },
         );
         db.prepare(`
           UPDATE push_subscriptions

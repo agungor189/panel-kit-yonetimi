@@ -126,25 +126,53 @@ type InboundEvent = {
   receivedAt: string;
 };
 
+type OrderAcceptedPushEvent = {
+  eventType: "channel.order.accepted.v1";
+  saleId: string;
+  channelOrderId: string;
+};
+
+type OrderTransitionPushEvent = {
+  eventType: "channel.order.cancelled.v1" | "channel.return.requested.v1";
+  saleId: string;
+  channelOrderId: string;
+};
+
+type StockExceptionPushEvent = {
+  exceptionType: "STOCK_EXCEPTION";
+  exceptionId: string;
+  channelOrderId: string;
+  productId: string;
+};
+
+type ChannelGatewayOptions = {
+  onOrderAccepted?: (event: OrderAcceptedPushEvent) => void | Promise<unknown>;
+  onOrderTransition?: (event: OrderTransitionPushEvent) => void | Promise<unknown>;
+  onStockException?: (event: StockExceptionPushEvent) => void | Promise<unknown>;
+};
+
 export class ChannelGatewayService {
   private readonly commands: CommandExecutor;
   private readonly sales: MarketplaceSaleAcceptanceService;
-  private readonly onOrderAccepted?: (event: {
-    eventType: "channel.order.accepted.v1";
-    saleId: string;
-    channelOrderId: string;
-  }) => void | Promise<unknown>;
+  private readonly onOrderAccepted?: ChannelGatewayOptions["onOrderAccepted"];
+  private readonly onOrderTransition?: ChannelGatewayOptions["onOrderTransition"];
+  private readonly onStockException?: ChannelGatewayOptions["onStockException"];
 
-  constructor(private readonly db: Database.Database, options: {
-    onOrderAccepted?: (event: {
-      eventType: "channel.order.accepted.v1";
-      saleId: string;
-      channelOrderId: string;
-    }) => void | Promise<unknown>;
-  } = {}) {
+  constructor(private readonly db: Database.Database, options: ChannelGatewayOptions = {}) {
     this.commands = new CommandExecutor(db);
     this.sales = new MarketplaceSaleAcceptanceService(db);
     this.onOrderAccepted = options.onOrderAccepted;
+    this.onOrderTransition = options.onOrderTransition;
+    this.onStockException = options.onStockException;
+  }
+
+  private runPostCommitSideEffect<T>(callback: ((event: T) => void | Promise<unknown>) | undefined, event: T) {
+    if (!callback) return;
+    try {
+      void Promise.resolve(callback(event)).catch(() => undefined);
+    } catch {
+      // Notification delivery is best-effort and cannot affect the committed command.
+    }
   }
 
   configureAccount(input: { id: string; channel: ChannelCode; merchantAccountId: string; environment: "STAGE" | "PRODUCTION"; secretReference?: string | null; config?: unknown; operationId: string; actor: Actor }) {
@@ -216,6 +244,8 @@ export class ChannelGatewayService {
   ingest(event: InboundEvent, operationId: string, serviceActorId: string) {
     const sanitized = redactProviderPayload(event.rawPayload);
     const payloadDigest = digest(sanitized);
+    let orderTransitionPush: OrderTransitionPushEvent | null = null;
+    let stockExceptionPush: StockExceptionPushEvent | null = null;
     const outcome = this.commands.execute({ operationId, commandType: "channels.inbound.process.v1", payload: { ...event, rawPayload: sanitized },
       actor: { service: { id: serviceActorId } }, authorization: { decision: "ALLOW", capability: "channels:ingest" } }, (context) => {
       const account = this.db.prepare("SELECT * FROM channel_accounts WHERE id=?").get(event.accountId) as any;
@@ -265,8 +295,14 @@ export class ChannelGatewayService {
         this.db.prepare("UPDATE channel_orders SET order_state=?,latest_external_version=?,updated_at=? WHERE id=?")
           .run(transition.state, event.externalEventVersion, event.receivedAt, existingOrder.id);
         this.db.prepare("UPDATE channel_inbound_events SET processing_state='ACCEPTED',sale_id=? WHERE id=?").run(existingOrder.sale_id, eventId);
-        context.addOutbox({ topic: "channels", eventType: transition.state === "CANCELLED" ? "channel.order.cancelled.v1" : "channel.return.requested.v1",
+        const transitionEventType = transition.state === "CANCELLED" ? "channel.order.cancelled.v1" : "channel.return.requested.v1";
+        context.addOutbox({ topic: "channels", eventType: transitionEventType,
           aggregateType: "sale", aggregateId: existingOrder.sale_id, payload: { sale_id: existingOrder.sale_id, channel_order_id: existingOrder.id } });
+        orderTransitionPush = {
+          eventType: transitionEventType,
+          saleId: existingOrder.sale_id,
+          channelOrderId: existingOrder.id,
+        };
         return { statusCode: 200, body: { state: transition.state, saleId: existingOrder.sale_id, eventId } };
       }
       if (existingOrder?.sale_id) {
@@ -403,7 +439,19 @@ export class ChannelGatewayService {
         return { statusCode: 201, body: { state: "ACCEPTED", saleId: accepted.saleId, reservationId: accepted.reservationId, eventId } };
       } catch (error) {
         if (!(error instanceof InventoryValidationError) || error.code !== "INSUFFICIENT_AVAILABLE_STOCK") throw error;
-        this.insertException(event.accountId, eventId, orderId, "STOCK_EXCEPTION", { code: error.code, message: error.message });
+        const productId = String(error.details?.productId || "").trim();
+        const exceptionId = this.insertException(event.accountId, eventId, orderId, "STOCK_EXCEPTION", {
+          code: error.code,
+          message: error.message,
+          productId: productId || null,
+          sku: error.details?.sku || null,
+        });
+        if (productId) stockExceptionPush = {
+          exceptionType: "STOCK_EXCEPTION",
+          exceptionId,
+          channelOrderId: orderId,
+          productId,
+        };
         return this.markOrderException(eventId, orderId);
       }
     });
@@ -412,16 +460,18 @@ export class ChannelGatewayService {
       const channelOrderId = this.db.prepare("SELECT id FROM channel_orders WHERE sale_id=?")
         .pluck().get(body.saleId) as string | undefined;
       if (channelOrderId) {
-        try {
-          void Promise.resolve(this.onOrderAccepted({
-            eventType: "channel.order.accepted.v1",
-            saleId: body.saleId,
-            channelOrderId,
-          })).catch(() => undefined);
-        } catch {
-          // Push is a best-effort post-commit side effect and must never affect acceptance.
-        }
+        this.runPostCommitSideEffect(this.onOrderAccepted, {
+          eventType: "channel.order.accepted.v1",
+          saleId: body.saleId,
+          channelOrderId,
+        });
       }
+    }
+    if (!outcome.replayed && orderTransitionPush) {
+      this.runPostCommitSideEffect(this.onOrderTransition, orderTransitionPush);
+    }
+    if (!outcome.replayed && stockExceptionPush) {
+      this.runPostCommitSideEffect(this.onStockException, stockExceptionPush);
     }
     return outcome;
   }
@@ -446,7 +496,8 @@ export class ChannelGatewayService {
     resolvedAt: string;
     serviceActorId?: string;
   }) {
-    return this.commands.execute<any>({
+    let stockExceptionPush: StockExceptionPushEvent | null = null;
+    const outcome = this.commands.execute<any>({
       operationId: input.operationId,
       commandType: "channels.exception.resolve-reprocess.v1",
       payload: input,
@@ -530,11 +581,27 @@ export class ChannelGatewayService {
         return { statusCode: 200, body: { state: "ACCEPTED", saleId: accepted.saleId, reservationId: accepted.reservationId, replayed: false } };
       } catch (error) {
         if (!(error instanceof InventoryValidationError) || error.code !== "INSUFFICIENT_AVAILABLE_STOCK") throw error;
-        this.insertException(order.account_id, order.first_event_id, order.id, "STOCK_EXCEPTION",
-          { reprocessOperationId: input.operationId, code: error.code, message: error.message });
+        const productId = String(error.details?.productId || "").trim();
+        const exceptionId = this.insertException(order.account_id, order.first_event_id, order.id, "STOCK_EXCEPTION", {
+          reprocessOperationId: input.operationId,
+          code: error.code,
+          message: error.message,
+          productId: productId || null,
+          sku: error.details?.sku || null,
+        });
+        if (productId) stockExceptionPush = {
+          exceptionType: "STOCK_EXCEPTION",
+          exceptionId,
+          channelOrderId: order.id,
+          productId,
+        };
         return { statusCode: 202, body: { state: "EXCEPTION", saleId: null } };
       }
-    }).result.body;
+    });
+    if (!outcome.replayed && stockExceptionPush) {
+      this.runPostCommitSideEffect(this.onStockException, stockExceptionPush);
+    }
+    return outcome.result.body;
   }
 
   tryAutoRecoverExceptionOrder(input: {

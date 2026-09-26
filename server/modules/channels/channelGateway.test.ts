@@ -306,6 +306,38 @@ test("pre-dispatch cancellation releases reservation", () => {
   db.close();
 });
 
+test("canonical cancellation emits one templated push and replay stays silent", () => {
+  const pushes: any[] = [];
+  const { db, inventory } = setup();
+  const operational = createOperationalPushNotifications(db, {
+    sendOperational(input) {
+      pushes.push(input);
+      return Promise.reject(new Error("push transport failed"));
+    },
+  });
+  const gateway = new ChannelGatewayService(db, { onOrderTransition: operational.orderCancelReturn });
+  const accepted = gateway.ingest(order(), "push-cancel-base", "channel-worker");
+  const cancellation = order({
+    externalEventId: "push-cancel-event",
+    externalEventVersion: "2",
+    eventType: "ORDER_CANCELLED",
+    lines: [],
+    receivedAt: "2026-09-23T10:00:00.000Z",
+  });
+
+  assert.equal(gateway.ingest(cancellation, "push-cancel", "channel-worker").result.body.state, "CANCELLED");
+  assert.equal(inventory.getProductAvailability("part").reservedBaseInt, 0);
+  assert.equal(pushes.length, 1);
+  assert.equal(pushes[0].category, "order_cancel_return");
+  assert.deepEqual(pushes[0].variables, { order_number: "order-1", action: "İptal" });
+  assert.equal(pushes[0].targetUrl, `/sales?order=${encodeURIComponent((accepted.result.body as any).saleId)}`);
+
+  gateway.ingest(cancellation, "push-cancel", "channel-worker");
+  gateway.ingest(cancellation, "push-cancel-duplicate", "channel-worker");
+  assert.equal(pushes.length, 1);
+  db.close();
+});
+
 test("channel kit order reserves the exact published V2-11 version and components", () => {
   const { db, gateway } = setup(5);
   const versionRef = String(db.prepare("SELECT catalog_version_ref FROM products WHERE id='part'").pluck().get());
@@ -356,6 +388,66 @@ test("post-dispatch channel return opens V2-10 workflow without direct restock o
   assert.equal(db.prepare("SELECT COUNT(*) FROM return_receipts").pluck().get(), 0);
   assert.equal(db.prepare("SELECT COUNT(*) FROM refund_payments").pluck().get(), 0);
   assert.deepEqual(inventory.getProductAvailability("part"), before);
+  db.close();
+});
+
+test("canonical return request emits one push and replay stays silent", () => {
+  const pushes: any[] = [];
+  const { db, inventory } = setup();
+  const operational = createOperationalPushNotifications(db, {
+    sendOperational(input) {
+      pushes.push(input);
+      return Promise.resolve({ sent: 1, expired: 0, failed: 0, skipped: 0, duplicate: false, unavailable: false });
+    },
+  });
+  const gateway = new ChannelGatewayService(db, { onOrderTransition: operational.orderCancelReturn });
+  const accepted = gateway.ingest(order({
+    lines: [{ externalLineId: "line-1", externalListingId: "listing-part", quantityBaseInt: 1,
+      actualUnitGrossMinor: 125_000, vatRateBps: 2_000 }],
+  }), "push-return-base", "channel-worker");
+  const saleId = (accepted.result.body as any).saleId;
+  const reservationId = (accepted.result.body as any).reservationId;
+  inventory.markPicked({ reservationId, operationId: "push-return-pick" });
+  inventory.markPacked({ reservationId, operationId: "push-return-pack" });
+  inventory.dispatchReservation({ reservationId, shipmentId: "push-return-shipment", dispatchedAt: "2026-09-23T10:00:00.000Z", operationId: "push-return-dispatch" });
+  new SalesFinancialService(db).finalizeDispatch({ reservationId, operationId: "push-return-dispatch", actor: { id: "warehouse" }, finalizedAt: "2026-09-23T10:00:00.000Z" });
+  const returnEvent = order({ externalEventId: "push-return-event", externalEventVersion: "2", eventType: "ORDER_RETURNED",
+    lines: [], receivedAt: "2026-09-23T11:00:00.000Z" });
+
+  assert.equal(gateway.ingest(returnEvent, "push-return", "channel-worker").result.body.state, "RETURN_REQUESTED");
+  assert.equal(pushes.length, 1);
+  assert.equal(pushes[0].category, "order_cancel_return");
+  assert.deepEqual(pushes[0].variables, { order_number: "order-1", action: "İade" });
+  assert.equal(pushes[0].targetUrl, `/sales?order=${encodeURIComponent(saleId)}`);
+  gateway.ingest(returnEvent, "push-return", "channel-worker");
+  assert.equal(pushes.length, 1);
+  db.close();
+});
+
+test("reservation stock failure emits stock exception without changing core outcome", () => {
+  const pushes: any[] = [];
+  const { db } = setup(1);
+  const operational = createOperationalPushNotifications(db, {
+    sendOperational(input) {
+      pushes.push(input);
+      return Promise.reject(new Error("push transport failed"));
+    },
+  });
+  const gateway = new ChannelGatewayService(db, { onStockException: operational.stockException });
+  const shortage = gateway.ingest(order(), "push-stock-shortage", "channel-worker");
+
+  assert.equal(shortage.result.body.state, "EXCEPTION");
+  assert.equal(db.prepare("SELECT COUNT(*) FROM sales").pluck().get(), 0);
+  assert.equal(pushes.length, 1);
+  assert.equal(pushes[0].category, "stock_exception");
+  assert.deepEqual(pushes[0].variables, {
+    sku: "PART-1",
+    message: "Sipariş rezervasyonu oluşturulamadı",
+  });
+  assert.equal(pushes[0].targetUrl, "/products/part");
+
+  gateway.ingest(order(), "push-stock-shortage", "channel-worker");
+  assert.equal(pushes.length, 1);
   db.close();
 });
 
