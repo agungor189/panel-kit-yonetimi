@@ -280,7 +280,13 @@ test("tracking absent at dispatch blocks without mutation; later Geliver refresh
   shipping.confirmHandoff({ shipmentId: shipment.id, handedOffAt: "2026-09-23T14:00:00.000Z",
     handoffEvidence: { carrierReceipt: "late-receipt" }, operationId: "late-handoff", actor });
   assert.equal(db.prepare("SELECT COUNT(*) FROM channel_shipment_outbound_jobs").pluck().get(), 1);
-  const gateway = new ChannelGatewayService(db);
+  const integrationFailures: any[] = [];
+  const gateway = new ChannelGatewayService(db, {
+    onIntegrationException(event) {
+      integrationFailures.push(event);
+      return Promise.reject(new Error("push unavailable"));
+    },
+  });
   const first = gateway.claimReadyOutboundJobs({ accountId: "channel-account", limit: 1, leaseSeconds: 30,
     operationId: "late-claim-null", serviceActorId: "channel-publisher", claimedAt: "2026-09-23T14:00:01.000Z" }) as any[];
   let sends = 0;
@@ -290,6 +296,9 @@ test("tracking absent at dispatch blocks without mutation; later Geliver refresh
   (error: unknown) => error instanceof ChannelGatewayError && error.code === "CHANNEL_TRACKING_PENDING");
   assert.equal(sends, 0);
   assert.equal(db.prepare("SELECT state FROM channel_shipment_outbound_jobs").pluck().get(), "BLOCKED");
+  assert.equal(integrationFailures.length, 1);
+  assert.equal(integrationFailures[0].incidentId, `channel-shipment-outbound:${first[0].id}`);
+  assert.equal(integrationFailures[0].integration, "TRENDYOL");
 
   transport.publishTracking(provider.providerShipmentId);
   await geliver.refreshShipment(shipment.id);

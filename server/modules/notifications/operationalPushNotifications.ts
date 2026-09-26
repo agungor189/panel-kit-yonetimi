@@ -26,6 +26,26 @@ export type StockExceptionNotification = {
   productId: string;
 };
 
+export type GoodsReceiptExceptionNotification = {
+  receiptId: string;
+};
+
+export type ReconciliationExceptionNotification = {
+  findingId: string;
+  runId: string;
+};
+
+export type IntegrationExceptionNotification = {
+  incidentId: string;
+  integration: string;
+  message: string;
+};
+
+export type BackupExceptionNotification = {
+  runId: string;
+  phase: 'local' | 'cloud';
+};
+
 const formatMinor = (minor: number) => (minor / 100).toFixed(2);
 
 export function createOperationalPushNotifications(
@@ -124,7 +144,99 @@ export function createOperationalPushNotifications(
     });
   };
 
-  return { orderAccepted, shippingException, orderCancelReturn, stockException };
+  const goodsReceiptException = async (event: GoodsReceiptExceptionNotification) => {
+    const row = db.prepare(`
+      SELECT r.id, r.purchase_order_id, r.product_id, r.expected_quantity_base_int,
+             r.accepted_quantity_base_int, r.damaged_quantity_base_int,
+             r.shortage_quantity_base_int, r.excess_quantity_base_int
+      FROM warehouse_goods_receipts r
+      WHERE r.id = ?
+        AND (r.variance_quantity_base_int <> 0 OR r.damaged_quantity_base_int > 0)
+    `).get(event.receiptId) as {
+      id: string;
+      purchase_order_id: string;
+      product_id: string;
+      expected_quantity_base_int: number;
+      accepted_quantity_base_int: number;
+      damaged_quantity_base_int: number;
+      shortage_quantity_base_int: number;
+      excess_quantity_base_int: number;
+    } | undefined;
+    if (!row) return null;
+    const differences = [
+      row.shortage_quantity_base_int > 0 ? `${row.shortage_quantity_base_int} eksik` : null,
+      row.excess_quantity_base_int > 0 ? `${row.excess_quantity_base_int} fazla` : null,
+      row.damaged_quantity_base_int > 0 ? `${row.damaged_quantity_base_int} hasarlı` : null,
+    ].filter(Boolean).join(', ');
+
+    return push.sendOperational({
+      category: 'goods_receipt_exception',
+      variables: {
+        reference: row.purchase_order_id,
+        message: differences,
+      },
+      targetUrl: `/products/${encodeURIComponent(row.product_id)}`,
+      tag: `goods-receipt-${event.receiptId}`,
+      dedupeKey: `goods_receipt_exception:${event.receiptId}`,
+    });
+  };
+
+  const reconciliationException = async (event: ReconciliationExceptionNotification) => {
+    const row = db.prepare(`
+      SELECT code, severity
+      FROM reconciliation_findings
+      WHERE id = ? AND last_run_id = ? AND status = 'OPEN' AND severity IN ('CRITICAL', 'WARN')
+    `).get(event.findingId, event.runId) as { code: string; severity: 'CRITICAL' | 'WARN' } | undefined;
+    if (!row) return null;
+
+    return push.sendOperational({
+      category: 'reconciliation_exception',
+      variables: { message: `${row.code} (${row.severity})` },
+      targetUrl: '/reconciliation',
+      tag: `reconciliation-${event.findingId}`,
+      dedupeKey: `reconciliation_exception:${event.findingId}:${event.runId}`,
+    });
+  };
+
+  const integrationException = (event: IntegrationExceptionNotification) => push.sendOperational({
+    category: 'integration_exception',
+    variables: { integration: event.integration, message: event.message },
+    targetUrl: '/channels',
+    tag: `integration-${createHash('sha256').update(event.incidentId).digest('hex').slice(0, 24)}`,
+    dedupeKey: `integration_exception:${event.incidentId}`,
+  });
+
+  const backupException = async (event: BackupExceptionNotification) => {
+    const row = db.prepare(`
+      SELECT backup_kind, status, cloud_status
+      FROM backup_runs WHERE id = ?
+    `).get(event.runId) as { backup_kind: string; status: string; cloud_status: string | null } | undefined;
+    const failed = event.phase === 'local' ? row?.status === 'failed' : row?.cloud_status === 'failed';
+    if (!row || !failed) return null;
+
+    return push.sendOperational({
+      category: 'backup_exception',
+      variables: {
+        message: event.phase === 'cloud'
+          ? `${row.backup_kind} yedeğinin uzak kopyası oluşturulamadı`
+          : `${row.backup_kind} yedeği oluşturulamadı`,
+      },
+      targetUrl: '/settings',
+      tag: `backup-${event.runId}-${event.phase}`,
+      dedupeKey: `backup_exception:${event.runId}:${event.phase}`,
+    });
+  };
+
+  return {
+    orderAccepted,
+    shippingException,
+    orderCancelReturn,
+    stockException,
+    goodsReceiptException,
+    reconciliationException,
+    integrationException,
+    backupException,
+  };
 }
 
 export type OperationalPushNotifications = ReturnType<typeof createOperationalPushNotifications>;

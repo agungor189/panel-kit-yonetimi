@@ -104,6 +104,39 @@ test("repeat scans deterministically update and reopen one finding without dupli
   assert.equal(Number(db.prepare("SELECT COUNT(*) FROM reconciliation_findings WHERE identity_key=?").pluck().get(firstFinding.identityKey)), 1);
 });
 
+test("new and reopened critical findings notify once while delivery failure cannot affect reconciliation", async () => {
+  const db = new Database(":memory:");
+  db.pragma("foreign_keys = ON");
+  initializeDatabase(db);
+  const events: Array<{ findingId: string; runId: string }> = [];
+  const service = new ReconciliationService(db, {
+    onOperationalFinding(event) {
+      events.push(event);
+      return Promise.reject(new Error("push unavailable"));
+    },
+  });
+  insertInventory(db, { onHand: 8, ledger: 7 });
+
+  service.run({ trigger: "SCHEDULED", actor: { type: "SYSTEM", id: "scheduler" }, operationId: "notify-open" });
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  assert.equal(events.filter((event) => event.runId).length, 1);
+
+  service.run({ trigger: "SCHEDULED", actor: { type: "SYSTEM", id: "scheduler" }, operationId: "notify-observed" });
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  assert.equal(events.length, 1);
+
+  db.prepare("UPDATE inventory_lots SET on_hand_base_int=7 WHERE id='lot-product-1'").run();
+  db.prepare("UPDATE inventory_lot_location_balances SET quantity_base_int=7 WHERE lot_id='lot-product-1'").run();
+  service.run({ trigger: "SCHEDULED", actor: { type: "SYSTEM", id: "scheduler" }, operationId: "notify-resolved" });
+  db.prepare("UPDATE inventory_lots SET on_hand_base_int=6 WHERE id='lot-product-1'").run();
+  db.prepare("UPDATE inventory_lot_location_balances SET quantity_base_int=6 WHERE lot_id='lot-product-1'").run();
+  service.run({ trigger: "SCHEDULED", actor: { type: "SYSTEM", id: "scheduler" }, operationId: "notify-reopened" });
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  assert.equal(events.length, 2);
+  assert.notEqual(events[0].runId, events[1].runId);
+  db.close();
+});
+
 test("domain checks detect finance, reservation, shipment, return, channel, kit and print contradictions", () => {
   const { db, service } = fixture();
   insertInventory(db, { reserved: 2 });

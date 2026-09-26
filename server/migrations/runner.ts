@@ -25,6 +25,7 @@ import { NOTIFICATION_PREFERENCES_SCHEMA_V89 } from "../db/notificationPreferenc
 import { NOTIFICATION_TEMPLATES_SCHEMA_V90 } from "../db/notificationTemplatesSchema.js";
 import { PUSH_NOTIFICATION_DISPATCH_SCHEMA_V91 } from "../db/pushNotificationDispatchSchema.js";
 import { PUSH_NOTIFICATION_DISPATCH_CATEGORIES_SCHEMA_V92 } from "../db/pushNotificationDispatchCategoriesSchema.js";
+import { PUSH_NOTIFICATION_DISPATCH_ALL_CATEGORIES_SCHEMA_V93 } from "../db/pushNotificationDispatchAllCategoriesSchema.js";
 import { WAREHOUSE_EXECUTION_SCHEMA_V71, WAREHOUSE_REPLENISHMENT_RUNTIME_SCHEMA_V73 } from "../db/warehouseExecutionSchema.js";
 import { canonicalPayloadHash } from "../modules/commands/commandFoundation.js";
 
@@ -3078,9 +3079,16 @@ const migrations: Migration[] = [
       db.exec(PUSH_NOTIFICATION_DISPATCH_CATEGORIES_SCHEMA_V92);
     },
   },
+  {
+    version: 93,
+    name: "expand_push_notification_dispatch_all_categories",
+    up(db) {
+      db.exec(PUSH_NOTIFICATION_DISPATCH_ALL_CATEGORIES_SCHEMA_V93);
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 92;
+export const CURRENT_SCHEMA_VERSION = 93;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),

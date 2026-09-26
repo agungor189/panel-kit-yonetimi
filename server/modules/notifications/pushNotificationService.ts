@@ -23,7 +23,7 @@ export type PushSubscriptionInput = {
 export type NotificationPreferences = Record<NotificationCategory, boolean>;
 
 export type OperationalNotificationInput = {
-  category: 'new_order' | 'order_cancel_return' | 'shipping_exception' | 'stock_exception';
+  category: NotificationCategory;
   variables: Record<string, unknown>;
   targetUrl: string;
   tag: string;
@@ -130,6 +130,10 @@ const operationalPreferenceColumns = {
   order_cancel_return: 'order_cancel_return',
   shipping_exception: 'shipping_exception',
   stock_exception: 'stock_exception',
+  goods_receipt_exception: 'goods_receipt_exception',
+  reconciliation_exception: 'reconciliation_exception',
+  integration_exception: 'integration_exception',
+  backup_exception: 'backup_exception',
 } as const;
 
 function operationalText(value: unknown, field: string, maxLength: number): string {
@@ -460,7 +464,7 @@ export function createPushNotificationService({
         await transport.sendNotification(
           { endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth } },
           payload,
-          { TTL: 300, urgency: category === 'shipping_exception' || category === 'stock_exception' ? 'high' : 'normal', topic },
+          { TTL: 300, urgency: category === 'new_order' ? 'normal' : 'high', topic },
         );
         db.prepare(`
           UPDATE push_subscriptions

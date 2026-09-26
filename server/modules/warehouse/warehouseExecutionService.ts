@@ -141,8 +141,23 @@ const mapSlot = (row: SlotRow) => ({
 });
 
 export class WarehouseExecutionService {
-  constructor(private readonly db: Database.Database) {}
+  constructor(
+    private readonly db: Database.Database,
+    private readonly options: {
+      onGoodsReceiptException?: (event: { receiptId: string }) => void | Promise<unknown>;
+    } = {},
+  ) {}
 
+  private notifyGoodsReceiptException(receiptId: string) {
+    if (!this.options.onGoodsReceiptException) return;
+    queueMicrotask(() => {
+      try {
+        void Promise.resolve(this.options.onGoodsReceiptException?.({ receiptId })).catch(() => undefined);
+      } catch {
+        // Notification delivery is best-effort and cannot affect the committed receipt.
+      }
+    });
+  }
   configureTopology(input: WarehouseTopologyInput) {
     const topologyId = requiredText(input.id, "id");
     const name = requiredText(input.name, "name");
@@ -377,7 +392,7 @@ export class WarehouseExecutionService {
       throw new WarehouseExecutionError("PACKAGE_QUANTITY_MISMATCH", "Package quantities must equal accepted and damaged receipt quantities.", 409);
     }
 
-    return this.db.transaction(() => {
+    const result = this.db.transaction(() => {
       const snapshot = this.db.prepare(`SELECT l.id,l.purchase_order_id,l.purchase_line_id,l.product_id,l.state,
         l.quantity_base_int,l.base_uom_code_snapshot,p.status AS purchase_status
         FROM acquisition_lot_cost_snapshots l JOIN purchase_orders p ON p.id=l.purchase_order_id WHERE l.id=?`).get(snapshotId) as any;
@@ -451,6 +466,10 @@ export class WarehouseExecutionService {
         packages: packages.map(({ id }) => this.getPackage(id)),
       };
     }).immediate();
+    if (result.varianceQuantityBaseInt !== 0 || result.damagedQuantityBaseInt > 0) {
+      this.notifyGoodsReceiptException(result.id);
+    }
+    return result;
   }
 
   registerReturnPackage(input: {

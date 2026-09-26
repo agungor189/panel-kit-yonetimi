@@ -25,6 +25,8 @@ type WarehouseModuleDependencies = {
   uploadsDir: string;
   authenticateUserToken: (token: string, servicePrincipalId: string) => WarehouseUser | null;
   notifyShippingException?: (event: { shipmentId: string; jobId: string }) => void | Promise<unknown>;
+  notifyGoodsReceiptException?: (event: { receiptId: string }) => void | Promise<unknown>;
+  notifyIntegrationException?: (event: { incidentId: string; integration: string; message: string }) => void | Promise<unknown>;
   rateLimiters: RequestHandler[];
 };
 
@@ -36,12 +38,23 @@ export function mountWarehouseModule({
   uploadsDir,
   authenticateUserToken,
   notifyShippingException,
+  notifyGoodsReceiptException,
+  notifyIntegrationException,
   rateLimiters,
 }: WarehouseModuleDependencies) {
   app.use(
     "/api/warehouse/v1",
     ...rateLimiters,
-    createWarehouseRouter({ db, hashApiKey, logActivity, uploadsDir, authenticateUserToken, notifyShippingException }),
+    createWarehouseRouter({
+      db,
+      hashApiKey,
+      logActivity,
+      uploadsDir,
+      authenticateUserToken,
+      notifyShippingException,
+      notifyGoodsReceiptException,
+      notifyIntegrationException,
+    }),
   );
   return startPrintQueueWorker(db);
 }

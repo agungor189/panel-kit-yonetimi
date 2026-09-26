@@ -48,7 +48,7 @@ const topology = (racks: WarehouseTopologyInput["racks"] = [rack("A1"), rack("C2
   racks,
 });
 
-const setup = () => {
+const setup = (onGoodsReceiptException?: (event: { receiptId: string }) => void | Promise<unknown>) => {
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
   initializeDatabase(db);
@@ -58,7 +58,7 @@ const setup = () => {
   }
   const procurement = new ProcurementService(db);
   procurement.registerSupplier({ id: "supplier", name: "Supplier", defaultCurrency: "TRY" });
-  return { db, procurement, warehouse: new WarehouseExecutionService(db) };
+  return { db, procurement, warehouse: new WarehouseExecutionService(db, { onGoodsReceiptException }) };
 };
 
 const costed = (procurement: ProcurementService, productId: string, id: string, quantity: number) => {
@@ -269,6 +269,24 @@ test("goods receipt preserves V2-06 facts, records shortage, gates excess, quara
   assert.throws(() => receive(db, warehouse, partialLot.id, "partial", [{ id: "partial", code: "PARTIAL", quantityBaseInt: 2 }], 2, 0, { isFinal: false }),
     (error: unknown) => error instanceof WarehouseExecutionError && error.code === "PARTIAL_RECEIPT_DISABLED");
   assert.ok(db.prepare("PRAGMA table_info(warehouse_goods_receipts)").all().some((column: any) => column.name === "stage_index"));
+  db.close();
+});
+
+test("goods receipt variance notifies after commit and push failure does not affect the receipt", async () => {
+  const events: Array<{ receiptId: string }> = [];
+  const { db, procurement, warehouse } = setup((event) => {
+    events.push(event);
+    return Promise.reject(new Error("push unavailable"));
+  });
+  const lot = costed(procurement, "p1", "notify-shortage", 10);
+  const receipt = receive(db, warehouse, lot.id, "notify-shortage", [
+    { id: "notify-short", code: "NOTIFY-SHORT", quantityBaseInt: 8 },
+  ], 8);
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+  assert.equal(receipt.shortageQuantityBaseInt, 2);
+  assert.deepEqual(events, [{ receiptId: "receipt-notify-shortage" }]);
+  assert.equal(db.prepare("SELECT status FROM warehouse_goods_receipts WHERE id=?").pluck().get(receipt.id), "ACCEPTED_WITH_VARIANCE");
   db.close();
 });
 

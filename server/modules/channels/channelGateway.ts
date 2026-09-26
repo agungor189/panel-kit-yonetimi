@@ -149,6 +149,11 @@ type ChannelGatewayOptions = {
   onOrderAccepted?: (event: OrderAcceptedPushEvent) => void | Promise<unknown>;
   onOrderTransition?: (event: OrderTransitionPushEvent) => void | Promise<unknown>;
   onStockException?: (event: StockExceptionPushEvent) => void | Promise<unknown>;
+  onIntegrationException?: (event: {
+    incidentId: string;
+    integration: string;
+    message: string;
+  }) => void | Promise<unknown>;
 };
 
 export class ChannelGatewayService {
@@ -157,6 +162,7 @@ export class ChannelGatewayService {
   private readonly onOrderAccepted?: ChannelGatewayOptions["onOrderAccepted"];
   private readonly onOrderTransition?: ChannelGatewayOptions["onOrderTransition"];
   private readonly onStockException?: ChannelGatewayOptions["onStockException"];
+  private readonly onIntegrationException?: ChannelGatewayOptions["onIntegrationException"];
 
   constructor(private readonly db: Database.Database, options: ChannelGatewayOptions = {}) {
     this.commands = new CommandExecutor(db);
@@ -164,6 +170,7 @@ export class ChannelGatewayService {
     this.onOrderAccepted = options.onOrderAccepted;
     this.onOrderTransition = options.onOrderTransition;
     this.onStockException = options.onStockException;
+    this.onIntegrationException = options.onIntegrationException;
   }
 
   private runPostCommitSideEffect<T>(callback: ((event: T) => void | Promise<unknown>) | undefined, event: T) {
@@ -1057,7 +1064,7 @@ export class ChannelGatewayService {
     state: "SUCCEEDED" | "FAILED" | "RATE_LIMITED" | "BLOCKED"; response?: unknown; errorCode?: string | null;
     retryAt?: string | null; operationId: string; serviceActorId: string; occurredAt: string }) {
     const commandPayload = { ...input, response: input.response === undefined ? null : input.response };
-    return this.commands.execute<any>({ operationId: input.operationId, commandType: "channels.shipment-outbound-attempt.record.v1", payload: commandPayload,
+    const outcome = this.commands.execute<any>({ operationId: input.operationId, commandType: "channels.shipment-outbound-attempt.record.v1", payload: commandPayload,
       actor: { service: { id: input.serviceActorId } }, authorization: { decision: "ALLOW", capability: "channels:publish" } }, () => {
       const current = this.db.prepare("SELECT state,attempt_count FROM channel_shipment_outbound_jobs WHERE id=?").get(input.jobId) as any;
       if (!current) throw new ChannelGatewayError("OUTBOUND_JOB_NOT_FOUND", "Outbound job was not found.", 404);
@@ -1075,7 +1082,17 @@ export class ChannelGatewayService {
         lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=?`).run(jobState, input.retryAt || null,
         input.errorCode || null, jobState, input.occurredAt, input.occurredAt, input.jobId);
       return { statusCode: 200, body: { id, state: input.state, providerMutationId: input.providerMutationId, replayed: false } };
-    }).result.body;
+    });
+    if (input.state === "BLOCKED" && !outcome.replayed) {
+      const job = this.db.prepare(`SELECT a.channel FROM channel_shipment_outbound_jobs j
+        JOIN channel_accounts a ON a.id=j.account_id WHERE j.id=?`).get(input.jobId) as { channel: string } | undefined;
+      if (job) this.runPostCommitSideEffect(this.onIntegrationException, {
+        incidentId: `channel-shipment-outbound:${input.jobId}`,
+        integration: job.channel,
+        message: String(input.errorCode || "Kalıcı kanal güncelleme hatası"),
+      });
+    }
+    return outcome.result.body;
   }
 
   enqueueStockSync(input: { accountId: string; productId: string; sourceVersion: string; operationId: string; actor: Actor }) {

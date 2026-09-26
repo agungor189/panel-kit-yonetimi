@@ -4,7 +4,7 @@ import { CommandExecutor, CommandFoundationError } from "../modules/commands/com
 import { ReconciliationError, ReconciliationService } from "../modules/reconciliation/reconciliationService.js";
 import { ReconciliationRepairExecutor } from "../modules/reconciliation/reconciliationRepairExecutor.js";
 
-type Dependencies = { db: Database.Database; authorizeRead: RequestHandler; authorizeRun: RequestHandler; authorizePropose: RequestHandler; authorizeApprove: RequestHandler };
+type Dependencies = { db: Database.Database; authorizeRead: RequestHandler; authorizeRun: RequestHandler; authorizePropose: RequestHandler; authorizeApprove: RequestHandler; notifyOperationalFinding?: (event:{findingId:string;runId:string})=>void|Promise<unknown> };
 const operationId = (req: express.Request) => String(req.headers["x-operation-id"] || req.headers["idempotency-key"] || req.body?.operation_id || "").trim();
 const sendError = (value: unknown, res: express.Response) => {
   if (value instanceof ReconciliationError || value instanceof CommandFoundationError) return res.status(value.statusCode).json({ success: false, error: { code: value.code, message: value.message } });
@@ -12,7 +12,7 @@ const sendError = (value: unknown, res: express.Response) => {
 };
 
 export function createReconciliationV1Router(deps: Dependencies) {
-  const router = express.Router(); const service = new ReconciliationService(deps.db); const repairs = new ReconciliationRepairExecutor(deps.db, service); const commands = new CommandExecutor(deps.db);
+  const router = express.Router(); const service = new ReconciliationService(deps.db,{onOperationalFinding:deps.notifyOperationalFinding}); const repairs = new ReconciliationRepairExecutor(deps.db, service); const commands = new CommandExecutor(deps.db);
   const execute = (req: express.Request, capability: string, commandType: string, payload: unknown, handler: Parameters<CommandExecutor["execute"]>[1]) => commands.execute({
     operationId: operationId(req), commandType, payload, actor: { human: { id: req.user!.id, name: req.user!.username } }, authorization: { decision: "ALLOW", capability },
     correlationId: req.headers["x-correlation-id"]?.toString(), requestId: req.headers["x-request-id"]?.toString(),

@@ -7,6 +7,7 @@ import { NOTIFICATION_TEMPLATES_SCHEMA_V90 } from '../../db/notificationTemplate
 import { PUSH_SUBSCRIPTIONS_SCHEMA_V88 } from '../../db/pushSubscriptionsSchema.js';
 import { PUSH_NOTIFICATION_DISPATCH_SCHEMA_V91 } from '../../db/pushNotificationDispatchSchema.js';
 import { PUSH_NOTIFICATION_DISPATCH_CATEGORIES_SCHEMA_V92 } from '../../db/pushNotificationDispatchCategoriesSchema.js';
+import { PUSH_NOTIFICATION_DISPATCH_ALL_CATEGORIES_SCHEMA_V93 } from '../../db/pushNotificationDispatchAllCategoriesSchema.js';
 import { PushOwnershipError, PushUnavailableError, createPushNotificationService } from './pushNotificationService.js';
 
 const subscription = (endpoint = 'https://push.example.test/device-1') => ({
@@ -24,6 +25,7 @@ function createDb() {
   db.exec(NOTIFICATION_TEMPLATES_SCHEMA_V90);
   db.exec(PUSH_NOTIFICATION_DISPATCH_SCHEMA_V91);
   db.exec(PUSH_NOTIFICATION_DISPATCH_CATEGORIES_SCHEMA_V92);
+  db.exec(PUSH_NOTIFICATION_DISPATCH_ALL_CATEGORIES_SCHEMA_V93);
   return db;
 }
 
@@ -369,5 +371,45 @@ test('new operational categories use per-user preferences', async () => {
   assert.equal(stock.sent, 1);
   assert.equal(payloads.length, 1);
   assert.equal(payloads[0].title, 'Stok Uyarısı');
+  db.close();
+});
+
+test('remaining operational categories dedupe and honor disabled preferences', async () => {
+  const db = createDb();
+  const payloads: any[] = [];
+  const service = createPushNotificationService({
+    db,
+    env: configuredEnv(),
+    transport: {
+      setVapidDetails() {},
+      async sendNotification(_target, payload) { payloads.push(JSON.parse(payload)); },
+    },
+  });
+  service.subscribe('user-1', subscription());
+  service.updatePreferences('user-1', {
+    ...service.getPreferences('user-1'),
+    integration_exception: false,
+  });
+
+  const integration = {
+    category: 'integration_exception' as const,
+    variables: { integration: 'SHOPIFY', message: 'SHOPIFY_POLL_FAILED' },
+    targetUrl: '/channels',
+    tag: 'integration-shopify',
+    dedupeKey: 'integration_exception:shopify:incident-1',
+  };
+  assert.equal((await service.sendOperational(integration)).skipped, 1);
+  assert.equal((await service.sendOperational(integration)).duplicate, true);
+
+  const reconciliation = {
+    category: 'reconciliation_exception' as const,
+    variables: { message: 'INVENTORY_LEDGER_MISMATCH (CRITICAL)' },
+    targetUrl: '/reconciliation',
+    tag: 'reconciliation-finding-1',
+    dedupeKey: 'reconciliation_exception:finding-1:run-1',
+  };
+  assert.equal((await service.sendOperational(reconciliation)).sent, 1);
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].url, '/reconciliation');
   db.close();
 });

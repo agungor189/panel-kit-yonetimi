@@ -38,6 +38,8 @@ type WarehouseRouterDependencies = {
   authenticateUserToken: (token: string, servicePrincipalId: string) => WarehouseUser | null;
   uploadsDir: string;
   notifyShippingException?: (event: { shipmentId: string; jobId: string }) => void | Promise<unknown>;
+  notifyGoodsReceiptException?: (event: { receiptId: string }) => void | Promise<unknown>;
+  notifyIntegrationException?: (event: { incidentId: string; integration: string; message: string }) => void | Promise<unknown>;
 };
 
 const permissionsFor = (rawPermissions: unknown): string[] => {
@@ -68,6 +70,8 @@ export function createWarehouseRouter({
   authenticateUserToken,
   uploadsDir,
   notifyShippingException,
+  notifyGoodsReceiptException,
+  notifyIntegrationException,
 }: WarehouseRouterDependencies) {
   const router = express.Router();
   const service = new WarehouseService(db, logActivity);
@@ -83,10 +87,17 @@ export function createWarehouseRouter({
   const geliverService = new GeliverFlowService(db, geliverTransport, {
     senderAddressId: geliverTransport.senderAddressId,
     sourceIdentifier: geliverTransport.sourceIdentifier,
-    onOperationalException: notifyShippingException,
+    onOperationalException: (event) => Promise.allSettled([
+      notifyShippingException?.(event),
+      notifyIntegrationException?.({
+        incidentId: `geliver-booking:${event.jobId}`,
+        integration: "GELIVER",
+        message: "Sevkiyat sağlayıcı işlemi bloke oldu",
+      }),
+    ]),
   });
   const returnsService = new ReturnsService(db);
-  const executionService = new WarehouseExecutionService(db);
+  const executionService = new WarehouseExecutionService(db, { onGoodsReceiptException: notifyGoodsReceiptException });
   const printingService = new PrintingService(db);
   const reconciliationService = new ReconciliationService(db);
 

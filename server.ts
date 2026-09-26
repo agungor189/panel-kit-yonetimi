@@ -163,6 +163,7 @@ const channelGateway = new ChannelGatewayService(db, {
   onOrderAccepted: operationalPushNotifications.orderAccepted,
   onOrderTransition: operationalPushNotifications.orderCancelReturn,
   onStockException: operationalPushNotifications.stockException,
+  onIntegrationException: operationalPushNotifications.integrationException,
 });
 const {
   getProductBomComponents,
@@ -665,6 +666,11 @@ function failBackupRun(runId: string, err: any): void {
         completed_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(err?.message || String(err), runId);
+  try {
+    void Promise.resolve(operationalPushNotifications.backupException({ runId, phase: "local" })).catch(() => undefined);
+  } catch {
+    // Push is best-effort and cannot change backup failure handling.
+  }
 }
 
 function execRclone(args: string[], timeoutSeconds: number): Promise<{ stdout: string; stderr: string }> {
@@ -771,6 +777,11 @@ async function uploadBackupRunToCloud(runId: string, actor?: string | null): Pro
       cloudPath: destination,
       error: err?.message || String(err),
     });
+    try {
+      void Promise.resolve(operationalPushNotifications.backupException({ runId, phase: "cloud" })).catch(() => undefined);
+    } catch {
+      // Push is best-effort and cannot change backup failure handling.
+    }
     AppLogger.error("BACKUP", "Cloud backup upload failed", err);
     return { runId, cloud_status: "failed", cloud_path: destination, error: err?.message || String(err) };
   }
@@ -4745,6 +4756,29 @@ async function startServer() {
     return summary;
   };
 
+  const recordIntegrationFailure = (input: {
+    accountId: string;
+    integration: string;
+    code: string;
+    occurredAt: string;
+  }) => {
+    try {
+      const prior = db.prepare("SELECT last_error_code FROM channel_accounts WHERE id=?")
+        .get(input.accountId) as { last_error_code: string | null } | undefined;
+      if (!prior) return;
+      db.prepare("UPDATE channel_accounts SET last_error_code=?,updated_at=? WHERE id=?")
+        .run(input.code, input.occurredAt, input.accountId);
+      if (prior.last_error_code) return;
+      void Promise.resolve(operationalPushNotifications.integrationException({
+        incidentId: `${input.integration.toLowerCase()}:poll:${input.accountId}:${input.occurredAt}`,
+        integration: input.integration,
+        message: input.code,
+      })).catch(() => undefined);
+    } catch {
+      // Failure recording and push are side effects; the provider error remains authoritative.
+    }
+  };
+
   const syncTrendyolShipmentPackages = async (config = getTrendyolConfig(), operationId = uuidv4(), actor: { id: string; name?: string | null } = { id: "trendyol-admin" }) => {
     const environment = normalizeTrendyolEnvironment(config.environment);
     const credentials = getTrendyolCredentials(config);
@@ -5105,6 +5139,22 @@ async function startServer() {
       logActivity("TRENDYOL_SYNCED", "integration", "Trendyol", { after: summary }, req.user?.id);
       res.json({ success: true, summary });
     } catch (err: any) {
+      try {
+        const config = { ...getTrendyolConfig(), ...req.body };
+        const environment = normalizeTrendyolEnvironment(config.environment);
+        const credentials = getTrendyolCredentials(config);
+        const account = db.prepare(`SELECT id FROM channel_accounts
+          WHERE channel='TRENDYOL' AND merchant_account_id=? AND environment=? LIMIT 1`)
+          .get(credentials.sellerId, environment === "prod" ? "PRODUCTION" : "STAGE") as { id: string } | undefined;
+        if (account) recordIntegrationFailure({
+          accountId: account.id,
+          integration: "TRENDYOL",
+          code: String(err?.code || "TRENDYOL_SYNC_FAILED").slice(0, 100),
+          occurredAt: new Date().toISOString(),
+        });
+      } catch {
+        // Invalid credentials may prevent resolving a canonical channel account.
+      }
       res.status(err.statusCode || 400).json({ success: false, error: { code: 'TRENDYOL_SYNC_FAILED', message: err.message } });
     }
   });
@@ -5894,6 +5944,7 @@ async function startServer() {
       authorizeRun: auth.requireCapability("reconciliation:run"),
       authorizePropose: auth.requireCapability("data:repair:propose"),
       authorizeApprove: auth.requireCapability("data:repair:approve"),
+      notifyOperationalFinding: operationalPushNotifications.reconciliationException,
     }),
   );
   mountWarehouseModule({
@@ -5905,6 +5956,8 @@ async function startServer() {
     rateLimiters: [publicAuthFailedLimiter, publicApiLimiter],
     authenticateUserToken: (token, servicePrincipalId) => auth.authenticateUserToken(token, servicePrincipalId),
     notifyShippingException: operationalPushNotifications.shippingException,
+    notifyGoodsReceiptException: operationalPushNotifications.goodsReceiptException,
+    notifyIntegrationException: operationalPushNotifications.integrationException,
   });
 
   app.get("/api/public/health", (req, res) => {
@@ -6683,6 +6736,17 @@ async function startServer() {
           receivedAt,
           account.id,
         );
+        if (!account.last_error_code) {
+          try {
+            void Promise.resolve(operationalPushNotifications.integrationException({
+              incidentId: `shopify-poll:${account.id}:${receivedAt}`,
+              integration: "SHOPIFY",
+              message: code,
+            })).catch(() => undefined);
+          } catch {
+            // Push is best-effort and cannot change the polling outcome.
+          }
+        }
       }
 
       // Force a fresh verification on the next attempt.
@@ -6729,7 +6793,12 @@ async function startServer() {
   }
 
   startBackupScheduler();
-  startDailyReconciliationScheduler(db, AppLogger);
+  startDailyReconciliationScheduler(
+    db,
+    AppLogger,
+    process.env.RECONCILIATION_TIME_ZONE || undefined,
+    operationalPushNotifications.reconciliationException,
+  );
 
   // --- VITE MIDDLEWARE ---
 
