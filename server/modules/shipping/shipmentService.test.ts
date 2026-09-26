@@ -506,6 +506,7 @@ class OfficialGeliverFixture implements GeliverTransport {
   createCalls = 0;
   acceptCalls = 0;
   uncertainCreateOnce = false;
+  definitiveAcceptFailureOnce = false;
   private readonly shipments = new Map<string, Shipment>();
   async create(body: any) {
     this.createCalls += 1;
@@ -527,6 +528,10 @@ class OfficialGeliverFixture implements GeliverTransport {
   async get(id: string) { return structuredClone(this.shipments.get(id)!); }
   async acceptOffer(offerId: string): Promise<Transaction> {
     this.acceptCalls += 1;
+    if (this.definitiveAcceptFailureOnce) {
+      this.definitiveAcceptFailureOnce = false;
+      throw Object.assign(new Error("provider rejected booking"), { status: 400, code: "BOOKING_REJECTED" });
+    }
     const shipment = [...this.shipments.values()].find((item) => item.offers?.list?.some((offer) => offer.id === offerId))!;
     shipment.acceptedOfferID = offerId;
     shipment.acceptedOffer = shipment.offers!.list![0];
@@ -567,7 +572,7 @@ class OfficialGeliverFixture implements GeliverTransport {
   publishTracking(id: string) { const shipment = this.shipments.get(id)!; shipment.trackingNumber = "TRACK-LATER"; shipment.trackingUrl = "https://track.geliver.test/TRACK-LATER"; }
 }
 
-const prepareLiveGeliver = (recipientFixture = marketplaceRecipient) => {
+const prepareLiveGeliver = (recipientFixture = marketplaceRecipient, onOperationalException?: (event: { shipmentId: string; jobId: string }) => void | Promise<unknown>) => {
   const fixture = setup(recipientFixture);
   const shipping = new ShipmentService(fixture.db);
   const shipment = shipping.packAndPrepare({ reservationId: "reservation", operationId: "live-pack", actor }).shipment;
@@ -575,7 +580,11 @@ const prepareLiveGeliver = (recipientFixture = marketplaceRecipient) => {
     measured: { lengthMm: 300, widthMm: 200, heightMm: 100, weightGrams: 1200 },
     contents: [{ productId: "part", quantityBaseInt: 2 }] }] });
   const transport = new OfficialGeliverFixture();
-  const geliver = new GeliverFlowService(fixture.db, transport, { senderAddressId: "sender-address", sourceIdentifier: "https://dsdst.example" });
+  const geliver = new GeliverFlowService(fixture.db, transport, {
+    senderAddressId: "sender-address",
+    sourceIdentifier: "https://dsdst.example",
+    onOperationalException,
+  });
   return { ...fixture, shipping, shipment, transport, geliver };
 };
 
@@ -716,6 +725,22 @@ test("uncertain Geliver create reconciles by exact orderNumber and never creates
   assert.equal(transport.createCalls, 1);
   assert.equal(db.prepare("SELECT COUNT(*) FROM geliver_provider_shipments").pluck().get(), 1);
   assert.equal(db.prepare("SELECT state FROM geliver_create_jobs WHERE id=?").pluck().get(job.id), "CREATED");
+  db.close();
+});
+
+test("definitive Geliver booking failure emits one stable shipping exception", async () => {
+  const notifications: Array<{ shipmentId: string; jobId: string }> = [];
+  const { db, shipment, transport, geliver } = prepareLiveGeliver(marketplaceRecipient, (event) => {
+    notifications.push(event);
+  });
+  const [createJob] = geliver.prepareCreateJobs({ shipmentId: shipment.id, recipient, operationId: "failed-create", actor });
+  const provider = await geliver.processCreateJob(createJob.id);
+  const accept = geliver.selectOffer({ shipmentId: shipment.id, offerId: provider.offers[0].id, operationId: "failed-select", actor });
+  transport.definitiveAcceptFailureOnce = true;
+
+  await assert.rejects(() => geliver.processAcceptJob(accept.id), /provider rejected booking/);
+  assert.deepEqual(notifications, [{ shipmentId: shipment.id, jobId: accept.id }]);
+  assert.equal(db.prepare("SELECT state FROM geliver_accept_jobs WHERE id=?").pluck().get(accept.id), "DEFINITIVE_FAILURE");
   db.close();
 });
 

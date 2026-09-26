@@ -22,6 +22,15 @@ export type PushSubscriptionInput = {
 
 export type NotificationPreferences = Record<NotificationCategory, boolean>;
 
+export type OperationalNotificationInput = {
+  category: 'new_order' | 'shipping_exception';
+  variables: Record<string, unknown>;
+  targetUrl: string;
+  tag: string;
+  topic?: string;
+  dedupeKey: string;
+};
+
 const DEFAULT_NOTIFICATION_PREFERENCES = Object.fromEntries(
   NOTIFICATION_CATEGORIES.map((category) => [category, true]),
 ) as NotificationPreferences;
@@ -116,6 +125,32 @@ function validateTemplate(category: NotificationCategory, input: NotificationTem
 }
 
 const hashEndpoint = (endpoint: string) => createHash('sha256').update(endpoint).digest('hex');
+const operationalPreferenceColumns = {
+  new_order: 'new_order',
+  shipping_exception: 'shipping_exception',
+} as const;
+
+function operationalText(value: unknown, field: string, maxLength: number): string {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  if (!normalized || normalized.length > maxLength || /[\u0000-\u001f\u007f]/.test(normalized)) {
+    throw new PushValidationError(`${field} geçersiz.`);
+  }
+  return normalized;
+}
+
+function notificationTargetUrl(value: unknown): string {
+  const normalized = operationalText(value, 'Notification URL', 1024);
+  if (!normalized.startsWith('/') || normalized.startsWith('//')) {
+    throw new PushValidationError('Notification URL panel içinde olmalıdır.');
+  }
+  return normalized;
+}
+
+function notificationTopic(value: unknown, dedupeKey: string): string {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  if (/^[A-Za-z0-9_-]{1,32}$/.test(normalized)) return normalized;
+  return `dsdst-${createHash('sha256').update(dedupeKey).digest('hex').slice(0, 24)}`;
+}
 
 export function createPushNotificationService({
   db,
@@ -369,6 +404,86 @@ export function createPushNotificationService({
     return result;
   };
 
+  const sendOperational = async (rawInput: OperationalNotificationInput) => {
+    const category = rawInput.category;
+    const preferenceColumn = operationalPreferenceColumns[category];
+    if (!preferenceColumn) throw new PushValidationError('Operasyon bildirim kategorisi geçersiz.');
+    const dedupeKey = operationalText(rawInput.dedupeKey, 'Dedupe key', 300);
+    const targetUrl = notificationTargetUrl(rawInput.targetUrl);
+    const tag = operationalText(rawInput.tag, 'Notification tag', 80);
+    const topic = notificationTopic(rawInput.topic, dedupeKey);
+    const claimed = db.prepare(`
+      INSERT OR IGNORE INTO push_notification_dispatches
+        (dedupe_key, category, notification_tag, notification_topic, target_url)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(dedupeKey, category, tag, topic, targetUrl).changes === 1;
+
+    if (!claimed) {
+      return { sent: 0, expired: 0, failed: 0, skipped: 0, duplicate: true, unavailable: false };
+    }
+    if (unavailableReason) {
+      return { sent: 0, expired: 0, failed: 0, skipped: 0, duplicate: false, unavailable: true };
+    }
+
+    const rendered = renderTemplate(category, rawInput.variables);
+    const rows = db.prepare(`
+      SELECT s.id, s.user_id, s.endpoint, s.p256dh, s.auth
+      FROM push_subscriptions s
+      LEFT JOIN user_notification_preferences p ON p.user_id = s.user_id
+      WHERE COALESCE(p.${preferenceColumn}, 1) = 1
+      ORDER BY s.user_id, s.id
+    `).all() as SubscriptionRow[];
+    const result = {
+      sent: 0,
+      expired: 0,
+      failed: 0,
+      skipped: Number(db.prepare(`
+        SELECT COUNT(*)
+        FROM push_subscriptions s
+        JOIN user_notification_preferences p ON p.user_id = s.user_id
+        WHERE p.${preferenceColumn} = 0
+      `).pluck().get()),
+      duplicate: false,
+      unavailable: false,
+    };
+    const payload = JSON.stringify({
+      title: rendered.title,
+      body: rendered.message,
+      url: targetUrl,
+      tag,
+    });
+
+    for (const row of rows) {
+      try {
+        await transport.sendNotification(
+          { endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth } },
+          payload,
+          { TTL: 300, urgency: category === 'shipping_exception' ? 'high' : 'normal', topic },
+        );
+        db.prepare(`
+          UPDATE push_subscriptions
+          SET last_success_at = CURRENT_TIMESTAMP, failure_count = 0, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND user_id = ?
+        `).run(row.id, row.user_id);
+        result.sent += 1;
+      } catch (error) {
+        const statusCode = Number((error as { statusCode?: number })?.statusCode || 0);
+        if (statusCode === 404 || statusCode === 410) {
+          db.prepare('DELETE FROM push_subscriptions WHERE id = ? AND user_id = ?').run(row.id, row.user_id);
+          result.expired += 1;
+        } else {
+          db.prepare(`
+            UPDATE push_subscriptions
+            SET failure_count = failure_count + 1, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND user_id = ?
+          `).run(row.id, row.user_id);
+          result.failed += 1;
+        }
+      }
+    }
+    return result;
+  };
+
   return {
     status,
     subscribe,
@@ -381,6 +496,7 @@ export function createPushNotificationService({
     resetTemplate,
     renderTemplate,
     sendTest,
+    sendOperational,
   };
 }
 

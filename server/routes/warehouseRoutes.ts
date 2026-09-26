@@ -37,6 +37,7 @@ type WarehouseRouterDependencies = {
   ) => void;
   authenticateUserToken: (token: string, servicePrincipalId: string) => WarehouseUser | null;
   uploadsDir: string;
+  notifyShippingException?: (event: { shipmentId: string; jobId: string }) => void | Promise<unknown>;
 };
 
 const permissionsFor = (rawPermissions: unknown): string[] => {
@@ -66,6 +67,7 @@ export function createWarehouseRouter({
   logActivity,
   authenticateUserToken,
   uploadsDir,
+  notifyShippingException,
 }: WarehouseRouterDependencies) {
   const router = express.Router();
   const service = new WarehouseService(db, logActivity);
@@ -81,6 +83,7 @@ export function createWarehouseRouter({
   const geliverService = new GeliverFlowService(db, geliverTransport, {
     senderAddressId: geliverTransport.senderAddressId,
     sourceIdentifier: geliverTransport.sourceIdentifier,
+    onOperationalException: notifyShippingException,
   });
   const returnsService = new ReturnsService(db);
   const executionService = new WarehouseExecutionService(db);

@@ -188,8 +188,21 @@ const errorInfo = (error: unknown) => {
 export class GeliverFlowService {
   private readonly reconciliationGuard: ReconciliationScopeGuard;
   constructor(private readonly db: Database.Database, private readonly transport: GeliverTransport,
-    private readonly config: { senderAddressId: string | null; sourceIdentifier: string | null }) {
+    private readonly config: {
+      senderAddressId: string | null;
+      sourceIdentifier: string | null;
+      onOperationalException?: (event: { shipmentId: string; jobId: string }) => void | Promise<unknown>;
+    }) {
     this.reconciliationGuard = new ReconciliationScopeGuard(db);
+  }
+
+  private notifyOperationalException(shipmentId: string, jobId: string) {
+    if (!this.config.onOperationalException) return;
+    try {
+      void Promise.resolve(this.config.onOperationalException({ shipmentId, jobId })).catch(() => undefined);
+    } catch {
+      // Notification delivery must never change the shipment job outcome.
+    }
   }
 
   private assertShipmentAllowed(shipmentId: string) {
@@ -383,6 +396,7 @@ export class GeliverFlowService {
         this.db.prepare("UPDATE geliver_create_jobs SET state=?,last_error_code=?,updated_at=? WHERE id=?")
           .run(info.definitive ? "DEFINITIVE_FAILURE" : "RECONCILE_REQUIRED", info.code, at(), jobId);
       }).immediate();
+      this.notifyOperationalException(job.shipment_id, jobId);
       throw error;
     }
   }
@@ -392,7 +406,11 @@ export class GeliverFlowService {
       .filter((shipment) => shipment.order?.orderNumber === job.provider_order_number);
     this.db.prepare("UPDATE geliver_create_jobs SET reconciliation_count=reconciliation_count+1,updated_at=? WHERE id=?").run(at(), job.id);
     if (matches.length === 1) return this.bindCreated(job.id, matches[0], "ORDER_NUMBER_RECONCILIATION", null);
-    if (matches.length > 1) throw new ShipmentValidationError("GELIVER_DUPLICATE_PROVIDER_SHIPMENT", "More than one Geliver shipment has the request orderNumber.", 502);
+    if (matches.length > 1) {
+      this.notifyOperationalException(job.shipment_id, job.id);
+      throw new ShipmentValidationError("GELIVER_DUPLICATE_PROVIDER_SHIPMENT", "More than one Geliver shipment has the request orderNumber.", 502);
+    }
+    this.notifyOperationalException(job.shipment_id, job.id);
     throw new ShipmentValidationError("GELIVER_CREATE_RECONCILIATION_PENDING", "No exact Geliver orderNumber match was found; create will not be retried automatically.", 409);
   }
 
@@ -488,6 +506,7 @@ export class GeliverFlowService {
       this.db.prepare("UPDATE geliver_accept_jobs SET reconciliation_count=reconciliation_count+1,updated_at=? WHERE id=?").run(at(), jobId);
       if (response.acceptedOfferID === job.offer_id) return this.bindAccepted(job, null, response, "SHIPMENT_RECONCILIATION", null,
         await this.labelArtifactHash(response));
+      this.notifyOperationalException(job.shipment_id, job.id);
       throw new ShipmentValidationError("GELIVER_ACCEPT_RECONCILIATION_PENDING", "Offer acceptance is not confirmed; acceptOffer will not be retried automatically.", 409);
     }
     if (job.state !== "PENDING") throw new ShipmentValidationError("GELIVER_ACCEPT_STATE_CONFLICT", "Geliver accept job cannot run.", 409);
@@ -510,6 +529,7 @@ export class GeliverFlowService {
         this.db.prepare("UPDATE geliver_accept_jobs SET state=?,last_error_code=?,updated_at=? WHERE id=?")
           .run(info.definitive ? "DEFINITIVE_FAILURE" : "RECONCILE_REQUIRED", info.code, at(), jobId);
       }).immediate();
+      this.notifyOperationalException(job.shipment_id, jobId);
       throw error;
     }
   }

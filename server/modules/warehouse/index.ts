@@ -24,6 +24,7 @@ type WarehouseModuleDependencies = {
   ) => void;
   uploadsDir: string;
   authenticateUserToken: (token: string, servicePrincipalId: string) => WarehouseUser | null;
+  notifyShippingException?: (event: { shipmentId: string; jobId: string }) => void | Promise<unknown>;
   rateLimiters: RequestHandler[];
 };
 
@@ -34,12 +35,13 @@ export function mountWarehouseModule({
   logActivity,
   uploadsDir,
   authenticateUserToken,
+  notifyShippingException,
   rateLimiters,
 }: WarehouseModuleDependencies) {
   app.use(
     "/api/warehouse/v1",
     ...rateLimiters,
-    createWarehouseRouter({ db, hashApiKey, logActivity, uploadsDir, authenticateUserToken }),
+    createWarehouseRouter({ db, hashApiKey, logActivity, uploadsDir, authenticateUserToken, notifyShippingException }),
   );
   return startPrintQueueWorker(db);
 }

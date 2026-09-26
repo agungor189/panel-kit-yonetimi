@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import { NOTIFICATION_PREFERENCES_SCHEMA_V89 } from '../../db/notificationPreferencesSchema.js';
 import { NOTIFICATION_TEMPLATES_SCHEMA_V90 } from '../../db/notificationTemplatesSchema.js';
 import { PUSH_SUBSCRIPTIONS_SCHEMA_V88 } from '../../db/pushSubscriptionsSchema.js';
+import { PUSH_NOTIFICATION_DISPATCH_SCHEMA_V91 } from '../../db/pushNotificationDispatchSchema.js';
 import { PushOwnershipError, PushUnavailableError, createPushNotificationService } from './pushNotificationService.js';
 
 const subscription = (endpoint = 'https://push.example.test/device-1') => ({
@@ -20,6 +21,7 @@ function createDb() {
   db.exec(PUSH_SUBSCRIPTIONS_SCHEMA_V88);
   db.exec(NOTIFICATION_PREFERENCES_SCHEMA_V89);
   db.exec(NOTIFICATION_TEMPLATES_SCHEMA_V90);
+  db.exec(PUSH_NOTIFICATION_DISPATCH_SCHEMA_V91);
   return db;
 }
 
@@ -225,5 +227,99 @@ test('expired subscriptions are removed after a 410 response', async () => {
     failed: 0,
   });
   assert.equal((db.prepare('SELECT COUNT(*) AS count FROM push_subscriptions').get() as { count: number }).count, 0);
+  db.close();
+});
+
+test('operational push respects preferences and sends to every active device', async () => {
+  const db = createDb();
+  const deliveries: Array<{ endpoint: string; payload: any; topic?: string }> = [];
+  const service = createPushNotificationService({
+    db,
+    env: configuredEnv(),
+    transport: {
+      setVapidDetails() {},
+      async sendNotification(target, payload, options) {
+        deliveries.push({ endpoint: target.endpoint, payload: JSON.parse(payload), topic: options?.topic });
+      },
+    },
+  });
+  service.subscribe('user-1', subscription('https://push.example.test/device-1'));
+  service.subscribe('user-1', subscription('https://push.example.test/device-2'));
+  service.subscribe('user-2', subscription('https://push.example.test/device-3'));
+  service.updatePreferences('user-2', disabledPreferences);
+
+  const result = await service.sendOperational({
+    category: 'new_order',
+    variables: { platform: 'SHOPIFY', order_number: 'S-42', total: '1250.00' },
+    targetUrl: '/sales?order=sale-42',
+    tag: 'new-order-sale-42',
+    dedupeKey: 'channel.order.accepted.v1:sale-42',
+  });
+
+  assert.deepEqual(result, { sent: 2, expired: 0, failed: 0, skipped: 1, duplicate: false, unavailable: false });
+  assert.deepEqual(deliveries.map(({ endpoint }) => endpoint).sort(), [
+    'https://push.example.test/device-1',
+    'https://push.example.test/device-2',
+  ]);
+  assert.equal(deliveries[0].payload.title, 'Yeni SHOPIFY Siparişi');
+  assert.equal(deliveries[0].payload.url, '/sales?order=sale-42');
+  assert.match(String(deliveries[0].topic), /^dsdst-[a-f0-9]{24}$/);
+  db.close();
+});
+
+test('operational push dedupes replays and transport failure stays contained', async () => {
+  const db = createDb();
+  let calls = 0;
+  const service = createPushNotificationService({
+    db,
+    env: configuredEnv(),
+    transport: {
+      setVapidDetails() {},
+      async sendNotification() {
+        calls += 1;
+        throw new Error('transport unavailable');
+      },
+    },
+  });
+  service.subscribe('user-1', subscription());
+  const notification = {
+    category: 'shipping_exception' as const,
+    variables: { order_number: 'DS-42' },
+    targetUrl: '/sales?shipment=shipment-42',
+    tag: 'shipping-exception-job-42',
+    dedupeKey: 'shipping_exception:job-42',
+  };
+
+  assert.equal((await service.sendOperational(notification)).failed, 1);
+  assert.deepEqual(await service.sendOperational(notification), {
+    sent: 0, expired: 0, failed: 0, skipped: 0, duplicate: true, unavailable: false,
+  });
+  assert.equal(calls, 1);
+  db.close();
+});
+
+test('operational push removes expired subscriptions after 404 or 410', async () => {
+  const db = createDb();
+  const service = createPushNotificationService({
+    db,
+    env: configuredEnv(),
+    transport: {
+      setVapidDetails() {},
+      async sendNotification() {
+        throw Object.assign(new Error('gone'), { statusCode: 410 });
+      },
+    },
+  });
+  service.subscribe('user-1', subscription());
+
+  const result = await service.sendOperational({
+    category: 'shipping_exception',
+    variables: { order_number: 'DS-43' },
+    targetUrl: '/sales?shipment=shipment-43',
+    tag: 'shipping-exception-job-43',
+    dedupeKey: 'shipping_exception:job-43',
+  });
+  assert.equal(result.expired, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM push_subscriptions').pluck().get(), 0);
   db.close();
 });

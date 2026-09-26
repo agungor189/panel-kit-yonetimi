@@ -58,6 +58,7 @@ import { mountWarehouseModule } from "./server/modules/warehouse/index.js";
 import { createProductStockModule } from "./server/modules/products/stock.js";
 import { createApiKeyHasher } from "./server/modules/integrations/apiKeys.js";
 import { createPushNotificationService } from "./server/modules/notifications/pushNotificationService.js";
+import { createOperationalPushNotifications } from "./server/modules/notifications/operationalPushNotifications.js";
 import {
   DEFAULT_BACKUP_CONFIG,
   normalizeBackupConfig,
@@ -156,8 +157,11 @@ initializeDatabase(db);
 const inventoryService = new InventoryService(db);
 const saleCommands = new CommandExecutor(db);
 const salesFinancials = new SalesFinancialService(db);
-const channelGateway = new ChannelGatewayService(db);
 const pushNotificationService = createPushNotificationService({ db, transport: webpush, env: process.env });
+const operationalPushNotifications = createOperationalPushNotifications(db, pushNotificationService);
+const channelGateway = new ChannelGatewayService(db, {
+  onOrderAccepted: operationalPushNotifications.orderAccepted,
+});
 const {
   getProductBomComponents,
   getProductStockProfile,
@@ -5877,6 +5881,7 @@ async function startServer() {
       authorizePrepare: auth.requireCapability("warehouse:pick_orders"),
       authorizeManage: auth.requireCapability("shipping:manage"),
       authorizeDispatch: auth.requireCapability("shipping:dispatch"),
+      notifyShippingException: operationalPushNotifications.shippingException,
     }),
   );
   app.use(
@@ -5897,6 +5902,7 @@ async function startServer() {
     uploadsDir,
     rateLimiters: [publicAuthFailedLimiter, publicApiLimiter],
     authenticateUserToken: (token, servicePrincipalId) => auth.authenticateUserToken(token, servicePrincipalId),
+    notifyShippingException: operationalPushNotifications.shippingException,
   });
 
   app.get("/api/public/health", (req, res) => {

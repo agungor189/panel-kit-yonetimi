@@ -9,10 +9,11 @@ import { SalesFinancialService } from "../sales/salesFinancialService.js";
 import { authoredKitContentHash, PublishedKitService } from "../kits/publishedKitService.js";
 import { calculateInverseCommissionPrice, CHANNEL_ADAPTERS, ChannelGatewayError, ChannelGatewayService } from "./channelGateway.js";
 import { TrendyolGatewayTransport } from "./trendyolGatewayTransport.js";
+import { createOperationalPushNotifications } from "../notifications/operationalPushNotifications.js";
 
 const actor = { id: "channel-admin", name: "Channel Admin" };
 
-const setup = (stock = 5) => {
+const setup = (stock = 5, onOrderAccepted?: ConstructorParameters<typeof ChannelGatewayService>[1]['onOrderAccepted']) => {
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
   initializeDatabase(db);
@@ -26,7 +27,7 @@ const setup = (stock = 5) => {
   const cost = procurement.finalizeAcquisitionCosts("purchase", { allocations: [] }).lots[0];
   new InventoryService(db).receiveCostedLot({ receiptId: "receipt", costSnapshotId: cost.id, receivedAt: "2026-09-23T08:00:00.000Z",
     location: { id: "pick", kind: "PICKING" }, operationId: "receive-channel-stock" });
-  const gateway = new ChannelGatewayService(db);
+  const gateway = new ChannelGatewayService(db, { onOrderAccepted });
   gateway.configureAccount({ id: "account", channel: "TRENDYOL", merchantAccountId: "merchant", environment: "STAGE",
     secretReference: "env:TRENDYOL_KEY", operationId: "configure-account", actor });
   gateway.mapProduct({ id: "mapping", accountId: "account", externalListingId: "listing-part", externalSku: "EXT-PART",
@@ -89,6 +90,34 @@ test("webhook and poll converge once, reserve immediately, preserve actual price
   assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_reservations").pluck().get(), 1);
   assert.deepEqual(db.prepare("SELECT * FROM sale_financial_snapshots WHERE sale_id=?").get(saleId), snapshotBefore);
   assert.throws(() => db.prepare("UPDATE sale_financial_snapshots SET commission_terms_json='{}' WHERE sale_id=?").run(saleId), /immutable/i);
+  db.close();
+});
+
+test("accepted canonical order notifies once while command and inbound replays stay silent", () => {
+  const notifications: any[] = [];
+  const { db } = setup();
+  const operational = createOperationalPushNotifications(db, {
+    sendOperational(input) {
+      notifications.push(input);
+      return Promise.reject(new Error("push transport failed"));
+    },
+  });
+  const gateway = new ChannelGatewayService(db, { onOrderAccepted: operational.orderAccepted });
+
+  const first = gateway.ingest(order(), "notify-order-1", "channel-worker");
+  assert.equal(first.result.body.state, "ACCEPTED");
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].category, "new_order");
+  assert.deepEqual(notifications[0].variables, {
+    platform: "TRENDYOL",
+    order_number: "order-1",
+    total: "2400.00",
+  });
+  assert.equal(notifications[0].targetUrl, `/sales?order=${encodeURIComponent((first.result.body as any).saleId)}`);
+
+  gateway.ingest(order(), "notify-order-1", "channel-worker");
+  gateway.ingest(order({ externalEventId: "notify-poll-replay", ingestionPath: "POLL" }), "notify-order-poll", "channel-worker");
+  assert.equal(notifications.length, 1);
   db.close();
 });
 

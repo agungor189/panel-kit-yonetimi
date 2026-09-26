@@ -129,10 +129,22 @@ type InboundEvent = {
 export class ChannelGatewayService {
   private readonly commands: CommandExecutor;
   private readonly sales: MarketplaceSaleAcceptanceService;
+  private readonly onOrderAccepted?: (event: {
+    eventType: "channel.order.accepted.v1";
+    saleId: string;
+    channelOrderId: string;
+  }) => void | Promise<unknown>;
 
-  constructor(private readonly db: Database.Database) {
+  constructor(private readonly db: Database.Database, options: {
+    onOrderAccepted?: (event: {
+      eventType: "channel.order.accepted.v1";
+      saleId: string;
+      channelOrderId: string;
+    }) => void | Promise<unknown>;
+  } = {}) {
     this.commands = new CommandExecutor(db);
     this.sales = new MarketplaceSaleAcceptanceService(db);
+    this.onOrderAccepted = options.onOrderAccepted;
   }
 
   configureAccount(input: { id: string; channel: ChannelCode; merchantAccountId: string; environment: "STAGE" | "PRODUCTION"; secretReference?: string | null; config?: unknown; operationId: string; actor: Actor }) {
@@ -204,7 +216,7 @@ export class ChannelGatewayService {
   ingest(event: InboundEvent, operationId: string, serviceActorId: string) {
     const sanitized = redactProviderPayload(event.rawPayload);
     const payloadDigest = digest(sanitized);
-    return this.commands.execute({ operationId, commandType: "channels.inbound.process.v1", payload: { ...event, rawPayload: sanitized },
+    const outcome = this.commands.execute({ operationId, commandType: "channels.inbound.process.v1", payload: { ...event, rawPayload: sanitized },
       actor: { service: { id: serviceActorId } }, authorization: { decision: "ALLOW", capability: "channels:ingest" } }, (context) => {
       const account = this.db.prepare("SELECT * FROM channel_accounts WHERE id=?").get(event.accountId) as any;
       if (!account) throw new ChannelGatewayError("CHANNEL_ACCOUNT_NOT_FOUND", "Channel account was not found.", 404);
@@ -395,6 +407,23 @@ export class ChannelGatewayService {
         return this.markOrderException(eventId, orderId);
       }
     });
+    const body = outcome.result.body as { state?: string; saleId?: string };
+    if (!outcome.replayed && body.state === "ACCEPTED" && body.saleId && this.onOrderAccepted) {
+      const channelOrderId = this.db.prepare("SELECT id FROM channel_orders WHERE sale_id=?")
+        .pluck().get(body.saleId) as string | undefined;
+      if (channelOrderId) {
+        try {
+          void Promise.resolve(this.onOrderAccepted({
+            eventType: "channel.order.accepted.v1",
+            saleId: body.saleId,
+            channelOrderId,
+          })).catch(() => undefined);
+        } catch {
+          // Push is a best-effort post-commit side effect and must never affect acceptance.
+        }
+      }
+    }
+    return outcome;
   }
 
   updatePollingCursor(input: { accountId: string; cursorName: string; checkpointValue: string; operationId: string; serviceActorId: string; updatedAt: string }) {

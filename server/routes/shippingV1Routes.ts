@@ -15,6 +15,7 @@ type Dependencies = {
   authorizePrepare: RequestHandler;
   authorizeManage: RequestHandler;
   authorizeDispatch: RequestHandler;
+  notifyShippingException?: (event: { shipmentId: string; jobId: string }) => void | Promise<unknown>;
 };
 
 const operationId = (req: express.Request) => String(req.headers["x-operation-id"] || req.headers["idempotency-key"] || "").trim();
@@ -42,6 +43,7 @@ export function createShippingV1Router(dependencies: Dependencies) {
   const geliver = new GeliverFlowService(dependencies.db, geliverTransport, {
     senderAddressId: geliverTransport.senderAddressId,
     sourceIdentifier: geliverTransport.sourceIdentifier,
+    onOperationalException: dependencies.notifyShippingException,
   });
   const execute = (req: express.Request, capability: string, commandType: string, payload: unknown, handler: Parameters<CommandExecutor["execute"]>[1]) => commands.execute({
     operationId: operationId(req), commandType, payload, actor: { human: actor(req) },
