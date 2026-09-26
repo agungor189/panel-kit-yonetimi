@@ -1,4 +1,4 @@
-import { useState, useEffect, createContext, useContext, type ComponentType } from 'react';
+import { useState, useEffect, createContext, useContext, useCallback, type ComponentType } from 'react';
 import {
   LayoutDashboard,
   Package,
@@ -55,6 +55,13 @@ import PanelApiKeys from './components/integrations/PanelApiKeys';
 import TrendyolIntegration from './components/integrations/TrendyolIntegration';
 import ChannelsIntegration from './components/integrations/ChannelsIntegration';
 import ReconciliationCenter from './components/ReconciliationCenter';
+import {
+  listenToBrowserNavigation,
+  pathToNavigation,
+  updateBrowserNavigation,
+  type NavigationState,
+  type View,
+} from './lib/navigation';
 
 const APP_VERSION = 'v2.5.5';
 
@@ -69,7 +76,6 @@ function normalizeRole(role: unknown): UserRole {
   return role === 'admin' || role === 'user' || role === 'readonly' ? role : 'admin';
 }
 
-type View = 'dashboard' | 'products' | 'product-detail' | 'product-wizard' | 'stock' | 'income' | 'expense' | 'recurring' | 'analytics' | 'product-analytics' | 'insights' | 'settings' | 'activity-logs' | 'reconciliation' | 'b2b' | 'sales' | 'api-keys' | 'panel-api' | 'trendyol' | 'channels' | 'cash';
 type NavItem = { id: View; label: string; icon: ComponentType<{ className?: string }> };
 
 export default function App() {
@@ -78,9 +84,10 @@ export default function App() {
 
   const [userRole, setUserRole] = useState<UserRole>('admin');
 
-  const [currentView, setCurrentView] = useState<View>('dashboard');
-  const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
-  const [selectedFirmId, setSelectedFirmId] = useState<string | null>(null);
+  const [navigation, setNavigation] = useState<NavigationState>(() => pathToNavigation(window.location.pathname));
+  const currentView = navigation.view;
+  const selectedProductId = navigation.productId || null;
+  const selectedFirmId = navigation.firmId || null;
   const [analyticsTab, setAnalyticsTab] = useState<string | undefined>(undefined);
   const [showFirmAdd, setShowFirmAdd] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -94,6 +101,25 @@ export default function App() {
     return window.innerWidth > 768;
   });
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
+  const navigate = useCallback((nextNavigation: NavigationState, mode: 'push' | 'replace' = 'push') => {
+    updateBrowserNavigation(window, nextNavigation, mode);
+    setNavigation(nextNavigation);
+    setIsMobileMenuOpen(false);
+  }, []);
+
+  const navigateToView = useCallback((view: View) => navigate({ view }), [navigate]);
+
+  useEffect(() => {
+    const initialNavigation = pathToNavigation(window.location.pathname);
+    updateBrowserNavigation(window, initialNavigation, 'replace');
+    setNavigation(initialNavigation);
+
+    return listenToBrowserNavigation(window, (nextNavigation) => {
+      setNavigation(nextNavigation);
+      setIsMobileMenuOpen(false);
+    });
+  }, []);
 
   useEffect(() => {
     try {
@@ -175,13 +201,12 @@ export default function App() {
   };
 
   const navigateToProduct = (id: string) => {
-    setSelectedProductId(id);
-    setCurrentView('product-detail');
+    navigate({ view: 'product-detail', productId: id });
   };
 
   const navigateToAnalytics = (tab: string) => {
     setAnalyticsTab(tab);
-    setCurrentView('analytics');
+    navigate({ view: 'analytics' });
   };
 
   const mainNavItems: NavItem[] = [
@@ -210,11 +235,10 @@ export default function App() {
   useEffect(() => {
     if (!isReadOnly) return;
     if (restrictedReadonlyViews.includes(currentView)) {
-      setCurrentView('dashboard');
-      setSelectedProductId(null);
+      navigate({ view: 'dashboard' }, 'replace');
     }
     if (showFirmAdd) setShowFirmAdd(false);
-  }, [currentView, isReadOnly, showFirmAdd]);
+  }, [currentView, isReadOnly, navigate, showFirmAdd]);
 
   const { viewCurrency, setViewCurrency, activeRate, rateSource, rateFetchedAt, isRateLoading, isRateError, refreshRate } = useCurrency();
 
@@ -233,11 +257,7 @@ export default function App() {
   const isNavActive = (id: View) =>
     currentView === id || (id === 'products' && (currentView === 'product-detail' || currentView === 'product-wizard'));
   const selectView = (id: View) => {
-    setCurrentView(id);
-    if (id === 'b2b') {
-      setSelectedFirmId(null);
-    }
-    setIsMobileMenuOpen(false);
+    navigateToView(id);
   };
 
   const renderSectionLabel = (label: string) => (
@@ -536,13 +556,12 @@ export default function App() {
 
         {/* View Container */}
         <div className="p-4 md:p-6 flex-1 max-w-[1600px] w-full mx-auto">
-          {currentView === 'dashboard' && <Dashboard onNavigate={setCurrentView} onNavigateAnalytics={navigateToAnalytics} onProductClick={navigateToProduct} />}
+          {currentView === 'dashboard' && <Dashboard onNavigate={navigateToView} onNavigateAnalytics={navigateToAnalytics} onProductClick={navigateToProduct} />}
           {currentView === 'products' && (
             <ProductList
               onAddProduct={() => {
                 if (isReadOnly) return;
-                setSelectedProductId(null);
-                setCurrentView('product-wizard');
+                navigate({ view: 'product-wizard' });
               }}
               onProductClick={navigateToProduct}
             />
@@ -550,10 +569,10 @@ export default function App() {
           {currentView === 'product-detail' && selectedProductId && (
              <ProductDetail
                 productId={selectedProductId}
-                onBack={() => setCurrentView('products')}
+                onBack={() => navigate({ view: 'products' })}
                 onEdit={() => {
                   if (isReadOnly) return;
-                  setCurrentView('product-wizard');
+                  navigate({ view: 'product-wizard', productId: selectedProductId });
                 }}
              />
           )}
@@ -562,14 +581,13 @@ export default function App() {
               productId={selectedProductId}
               settings={settings}
               onClose={() => {
-                setCurrentView('products');
-                setSelectedProductId(null);
+                navigate({ view: 'products' });
               }}
             />
           )}
           {!isReadOnly && currentView === 'b2b' && !selectedFirmId && (
             <B2BFirms
-              onFirmClick={(id: string) => setSelectedFirmId(id)}
+              onFirmClick={(id: string) => navigate({ view: 'b2b', firmId: id })}
               onAddFirm={() => {
                 if (isReadOnly) return;
                 setShowFirmAdd(true);
@@ -577,12 +595,11 @@ export default function App() {
             />
           )}
           {!isReadOnly && currentView === 'b2b' && selectedFirmId && (
-            <B2BFirmDetail firmId={selectedFirmId} onBack={() => setSelectedFirmId(null)} />
+            <B2BFirmDetail firmId={selectedFirmId} onBack={() => navigate({ view: 'b2b' })} />
           )}
           {!isReadOnly && showFirmAdd && (
             <B2BFirmForm onClose={() => setShowFirmAdd(false)} onSave={() => {
-              setCurrentView('b2b');
-              setSelectedFirmId(null);
+              navigate({ view: 'b2b' });
             }} />
           )}
           {currentView === 'sales' && <Sales />}
