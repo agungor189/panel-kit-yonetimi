@@ -543,6 +543,36 @@ export function createWarehouseRouter({
     requireWarehousePermission("warehouse:pick_orders"), (_req, res) =>
       res.json({ success: true, contract: "dsdst.carrier-provider-contract.v2", data: geliverService.contract() }));
 
+  router.get("/shipping/shipments", authenticate("read:warehouse_orders"), requireWarehouseUser,
+    requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
+      try {
+        const requestedScope = queryText(req.query.scope, 20).toLowerCase();
+        const scope = ["pending", "completed", "all"].includes(requestedScope)
+          ? requestedScope
+          : "pending";
+
+        const query = queryText(req.query.q, 120);
+        const limit = Math.min(
+          500,
+          Math.max(1, Math.trunc(Number(req.query.limit)) || 200),
+        );
+
+        auditRead(req);
+
+        return res.json({
+          success: true,
+          contract: "dsdst.shipment-list.v1",
+          data: shipmentService.listShipments({
+            scope,
+            query,
+            limit,
+          }),
+        });
+      } catch (error) {
+        return handleServiceError(res, error);
+      }
+    });
+
   router.get("/shipping/shipments/:id", authenticate("read:warehouse_orders"), requireWarehouseUser,
     requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
       try {
