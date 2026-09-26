@@ -229,6 +229,14 @@ export class CatalogService {
     return row ? this.mapRow(row) : null;
   }
 
+  captureImportedProductVersion(id: string): CatalogProduct {
+    return this.db.transaction(() => {
+      const current = this.db.prepare("SELECT catalog_version FROM products WHERE id=?").get(id) as { catalog_version: number } | undefined;
+      if (!current) throw new CatalogValidationError("Catalog product was not found.");
+      return this.captureVersion(id, Number(current.catalog_version || 0) + 1);
+    }).immediate();
+  }
+
   createProduct(input: CatalogProductInput, options: { allowPublishedKitMutation?: boolean } = {}): CatalogProduct {
     const normalized = normalizedInput(input);
     if (normalized.catalogType === "KIT" && !options.allowPublishedKitMutation) {

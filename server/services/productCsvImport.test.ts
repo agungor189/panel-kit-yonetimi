@@ -12,6 +12,7 @@ function database() {
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
   initializeDatabase(db);
+  runMigrations(db);
   return db;
 }
 
@@ -104,6 +105,7 @@ test("import persists product master data but ignores warehouse placement column
     { box_count: 2, units_per_box: 5, box_weight_kg: 0.75, total_weight_kg: 1.5 },
   );
   assert.equal((db.prepare("SELECT COUNT(*) count FROM product_bom").get() as any).count, 1);
+  assert.equal((db.prepare("SELECT COUNT(*) count FROM catalog_product_versions").get() as any).count, 2);
   db.close();
 });
 

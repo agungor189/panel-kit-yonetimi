@@ -17,7 +17,7 @@ import {
   SlidersHorizontal,
   X
 } from 'lucide-react';
-import { api } from '../lib/api';
+import { api, createRetryOperation } from '../lib/api';
 import { useCurrency } from '../CurrencyContext';
 import { Product } from '../types';
 import Papa from 'papaparse';
@@ -161,6 +161,7 @@ type BulkImageUploadReport = {
 export default function ProductList({ onAddProduct, onProductClick }: ProductListProps) {
   const { isReadOnly } = useAuth();
   const { FormatAmount, activeRate, viewCurrency } = useCurrency();
+  const csvImportOperation = useRef(createRetryOperation('product-csv-import')).current;
   const [products, setProducts] = useState<Product[]>([]);
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('table');
   const [search, setSearch] = useState('');
@@ -442,8 +443,11 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
     if (!importReport || importReport.validation_errors.length > 0) return;
     setDeletingAll(true);
     setImportProgress({ current: 0, total: csvData.length });
+    const payload = { rows: csvData, headers: csvHeaders, dry_run: false, source_name: csvFileName };
+    const operationId = csvImportOperation.idFor(payload);
     try {
-      const report = await api.post('/products/import', { rows: csvData, headers: csvHeaders, dry_run: false, source_name: csvFileName });
+      const report = await api.post('/products/import', payload, { operationId });
+      csvImportOperation.complete(operationId);
       setImportReport(report);
       toast.success(`${report.products_created} ürün oluşturuldu, ${report.products_updated} ürün güncellendi${report.lot_lines_created || report.lot_lines_updated ? ` · ${report.lot_lines_created + report.lot_lines_updated} lot satırı hazır` : ''}`);
       await loadProducts();

@@ -33,6 +33,7 @@ import { createReturnsV1Router } from "./server/routes/returnsV1Routes.js";
 import { createShippingV1Router } from "./server/routes/shippingV1Routes.js";
 import { createReconciliationV1Router } from "./server/routes/reconciliationV1Routes.js";
 import { createPushNotificationRouter } from "./server/routes/pushNotificationRoutes.js";
+import { createProductCsvImportRouter } from "./server/routes/productCsvImportRoutes.js";
 import { startDailyReconciliationScheduler } from "./server/modules/reconciliation/reconciliationScheduler.js";
 import { rejectLegacyCatalogMutation } from "./server/modules/catalog/legacyCatalogGuard.js";
 import { CommandExecutor, CommandFoundationError } from "./server/modules/commands/commandFoundation.js";
@@ -47,7 +48,6 @@ import { createPanelApiAuth } from "./server/middleware/panelApiAuth.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
 import { restoreUploadEntry } from "./server/utils/restoreUploads.js";
 import { initializeDatabase, openDatabase } from "./server/db/initialize.js";
-import { importProductsFromCsvRows } from "./server/services/productCsvImport.js";
 import {
   createAuthModule,
   parseUserPermissions,
@@ -2325,29 +2325,13 @@ async function startServer() {
     return null;
   };
 
+  // The explicit canonical CSV command is mounted before the fail-closed
+  // legacy guard. Every other legacy product identity mutation remains blocked.
+  app.use("/api/products/import", createProductCsvImportRouter({
+    db,
+    authorize: auth.requireCapability("panel:write"),
+  }));
   app.use("/api/products", rejectLegacyCatalogMutation);
-
-  app.post("/api/products/import", (req, res) => {
-    try {
-      const rows = Array.isArray(req.body?.rows) ? req.body.rows : null;
-      const headers = Array.isArray(req.body?.headers) ? req.body.headers.map(String) : null;
-      if (!rows || !headers) {
-        return res.status(400).json({ error: "rows ve headers alanları zorunludur." });
-      }
-      const dryRun = req.body?.dry_run !== false;
-      const report = importProductsFromCsvRows(db, rows, headers, {
-        apply: !dryRun,
-        actorUsername: req.user?.username || "product-csv-import",
-        sourceName: cleanText(req.body?.source_name) || "products.csv",
-        sourceHash: crypto.createHash("sha256").update(JSON.stringify({ headers, rows })).digest("hex"),
-      });
-      if (!dryRun && report.validation_errors.length > 0) return res.status(422).json(report);
-      return res.json(report);
-    } catch (err: any) {
-      AppLogger.error("PRODUCT_CSV_IMPORT_ERROR", "Product CSV import failed", err);
-      return res.status(400).json({ error: err.message });
-    }
-  });
 
   app.post("/api/products/bulk-import", (req, res) => {
     const items = req.body;
