@@ -4,6 +4,7 @@ import { PanelApiKey } from '../../types';
 import { TerminalSquare, Plus, Trash2, Edit2, Play, CheckCircle, XCircle, AlertTriangle, ShieldAlert, Copy, RefreshCw, XOctagon } from 'lucide-react';
 import { useAuth } from '../../App';
 import toast, { Toaster } from 'react-hot-toast';
+import { Button, Card, ConfirmDialog, EmptyState, LoadingState, PageHeader } from '../ui';
 
 const AVAILABLE_PERMISSIONS = [
   'products:read', 'products:write', 'stock:read', 'stock:write',
@@ -186,30 +187,23 @@ export default function PanelApiKeys() {
     <div className="space-y-6 animate-in fade-in duration-500">
       <Toaster position="top-right" />
       
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-black text-text-main flex items-center space-x-3">
-            <div className="w-10 h-10 bg-purple-100 rounded-xl flex items-center justify-center">
+      <PageHeader
+        title={<span className="flex items-center gap-3"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-purple-100">
               <TerminalSquare className="w-5 h-5 text-purple-600" />
-            </div>
-            <span>Panel API Yönetimi</span>
-          </h2>
-          <p className="text-text-muted mt-2 text-sm max-w-xl">
-            Harici sistemlerin (n8n, mobil uygulama vb.) DSDST Panel verilerine güvenli bir şekilde erişebilmesi için gerekli API anahtarlarını üretin ve yönetin.
-          </p>
-        </div>
-        {!isReadOnly && (
-          <button
+            </span>Panel API Yönetimi</span>}
+        description="Harici sistemlerin DSDST Panel verilerine güvenli erişimi için gerekli API anahtarlarını üretin ve yönetin."
+        actions={!isReadOnly && (
+          <Button
             onClick={() => openForm()}
             className="flex items-center space-x-2 bg-purple-600 text-white px-4 py-2 rounded-xl hover:bg-purple-700 transition-colors font-bold shadow-lg shadow-purple-600/25"
           >
             <Plus className="w-5 h-5" />
             <span>Anahtar Üret</span>
-          </button>
+          </Button>
         )}
-      </div>
+      />
 
-      <div className="bg-white rounded-2xl border border-border-color overflow-hidden shadow-sm">
+      <Card className="rounded-2xl overflow-hidden shadow-sm">
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse min-w-[800px]">
             <thead>
@@ -225,14 +219,11 @@ export default function PanelApiKeys() {
             <tbody className="align-top divide-y divide-gray-100">
               {loading ? (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center text-text-muted">Yükleniyor...</td>
+                  <td colSpan={6}><LoadingState label="Panel API anahtarları yükleniyor..." /></td>
                 </tr>
               ) : keys.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center text-text-muted">
-                    <TerminalSquare className="w-10 h-10 mx-auto text-gray-300 mb-3" />
-                    Henüz Panel API anahtarı oluşturulmadı.
-                  </td>
+                  <td colSpan={6}><EmptyState icon={<TerminalSquare className="h-10 w-10" />} title="Henüz Panel API anahtarı oluşturulmadı." /></td>
                 </tr>
               ) : (
                 keys.map((k) => (
@@ -327,7 +318,7 @@ export default function PanelApiKeys() {
             </tbody>
           </table>
         </div>
-      </div>
+      </Card>
 
       {/* NEW KEY MODAL (Show Once) */}
       {newGeneratedKey && (
@@ -467,61 +458,8 @@ export default function PanelApiKeys() {
       )}
 
       {/* CONFIRM MODALS */}
-      {revokeId && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-white rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl p-6 text-center">
-            <div className="w-16 h-16 bg-orange-100 rounded-full flex items-center justify-center mx-auto mb-4">
-              <XOctagon className="w-8 h-8 text-orange-500" />
-            </div>
-            <h3 className="text-xl font-bold text-gray-900 mb-2">Anahtarı İptal Et</h3>
-            <p className="text-gray-500 text-sm mb-6">
-              Bu anahtarı iptal ederseniz bir daha KESİNLİKLE kullanılamaz. Emin misiniz?
-            </p>
-            <div className="flex flex-col gap-3">
-              <button
-                onClick={handleRevoke}
-                className="w-full py-3 bg-orange-500 hover:bg-orange-600 text-white rounded-xl font-bold transition-colors"
-              >
-                Evet, Kalıcı İptal Et
-              </button>
-              <button
-                onClick={() => setRevokeId(null)}
-                className="w-full py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-bold transition-colors"
-              >
-                Vazgeç
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {deleteId && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-white rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl p-6 text-center">
-            <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
-              <AlertTriangle className="w-8 h-8 text-red-500" />
-            </div>
-            <h3 className="text-xl font-bold text-gray-900 mb-2">Anahtarı Sil</h3>
-            <p className="text-gray-500 text-sm mb-6">
-              Bu anahtarı silmek istiyor musunuz? Bu işlem geri alınamaz.
-            </p>
-            <div className="flex flex-col gap-3">
-              <button
-                onClick={handleDelete}
-                className="w-full py-3 bg-red-500 hover:bg-red-600 text-white rounded-xl font-bold transition-colors"
-              >
-                Sil
-              </button>
-              <button
-                onClick={() => setDeleteId(null)}
-                className="w-full py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-bold transition-colors"
-              >
-                İptal
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog open={Boolean(revokeId)} onClose={() => setRevokeId(null)} onConfirm={handleRevoke} title="Anahtarı İptal Et" description="Bu anahtarı iptal ederseniz bir daha kullanılamaz. Emin misiniz?" confirmLabel="Evet, Kalıcı İptal Et" destructive />
+      <ConfirmDialog open={Boolean(deleteId)} onClose={() => setDeleteId(null)} onConfirm={handleDelete} title="Anahtarı Sil" description="Bu anahtarı silmek istiyor musunuz? Bu işlem geri alınamaz." confirmLabel="Sil" destructive />
 
     </div>
   );

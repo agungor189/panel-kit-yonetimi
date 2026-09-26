@@ -32,6 +32,7 @@ import {
   Line,
   Legend,
 } from "recharts";
+import { Button, Card, PageHeader } from "../components/ui";
 
 type ViewTab =
   | "dashboard"
@@ -257,27 +258,22 @@ export default function ProductAnalyticsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col md:flex-row md:items-end gap-3 justify-between">
-        <div>
-          <h1 className="text-2xl font-black text-gray-900 tracking-tight">
-            Ürün & Satış Analizi
-          </h1>
-          <p className="text-sm text-gray-500 font-medium mt-1">
-            Gelişmiş karar destek ve stok raporlama modülü
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <button
+      <PageHeader
+        title="Ürün & Satış Analizi"
+        description="Gelişmiş karar destek ve stok raporlama modülü"
+        actions={<div className="flex gap-2">
+          <Button
+            variant="secondary"
             onClick={fetchAnalytics}
             className="bg-white border flex items-center gap-2 border-gray-200 text-gray-700 px-4 py-2 rounded-xl text-sm font-bold shadow-sm hover:bg-gray-50"
           >
             <RefreshCcw className="w-4 h-4" /> Yenile
-          </button>
-        </div>
-      </div>
+          </Button>
+        </div>}
+      />
 
       {/* Filter Bar */}
-      <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm flex flex-wrap items-end gap-4 overflow-x-auto">
+      <Card padding="sm" className="rounded-2xl border-gray-100 shadow-sm flex flex-wrap items-end gap-4 overflow-x-auto">
         <div>
           <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5 ml-1">
             Tarih Aralığı (Sadece Satışları Filtreler)
@@ -416,7 +412,7 @@ export default function ProductAnalyticsPage() {
           </select>
         </div>
 
-        <button
+        <Button
           onClick={fetchAnalytics}
           disabled={isLoading}
           className="bg-primary text-white font-bold px-6 py-2 rounded-xl flex items-center gap-2 hover:bg-primary/90 transition-all ml-auto shadow-md"
@@ -427,8 +423,8 @@ export default function ProductAnalyticsPage() {
             <Search className="w-4 h-4" />
           )}
           Filtrele
-        </button>
-      </div>
+        </Button>
+      </Card>
 
       {/* Tabs */}
       <div className="flex bg-white rounded-xl shadow-sm border border-gray-100 p-1.5 overflow-x-auto hide-scrollbar gap-1">

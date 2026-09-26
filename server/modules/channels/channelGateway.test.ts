@@ -9,10 +9,11 @@ import { SalesFinancialService } from "../sales/salesFinancialService.js";
 import { authoredKitContentHash, PublishedKitService } from "../kits/publishedKitService.js";
 import { calculateInverseCommissionPrice, CHANNEL_ADAPTERS, ChannelGatewayError, ChannelGatewayService } from "./channelGateway.js";
 import { TrendyolGatewayTransport } from "./trendyolGatewayTransport.js";
+import { createOperationalPushNotifications } from "../notifications/operationalPushNotifications.js";
 
 const actor = { id: "channel-admin", name: "Channel Admin" };
 
-const setup = (stock = 5) => {
+const setup = (stock = 5, onOrderAccepted?: ConstructorParameters<typeof ChannelGatewayService>[1]['onOrderAccepted']) => {
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
   initializeDatabase(db);
@@ -26,7 +27,7 @@ const setup = (stock = 5) => {
   const cost = procurement.finalizeAcquisitionCosts("purchase", { allocations: [] }).lots[0];
   new InventoryService(db).receiveCostedLot({ receiptId: "receipt", costSnapshotId: cost.id, receivedAt: "2026-09-23T08:00:00.000Z",
     location: { id: "pick", kind: "PICKING" }, operationId: "receive-channel-stock" });
-  const gateway = new ChannelGatewayService(db);
+  const gateway = new ChannelGatewayService(db, { onOrderAccepted });
   gateway.configureAccount({ id: "account", channel: "TRENDYOL", merchantAccountId: "merchant", environment: "STAGE",
     secretReference: "env:TRENDYOL_KEY", operationId: "configure-account", actor });
   gateway.mapProduct({ id: "mapping", accountId: "account", externalListingId: "listing-part", externalSku: "EXT-PART",
@@ -92,6 +93,34 @@ test("webhook and poll converge once, reserve immediately, preserve actual price
   db.close();
 });
 
+test("accepted canonical order notifies once while command and inbound replays stay silent", () => {
+  const notifications: any[] = [];
+  const { db } = setup();
+  const operational = createOperationalPushNotifications(db, {
+    sendOperational(input) {
+      notifications.push(input);
+      return Promise.reject(new Error("push transport failed"));
+    },
+  });
+  const gateway = new ChannelGatewayService(db, { onOrderAccepted: operational.orderAccepted });
+
+  const first = gateway.ingest(order(), "notify-order-1", "channel-worker");
+  assert.equal(first.result.body.state, "ACCEPTED");
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].category, "new_order");
+  assert.deepEqual(notifications[0].variables, {
+    platform: "TRENDYOL",
+    order_number: "order-1",
+    total: "2400.00",
+  });
+  assert.equal(notifications[0].targetUrl, `/sales?order=${encodeURIComponent((first.result.body as any).saleId)}`);
+
+  gateway.ingest(order(), "notify-order-1", "channel-worker");
+  gateway.ingest(order({ externalEventId: "notify-poll-replay", ingestionPath: "POLL" }), "notify-order-poll", "channel-worker");
+  assert.equal(notifications.length, 1);
+  db.close();
+});
+
 test("unmapped SKU and insufficient stock create explicit exceptions without products, sales, or negative stock", () => {
   const { db, gateway, inventory } = setup(2);
   const productsBefore = Number(db.prepare("SELECT COUNT(*) FROM products").pluck().get());
@@ -110,6 +139,106 @@ test("unmapped SKU and insufficient stock create explicit exceptions without pro
   assert.equal(db.prepare("SELECT COUNT(*) FROM channel_exceptions WHERE exception_type='STOCK_EXCEPTION'").pluck().get(), 1);
   assert.equal(db.prepare("SELECT COUNT(*) FROM sales").pluck().get(), 0);
   assert.deepEqual(inventory.getProductAvailability("part"), { productId: "part", baseUomCode: "piece", onHandBaseInt: 2, reservedBaseInt: 0, availableBaseInt: 2 });
+  db.close();
+});
+
+test("exception order polling reuses immutable lines and automatically recovers after mapping remediation", () => {
+  const { db, gateway } = setup(5);
+
+  const line = {
+    externalLineId: "exception-poll-line",
+    externalListingId: "exception-poll-listing",
+    externalSku: "EXCEPTION-POLL-SKU",
+    quantityBaseInt: 1,
+    actualUnitGrossMinor: 125_000,
+    vatRateBps: 2_000,
+  };
+
+  const first = gateway.ingest(order({
+    externalEventId: "exception-poll-event-1",
+    externalOrderId: "exception-poll-order",
+    ingestionPath: "POLL",
+    lines: [line],
+    receivedAt: "2026-09-23T09:10:00.000Z",
+  }), "exception-poll-ingest-1", "channel-worker");
+
+  assert.equal(first.result.body.state, "EXCEPTION");
+
+  const orderId = String(
+    db.prepare("SELECT id FROM channel_orders WHERE external_order_id='exception-poll-order'").pluck().get()
+  );
+
+  assert.equal(
+    db.prepare("SELECT COUNT(*) FROM channel_order_lines WHERE channel_order_id=?").pluck().get(orderId),
+    1
+  );
+
+  const retry = gateway.ingest(order({
+    externalEventId: "exception-poll-event-2",
+    externalOrderId: "exception-poll-order",
+    ingestionPath: "POLL",
+    lines: [line],
+    receivedAt: "2026-09-23T09:10:15.000Z",
+  }), "exception-poll-ingest-2", "channel-worker");
+
+  assert.equal(retry.result.body.state, "EXCEPTION");
+  assert.equal(
+    db.prepare("SELECT COUNT(*) FROM channel_order_lines WHERE channel_order_id=?").pluck().get(orderId),
+    1
+  );
+  assert.equal(
+    db.prepare(`SELECT COUNT(*) FROM channel_exceptions
+      WHERE channel_order_id=? AND exception_type='CHANNEL_MAPPING_EXCEPTION' AND state='OPEN'`).pluck().get(orderId),
+    1
+  );
+
+  gateway.mapProduct({
+    id: "exception-poll-map",
+    accountId: "account",
+    externalListingId: "exception-poll-listing",
+    externalSku: "EXCEPTION-POLL-SKU",
+    productId: "part",
+    categoryRef: "parts",
+    operationId: "exception-poll-map-create",
+    actor,
+  });
+
+  // Shopify may return the exact same event id/version after local
+  // remediation. ingest remains idempotent and therefore returns DUPLICATE.
+  const duplicateAfterMapping = gateway.ingest(order({
+    externalEventId: "exception-poll-event-1",
+    externalOrderId: "exception-poll-order",
+    ingestionPath: "POLL",
+    lines: [line],
+    receivedAt: "2026-09-23T09:10:00.000Z",
+  }), "exception-poll-ingest-3", "channel-worker");
+
+  assert.equal(
+    duplicateAfterMapping.result.body.state,
+    "DUPLICATE",
+  );
+
+  const recovered =
+    gateway.tryAutoRecoverExceptionOrder({
+      accountId: "account",
+      externalOrderId: "exception-poll-order",
+      serviceActorId: "channel-worker",
+    }) as any;
+
+  assert.equal(recovered.state, "ACCEPTED");
+  assert.equal(
+    db.prepare("SELECT COUNT(*) FROM channel_order_lines WHERE channel_order_id=?").pluck().get(orderId),
+    1
+  );
+  assert.equal(db.prepare("SELECT COUNT(*) FROM sales").pluck().get(), 1);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_reservations").pluck().get(), 1);
+  assert.equal(
+    db.prepare(`SELECT COUNT(*) FROM channel_exceptions
+      WHERE channel_order_id=? AND state='OPEN'
+        AND exception_type IN ('CHANNEL_MAPPING_EXCEPTION','COMMISSION_EXCEPTION','STOCK_EXCEPTION')`).pluck().get(orderId),
+    0
+  );
+
   db.close();
 });
 
@@ -177,6 +306,38 @@ test("pre-dispatch cancellation releases reservation", () => {
   db.close();
 });
 
+test("canonical cancellation emits one templated push and replay stays silent", () => {
+  const pushes: any[] = [];
+  const { db, inventory } = setup();
+  const operational = createOperationalPushNotifications(db, {
+    sendOperational(input) {
+      pushes.push(input);
+      return Promise.reject(new Error("push transport failed"));
+    },
+  });
+  const gateway = new ChannelGatewayService(db, { onOrderTransition: operational.orderCancelReturn });
+  const accepted = gateway.ingest(order(), "push-cancel-base", "channel-worker");
+  const cancellation = order({
+    externalEventId: "push-cancel-event",
+    externalEventVersion: "2",
+    eventType: "ORDER_CANCELLED",
+    lines: [],
+    receivedAt: "2026-09-23T10:00:00.000Z",
+  });
+
+  assert.equal(gateway.ingest(cancellation, "push-cancel", "channel-worker").result.body.state, "CANCELLED");
+  assert.equal(inventory.getProductAvailability("part").reservedBaseInt, 0);
+  assert.equal(pushes.length, 1);
+  assert.equal(pushes[0].category, "order_cancel_return");
+  assert.deepEqual(pushes[0].variables, { order_number: "order-1", action: "İptal" });
+  assert.equal(pushes[0].targetUrl, `/sales?order=${encodeURIComponent((accepted.result.body as any).saleId)}`);
+
+  gateway.ingest(cancellation, "push-cancel", "channel-worker");
+  gateway.ingest(cancellation, "push-cancel-duplicate", "channel-worker");
+  assert.equal(pushes.length, 1);
+  db.close();
+});
+
 test("channel kit order reserves the exact published V2-11 version and components", () => {
   const { db, gateway } = setup(5);
   const versionRef = String(db.prepare("SELECT catalog_version_ref FROM products WHERE id='part'").pluck().get());
@@ -230,6 +391,66 @@ test("post-dispatch channel return opens V2-10 workflow without direct restock o
   db.close();
 });
 
+test("canonical return request emits one push and replay stays silent", () => {
+  const pushes: any[] = [];
+  const { db, inventory } = setup();
+  const operational = createOperationalPushNotifications(db, {
+    sendOperational(input) {
+      pushes.push(input);
+      return Promise.resolve({ sent: 1, expired: 0, failed: 0, skipped: 0, duplicate: false, unavailable: false });
+    },
+  });
+  const gateway = new ChannelGatewayService(db, { onOrderTransition: operational.orderCancelReturn });
+  const accepted = gateway.ingest(order({
+    lines: [{ externalLineId: "line-1", externalListingId: "listing-part", quantityBaseInt: 1,
+      actualUnitGrossMinor: 125_000, vatRateBps: 2_000 }],
+  }), "push-return-base", "channel-worker");
+  const saleId = (accepted.result.body as any).saleId;
+  const reservationId = (accepted.result.body as any).reservationId;
+  inventory.markPicked({ reservationId, operationId: "push-return-pick" });
+  inventory.markPacked({ reservationId, operationId: "push-return-pack" });
+  inventory.dispatchReservation({ reservationId, shipmentId: "push-return-shipment", dispatchedAt: "2026-09-23T10:00:00.000Z", operationId: "push-return-dispatch" });
+  new SalesFinancialService(db).finalizeDispatch({ reservationId, operationId: "push-return-dispatch", actor: { id: "warehouse" }, finalizedAt: "2026-09-23T10:00:00.000Z" });
+  const returnEvent = order({ externalEventId: "push-return-event", externalEventVersion: "2", eventType: "ORDER_RETURNED",
+    lines: [], receivedAt: "2026-09-23T11:00:00.000Z" });
+
+  assert.equal(gateway.ingest(returnEvent, "push-return", "channel-worker").result.body.state, "RETURN_REQUESTED");
+  assert.equal(pushes.length, 1);
+  assert.equal(pushes[0].category, "order_cancel_return");
+  assert.deepEqual(pushes[0].variables, { order_number: "order-1", action: "İade" });
+  assert.equal(pushes[0].targetUrl, `/sales?order=${encodeURIComponent(saleId)}`);
+  gateway.ingest(returnEvent, "push-return", "channel-worker");
+  assert.equal(pushes.length, 1);
+  db.close();
+});
+
+test("reservation stock failure emits stock exception without changing core outcome", () => {
+  const pushes: any[] = [];
+  const { db } = setup(1);
+  const operational = createOperationalPushNotifications(db, {
+    sendOperational(input) {
+      pushes.push(input);
+      return Promise.reject(new Error("push transport failed"));
+    },
+  });
+  const gateway = new ChannelGatewayService(db, { onStockException: operational.stockException });
+  const shortage = gateway.ingest(order(), "push-stock-shortage", "channel-worker");
+
+  assert.equal(shortage.result.body.state, "EXCEPTION");
+  assert.equal(db.prepare("SELECT COUNT(*) FROM sales").pluck().get(), 0);
+  assert.equal(pushes.length, 1);
+  assert.equal(pushes[0].category, "stock_exception");
+  assert.deepEqual(pushes[0].variables, {
+    sku: "PART-1",
+    message: "Sipariş rezervasyonu oluşturulamadı",
+  });
+  assert.equal(pushes[0].targetUrl, "/products/part");
+
+  gateway.ingest(order(), "push-stock-shortage", "channel-worker");
+  assert.equal(pushes.length, 1);
+  db.close();
+});
+
 test("exception orders resolve and reprocess exactly once after mapping or stock remediation", () => {
   const { db, gateway, inventory } = setup(2);
   const unmapped = gateway.ingest(order({ externalEventId: "recover-map-event", externalOrderId: "recover-map-order",
@@ -262,7 +483,7 @@ test("exception orders resolve and reprocess exactly once after mapping or stock
   db.close();
 });
 
-test("canonical changes auto-enqueue claimable jobs and disabled adapters remain fail-closed", async () => {
+test("canonical changes auto-enqueue claimable jobs while Shopify product writes remain unclaimable", async () => {
   const { db, gateway, inventory } = setup(5);
   db.prepare("DELETE FROM channel_outbound_jobs").run();
   inventory.reserveOrder({ reservationId: "auto-reservation", orderId: "auto-order",
@@ -299,9 +520,28 @@ test("canonical changes auto-enqueue claimable jobs and disabled adapters remain
   const disabledJob = gateway.captureCanonicalProductChanges({ productId: "part", kinds: ["STOCK"], operationId: "disabled-stock", actor })
     .find((job: any) => job.accountId === "disabled-shopify");
   assert.ok(disabledJob);
-  assert.throws(() => gateway.claimReadyOutboundJobs({ accountId: "disabled-shopify", limit: 1, leaseSeconds: 30,
-    operationId: "disabled-claim", serviceActorId: "publisher", claimedAt: "2026-09-23T10:00:00.000Z" }),
-  (error: unknown) => error instanceof ChannelGatewayError && error.code === "ADAPTER_TRANSPORT_DISABLED");
+  const disabledClaim = gateway.claimReadyOutboundJobs({
+    accountId: "disabled-shopify",
+    limit: 1,
+    leaseSeconds: 30,
+    operationId: "disabled-claim",
+    serviceActorId: "publisher",
+    claimedAt: "2026-09-23T10:00:00.000Z",
+  }) as any[];
+
+  // Shopify V19 allows SHIPMENT outbound only.
+  // Canonical PRODUCT/STOCK jobs remain fail-closed by never becoming claimable.
+  assert.equal(disabledClaim.length, 0);
+
+  assert.equal(
+    db.prepare(`
+      SELECT state
+      FROM channel_outbound_jobs
+      WHERE id=?
+    `).pluck().get(disabledJob.id),
+    "PENDING",
+  );
+
   db.close();
 });
 

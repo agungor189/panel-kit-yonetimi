@@ -46,7 +46,23 @@ const required = (value: unknown, field: string, max = 1000) => {
 };
 
 export class ReconciliationService {
-  constructor(private readonly db: Database.Database) {}
+  constructor(
+    private readonly db: Database.Database,
+    private readonly options: {
+      onOperationalFinding?: (event: { findingId: string; runId: string }) => void | Promise<unknown>;
+    } = {},
+  ) {}
+
+  private notifyOperationalFinding(event: { findingId: string; runId: string }) {
+    if (!this.options.onOperationalFinding) return;
+    queueMicrotask(() => {
+      try {
+        void Promise.resolve(this.options.onOperationalFinding?.(event)).catch(() => undefined);
+      } catch {
+        // Notification delivery is best-effort and cannot affect reconciliation.
+      }
+    });
+  }
 
   run(input: { trigger: "SCHEDULED" | "MANUAL"; actor: { type: "SYSTEM" | "HUMAN"; id: string }; operationId: string }) {
     const operationId = required(input.operationId, "operationId", 200);
@@ -60,6 +76,7 @@ export class ReconciliationService {
       const collected = this.collect();
       const drafts = [...new Map(collected.map((draft) => [identity(draft), draft])).values()];
       const seen = new Set<string>(); let autoRepairCount = 0;
+      const notificationEvents: Array<{ findingId: string; runId: string }> = [];
       this.db.transaction(() => {
         for (const draft of drafts) {
           const key = identity(draft); seen.add(key);
@@ -83,10 +100,15 @@ export class ReconciliationService {
               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)`).run(findingId,key,draft.domain,draft.code,draft.severity,draft.affectedType,draft.affectedId,
                 draft.sourceRef,json(draft.expected),json(draft.actual),status,repairStatus,runId,runId,startedAt,startedAt,status === "RESOLVED" ? startedAt : null);
           }
-          this.history({ findingId, runId, eventType: draft.autoRepair ? "AUTO_REPAIRED" : prior?.status === "RESOLVED" || prior?.status === "VERIFIED" ? "REOPENED" : prior ? "OBSERVED" : "OPENED",
+          const eventType = draft.autoRepair ? "AUTO_REPAIRED" : prior?.status === "RESOLVED" || prior?.status === "VERIFIED" ? "REOPENED" : prior ? "OBSERVED" : "OPENED";
+          this.history({ findingId, runId, eventType,
             before: draft.autoRepair ? draft.actual : prior ? JSON.parse(prior.actual_json) : null, after: draft.autoRepair ? draft.expected : draft.actual,
             reason: draft.autoRepair ? "Explicitly safe disposable projection rebuilt from canonical inventory lots." : "Deterministic reconciliation check mismatch.",
             actorType: input.actor.type, actorId, operationId });
+          if ((eventType === "OPENED" || eventType === "REOPENED") && status === "OPEN"
+            && (draft.severity === "CRITICAL" || draft.severity === "WARN")) {
+            notificationEvents.push({ findingId, runId });
+          }
           if (draft.severity === "CRITICAL" && draft.affectedType !== "SYSTEM" && !draft.autoRepair) this.activateBlock(findingId, draft, startedAt);
         }
         const openRows = this.db.prepare("SELECT id,identity_key FROM reconciliation_findings WHERE status='OPEN'").all() as Array<{ id: string; identity_key: string }>;
@@ -102,6 +124,7 @@ export class ReconciliationService {
         this.db.prepare(`UPDATE reconciliation_runs SET status='COMPLETED',finding_count=?,critical_count=?,auto_repair_count=?,completed_at=? WHERE id=?`)
           .run(drafts.length,critical,autoRepairCount,now(),runId);
       }).immediate();
+      for (const event of notificationEvents) this.notifyOperationalFinding(event);
       return this.getRun(runId);
     } catch (error) {
       this.db.prepare("UPDATE reconciliation_runs SET status='FAILED',error_code=?,completed_at=? WHERE id=?")

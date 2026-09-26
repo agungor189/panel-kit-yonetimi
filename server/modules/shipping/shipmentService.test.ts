@@ -82,7 +82,7 @@ const marketplaceRecipient = {
   zip: "34710",
 };
 
-const setup = () => {
+const setup = (recipientFixture = marketplaceRecipient) => {
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
   initializeDatabase(db);
@@ -108,7 +108,7 @@ const setup = () => {
   db.prepare(`INSERT INTO channel_inbound_events
     (id,account_id,external_event_id,external_event_version,ingestion_path,event_type,raw_payload_json,raw_payload_digest,
      received_at,processing_state,sale_id) VALUES ('channel-event','channel-account','event','1','POLL','ORDER_UPSERT',?,?,
-     '2026-09-23T09:00:00.000Z','ACCEPTED','sale')`).run(JSON.stringify({ recipient: marketplaceRecipient }), "c".repeat(64));
+     '2026-09-23T09:00:00.000Z','ACCEPTED','sale')`).run(JSON.stringify({ recipient: recipientFixture }), "c".repeat(64));
   db.prepare(`INSERT INTO channel_orders
     (id,account_id,external_order_id,latest_external_version,currency,actual_discount_minor,order_state,sale_id,reservation_id,
      first_event_id,raw_order_digest) VALUES ('channel-order','channel-account','external-order','1','TRY',0,'ACCEPTED','sale',
@@ -280,7 +280,13 @@ test("tracking absent at dispatch blocks without mutation; later Geliver refresh
   shipping.confirmHandoff({ shipmentId: shipment.id, handedOffAt: "2026-09-23T14:00:00.000Z",
     handoffEvidence: { carrierReceipt: "late-receipt" }, operationId: "late-handoff", actor });
   assert.equal(db.prepare("SELECT COUNT(*) FROM channel_shipment_outbound_jobs").pluck().get(), 1);
-  const gateway = new ChannelGatewayService(db);
+  const integrationFailures: any[] = [];
+  const gateway = new ChannelGatewayService(db, {
+    onIntegrationException(event) {
+      integrationFailures.push(event);
+      return Promise.reject(new Error("push unavailable"));
+    },
+  });
   const first = gateway.claimReadyOutboundJobs({ accountId: "channel-account", limit: 1, leaseSeconds: 30,
     operationId: "late-claim-null", serviceActorId: "channel-publisher", claimedAt: "2026-09-23T14:00:01.000Z" }) as any[];
   let sends = 0;
@@ -290,6 +296,9 @@ test("tracking absent at dispatch blocks without mutation; later Geliver refresh
   (error: unknown) => error instanceof ChannelGatewayError && error.code === "CHANNEL_TRACKING_PENDING");
   assert.equal(sends, 0);
   assert.equal(db.prepare("SELECT state FROM channel_shipment_outbound_jobs").pluck().get(), "BLOCKED");
+  assert.equal(integrationFailures.length, 1);
+  assert.equal(integrationFailures[0].incidentId, `channel-shipment-outbound:${first[0].id}`);
+  assert.equal(integrationFailures[0].integration, "TRENDYOL");
 
   transport.publishTracking(provider.providerShipmentId);
   await geliver.refreshShipment(shipment.id);
@@ -307,8 +316,8 @@ test("tracking absent at dispatch blocks without mutation; later Geliver refresh
   db.close();
 });
 
-test("unverified Hepsiburada, N11, and Shopify shipment adapters cannot publish", async () => {
-  for (const channel of ["HEPSIBURADA", "N11", "SHOPIFY"] as const) {
+test("unverified Hepsiburada and N11 shipment adapters cannot publish", async () => {
+  for (const channel of ["HEPSIBURADA", "N11"] as const) {
     const { db } = setup();
     const shipping = new ShipmentService(db);
     const shipment = shipping.packAndPrepare({ reservationId: "reservation", operationId: `disabled-pack-${channel}`, actor }).shipment;
@@ -344,6 +353,147 @@ test("unverified Hepsiburada, N11, and Shopify shipment adapters cannot publish"
   }
 });
 
+test("Shopify shipment outbound is claimable and publishes tracking without marketplace package mapping", async () => {
+  const { db } = setup();
+
+  db.prepare(`
+    UPDATE channel_accounts
+    SET channel='SHOPIFY'
+    WHERE id='channel-account'
+  `).run();
+
+  const shipping = new ShipmentService(db);
+
+  const shipment = shipping.packAndPrepare({
+    reservationId: "reservation",
+    operationId: "shopify-pack",
+    actor,
+  }).shipment;
+
+  shipping.definePackages({
+    shipmentId: shipment.id,
+    operationId: "shopify-packages",
+    actor,
+    packages: [{
+      packageNumber: 1,
+      measured: {
+        lengthMm: 300,
+        widthMm: 200,
+        heightMm: 100,
+        weightGrams: 1200,
+      },
+      contents: [{
+        productId: "part",
+        quantityBaseInt: 2,
+      }],
+    }],
+  });
+
+  shipping.selectCarrier({
+    shipmentId: shipment.id,
+    provider: "GELIVER",
+    carrierCode: "GELIVER",
+    serviceCode: "STANDARD",
+    quote: {
+      quoteId: "shopify-q",
+      amountMinor: 0,
+      currency: "TRY",
+      provenance: {
+        source: "fixture",
+      },
+    },
+    operationId: "shopify-carrier",
+    actor,
+  });
+
+  const transport =
+    new VerifiedFakeGeliverTransport();
+
+  const booking = shipping.requestBooking({
+    shipmentId: shipment.id,
+    operationId: "shopify-book",
+    actor,
+  });
+
+  for (const job of booking.jobs) {
+    shipping.processBookingJob({
+      jobId: job.id,
+      transport,
+      serviceActorId: "geliver-worker",
+    });
+  }
+
+  shipping.confirmHandoff({
+    shipmentId: shipment.id,
+    handedOffAt:
+      "2026-09-23T16:00:00.000Z",
+    handoffEvidence: {
+      test: true,
+    },
+    operationId: "shopify-handoff",
+    actor,
+  });
+
+  const gateway = new ChannelGatewayService(db);
+
+  const claimed =
+    gateway.claimReadyOutboundJobs({
+      accountId: "channel-account",
+      limit: 10,
+      leaseSeconds: 30,
+      operationId: "shopify-claim",
+      serviceActorId: "shopify-worker",
+      claimedAt:
+        "2026-09-23T16:00:01.000Z",
+    }) as any[];
+
+  assert.equal(claimed.length, 1);
+  assert.equal(claimed[0].channel, "SHOPIFY");
+  assert.equal(claimed[0].outboundType, "SHIPMENT");
+
+  let published: any = null;
+
+  await gateway.processClaimedOutboundJob({
+    jobId: claimed[0].id,
+    leaseToken: claimed[0].leaseToken,
+    operationId: "shopify-process",
+    serviceActorId: "shopify-worker",
+    occurredAt:
+      "2026-09-23T16:00:02.000Z",
+    publish: async (job) => {
+      published = job;
+      return {
+        state: "SUCCEEDED",
+      };
+    },
+  });
+
+  assert.equal(
+    published.externalOrderId,
+    "external-order",
+  );
+
+  assert.equal(
+    published.trackingNumber,
+    "TRACK-1",
+  );
+
+  assert.equal(
+    published.trackingUrl,
+    "https://tracking.invalid/1",
+  );
+
+  assert.equal(
+    db.prepare(`
+      SELECT state
+      FROM channel_shipment_outbound_jobs
+    `).pluck().get(),
+    "SUCCEEDED",
+  );
+
+  db.close();
+});
+
 test("COD is rejected", () => {
   const { db } = setup();
   const service = new ShipmentService(db);
@@ -365,6 +515,7 @@ class OfficialGeliverFixture implements GeliverTransport {
   createCalls = 0;
   acceptCalls = 0;
   uncertainCreateOnce = false;
+  definitiveAcceptFailureOnce = false;
   private readonly shipments = new Map<string, Shipment>();
   async create(body: any) {
     this.createCalls += 1;
@@ -386,6 +537,10 @@ class OfficialGeliverFixture implements GeliverTransport {
   async get(id: string) { return structuredClone(this.shipments.get(id)!); }
   async acceptOffer(offerId: string): Promise<Transaction> {
     this.acceptCalls += 1;
+    if (this.definitiveAcceptFailureOnce) {
+      this.definitiveAcceptFailureOnce = false;
+      throw Object.assign(new Error("provider rejected booking"), { status: 400, code: "BOOKING_REJECTED" });
+    }
     const shipment = [...this.shipments.values()].find((item) => item.offers?.list?.some((offer) => offer.id === offerId))!;
     shipment.acceptedOfferID = offerId;
     shipment.acceptedOffer = shipment.offers!.list![0];
@@ -426,17 +581,46 @@ class OfficialGeliverFixture implements GeliverTransport {
   publishTracking(id: string) { const shipment = this.shipments.get(id)!; shipment.trackingNumber = "TRACK-LATER"; shipment.trackingUrl = "https://track.geliver.test/TRACK-LATER"; }
 }
 
-const prepareLiveGeliver = () => {
-  const fixture = setup();
+const prepareLiveGeliver = (recipientFixture = marketplaceRecipient, onOperationalException?: (event: { shipmentId: string; jobId: string }) => void | Promise<unknown>) => {
+  const fixture = setup(recipientFixture);
   const shipping = new ShipmentService(fixture.db);
   const shipment = shipping.packAndPrepare({ reservationId: "reservation", operationId: "live-pack", actor }).shipment;
   shipping.definePackages({ shipmentId: shipment.id, operationId: "live-packages", actor, packages: [{ packageNumber: 1,
     measured: { lengthMm: 300, widthMm: 200, heightMm: 100, weightGrams: 1200 },
     contents: [{ productId: "part", quantityBaseInt: 2 }] }] });
   const transport = new OfficialGeliverFixture();
-  const geliver = new GeliverFlowService(fixture.db, transport, { senderAddressId: "sender-address", sourceIdentifier: "https://dsdst.example" });
+  const geliver = new GeliverFlowService(fixture.db, transport, {
+    senderAddressId: "sender-address",
+    sourceIdentifier: "https://dsdst.example",
+    onOperationalException,
+  });
   return { ...fixture, shipping, shipment, transport, geliver };
 };
+
+test("Geliver infers missing Turkish Shopify district from address1 and verifies it against provider geo data", async () => {
+  const { db, shipment, geliver } = prepareLiveGeliver({
+    ...marketplaceRecipient,
+    address1: "Ümraniye, Test Sokak 1",
+    phone: "5325401212",
+    cityName: "İstanbul",
+    countryCode: "TR",
+    districtName: "",
+    cityCode: "",
+    districtID: null,
+  });
+
+  const resolvedRecipient = await geliver.resolveRecipient({
+    shipmentId: shipment.id,
+  });
+
+  assert.equal(resolvedRecipient.phone, "+905325401212");
+  assert.equal(resolvedRecipient.cityName, "İstanbul");
+  assert.equal(resolvedRecipient.cityCode, "34");
+  assert.equal(resolvedRecipient.districtName, "Ümraniye");
+  assert.equal(resolvedRecipient.districtID, 108631);
+
+  db.close();
+});
 
 test("Geliver automatically resolves marketplace recipient against provider geo data", async () => {
   const { db, shipment, geliver } = prepareLiveGeliver();
@@ -553,6 +737,22 @@ test("uncertain Geliver create reconciles by exact orderNumber and never creates
   db.close();
 });
 
+test("definitive Geliver booking failure emits one stable shipping exception", async () => {
+  const notifications: Array<{ shipmentId: string; jobId: string }> = [];
+  const { db, shipment, transport, geliver } = prepareLiveGeliver(marketplaceRecipient, (event) => {
+    notifications.push(event);
+  });
+  const [createJob] = geliver.prepareCreateJobs({ shipmentId: shipment.id, recipient, operationId: "failed-create", actor });
+  const provider = await geliver.processCreateJob(createJob.id);
+  const accept = geliver.selectOffer({ shipmentId: shipment.id, offerId: provider.offers[0].id, operationId: "failed-select", actor });
+  transport.definitiveAcceptFailureOnce = true;
+
+  await assert.rejects(() => geliver.processAcceptJob(accept.id), /provider rejected booking/);
+  assert.deepEqual(notifications, [{ shipmentId: shipment.id, jobId: accept.id }]);
+  assert.equal(db.prepare("SELECT state FROM geliver_accept_jobs WHERE id=?").pluck().get(accept.id), "DEFINITIVE_FAILURE");
+  db.close();
+});
+
 test("pre-handoff Geliver cancellation records provider evidence and never dispatches", async () => {
   const { db, inventory, shipping, shipment, geliver } = prepareLiveGeliver();
   const [job] = geliver.prepareCreateJobs({ shipmentId: shipment.id, recipient, operationId: "cancel-create", actor });
@@ -564,5 +764,90 @@ test("pre-handoff Geliver cancellation records provider evidence and never dispa
   assert.equal(db.prepare("SELECT COUNT(*) FROM geliver_cancellation_facts").pluck().get(), 1);
   assert.equal(inventory.getProductAvailability("part").onHandBaseInt, 2);
   assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_ledger_events WHERE event_type='DISPATCH'").pluck().get(), 0);
+  db.close();
+});
+
+test("safe shipment diagnostic exposes booking uncertainty consistently in list and detail", () => {
+  const { db } = setup();
+  const shipping = new ShipmentService(db);
+  const shipment = shipping.packAndPrepare({ reservationId: "reservation", operationId: "diagnostic-pack", actor }).shipment;
+  shipping.definePackages({ shipmentId: shipment.id, operationId: "diagnostic-packages", actor, packages: [{ packageNumber: 1,
+    measured: { lengthMm: 300, widthMm: 200, heightMm: 100, weightGrams: 1200 }, contents: [{ productId: "part", quantityBaseInt: 2 }] }] });
+  shipping.selectCarrier({ shipmentId: shipment.id, provider: "GELIVER", carrierCode: "FIXTURE", serviceCode: "STANDARD",
+    quote: { quoteId: "diagnostic-quote", amountMinor: 9000, currency: "TRY", provenance: { source: "fixture" } },
+    operationId: "diagnostic-select", actor });
+  const booking = shipping.requestBooking({ shipmentId: shipment.id, operationId: "diagnostic-book", actor });
+  db.prepare("UPDATE shipment_booking_jobs SET state='BLOCKED_UNCERTAIN',last_error_code='BOOKING_OUTCOME_UNCERTAIN' WHERE id=?")
+    .run(booking.jobs[0].id);
+
+  const expected = {
+    code: "BOOKING_OUTCOME_UNCERTAIN",
+    stage: "booking",
+    message: "Kargo rezervasyon sonucu belirsiz. Otomatik yeniden deneme durduruldu.",
+  };
+  assert.deepEqual(shipping.getShipment(shipment.id).activeDiagnostic, expected);
+  assert.deepEqual(shipping.listShipments().find((item) => item.id === shipment.id)?.activeDiagnostic, expected);
+  db.close();
+});
+
+test("safe shipment diagnostic prioritizes blocked tracking outbound", () => {
+  const { db } = setup();
+  const shipping = new ShipmentService(db);
+  const shipment = shipping.packAndPrepare({ reservationId: "reservation", operationId: "outbound-diagnostic-pack", actor }).shipment;
+  const [shipmentPackage] = shipping.definePackages({ shipmentId: shipment.id, operationId: "outbound-diagnostic-packages", actor,
+    packages: [{ packageNumber: 1, measured: { lengthMm: 300, widthMm: 200, heightMm: 100, weightGrams: 1200 },
+      contents: [{ productId: "part", quantityBaseInt: 2 }] }] });
+  db.prepare(`INSERT INTO geliver_create_jobs
+    (id,shipment_id,package_id,request_identity,provider_order_number,request_json,request_hash,state,last_error_code,
+     created_operation_id,created_at,updated_at)
+    VALUES ('diagnostic-provider',?,?,'diagnostic-provider-request','diagnostic-provider-order','{}',?,
+      'RECONCILE_REQUIRED','GELIVER_OUTCOME_UNCERTAIN','diagnostic-provider-create',
+      '2026-09-26T12:01:00.000Z','2026-09-26T12:01:00.000Z')`)
+    .run(shipment.id, shipmentPackage.id, "c".repeat(64));
+  db.prepare(`INSERT INTO channel_shipment_outbound_jobs
+    (id,account_id,shipment_id,channel_order_id,job_kind,source_version,payload_json,payload_hash,state,created_operation_id,
+     available_at,last_error_code,created_at,updated_at)
+    VALUES ('diagnostic-outbound','channel-account',?,'channel-order','TRACKING_STATUS','diagnostic-v1','{}',?,'BLOCKED',
+      'diagnostic-outbound-create','2026-09-26T12:00:00.000Z','CHANNEL_TRACKING_PENDING','2026-09-26T12:00:00.000Z','2026-09-26T12:00:00.000Z')`)
+    .run(shipment.id, "a".repeat(64));
+
+  assert.deepEqual(shipping.getShipment(shipment.id).activeDiagnostic, {
+    code: "CHANNEL_TRACKING_PENDING",
+    stage: "tracking_outbound",
+    message: "Takip bilgisi henüz hazır değil. Kanal güncellemesi bekliyor.",
+  });
+  db.close();
+});
+
+test("safe shipment diagnostic is null for normal shipment", () => {
+  const { db } = setup();
+  const shipping = new ShipmentService(db);
+  const shipment = shipping.packAndPrepare({ reservationId: "reservation", operationId: "normal-diagnostic-pack", actor }).shipment;
+  assert.equal(shipping.getShipment(shipment.id).activeDiagnostic, null);
+  assert.equal(shipping.listShipments().find((item) => item.id === shipment.id)?.activeDiagnostic, null);
+  db.close();
+});
+
+test("safe shipment diagnostic never exposes unknown provider code or payload", () => {
+  const { db } = setup();
+  const shipping = new ShipmentService(db);
+  const shipment = shipping.packAndPrepare({ reservationId: "reservation", operationId: "secret-diagnostic-pack", actor }).shipment;
+  const [shipmentPackage] = shipping.definePackages({ shipmentId: shipment.id, operationId: "secret-diagnostic-packages", actor,
+    packages: [{ packageNumber: 1, measured: { lengthMm: 300, widthMm: 200, heightMm: 100, weightGrams: 1200 },
+      contents: [{ productId: "part", quantityBaseInt: 2 }] }] });
+  db.prepare(`INSERT INTO geliver_create_jobs
+    (id,shipment_id,package_id,request_identity,provider_order_number,request_json,request_hash,state,attempt_count,
+     reconciliation_count,last_error_code,created_operation_id,created_at,updated_at)
+    VALUES ('secret-job',?,?,'secret-request','secret-order',?,?,'RECONCILE_REQUIRED',1,1,?,
+      'secret-job-create','2026-09-26T12:00:00.000Z','2026-09-26T12:00:00.000Z')`)
+    .run(shipment.id, shipmentPackage.id, JSON.stringify({ authorization: "Bearer provider-secret" }), "b".repeat(64), "TOKEN_provider-secret");
+
+  const response = JSON.stringify(shipping.getShipment(shipment.id));
+  assert.equal(response.includes("provider-secret"), false);
+  assert.deepEqual(shipping.getShipment(shipment.id).activeDiagnostic, {
+    code: "PROVIDER_OUTCOME_UNCERTAIN",
+    stage: "provider",
+    message: "Kargo sağlayıcı işleminin sonucu belirsiz. Otomatik yeniden deneme durduruldu.",
+  });
   db.close();
 });

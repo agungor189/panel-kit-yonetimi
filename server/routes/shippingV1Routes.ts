@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import express, { type RequestHandler } from "express";
 import { CommandExecutor, CommandFoundationError } from "../modules/commands/commandFoundation.js";
@@ -15,10 +16,15 @@ type Dependencies = {
   authorizePrepare: RequestHandler;
   authorizeManage: RequestHandler;
   authorizeDispatch: RequestHandler;
+  notifyShippingException?: (event: { shipmentId: string; jobId: string }) => void | Promise<unknown>;
 };
 
 const operationId = (req: express.Request) => String(req.headers["x-operation-id"] || req.headers["idempotency-key"] || "").trim();
 const actor = (req: express.Request) => ({ id: req.user!.id, name: req.user!.username });
+const BULK_HANDOFF_LIMIT = 50;
+
+const childHandoffOperationId = (batchOperationId: string, shipmentId: string) =>
+  `bulk-handoff:${createHash("sha256").update(JSON.stringify({ batchOperationId, shipmentId })).digest("hex")}`;
 
 const sendError = (error: unknown, res: express.Response) => {
   if (error instanceof CommandFoundationError || error instanceof ShipmentValidationError) {
@@ -42,6 +48,7 @@ export function createShippingV1Router(dependencies: Dependencies) {
   const geliver = new GeliverFlowService(dependencies.db, geliverTransport, {
     senderAddressId: geliverTransport.senderAddressId,
     sourceIdentifier: geliverTransport.sourceIdentifier,
+    onOperationalException: dependencies.notifyShippingException,
   });
   const execute = (req: express.Request, capability: string, commandType: string, payload: unknown, handler: Parameters<CommandExecutor["execute"]>[1]) => commands.execute({
     operationId: operationId(req), commandType, payload, actor: { human: actor(req) },
@@ -50,9 +57,67 @@ export function createShippingV1Router(dependencies: Dependencies) {
   }, handler);
   const send = (res: express.Response, outcome: ReturnType<CommandExecutor["execute"]>) =>
     res.status(outcome.result.statusCode).json({ ...(outcome.result.body as Record<string, unknown>), idempotent: outcome.replayed });
+  const executeHandoff = (
+    req: express.Request,
+    shipmentId: string,
+    commandOperationId: string,
+    input: { handedOffAt: unknown; handoffEvidence: unknown; actualCharge?: unknown },
+  ) => {
+    const payload = {
+      shipmentId,
+      handedOffAt: input.handedOffAt ?? null,
+      handoffEvidence: input.handoffEvidence ?? null,
+      actualCharge: input.actualCharge ?? null,
+    };
+    return commands.execute({
+      operationId: commandOperationId,
+      commandType: "shipping.handoff.confirm.v1",
+      payload,
+      actor: { human: actor(req) },
+      authorization: { decision: "ALLOW", capability: "shipping:dispatch" },
+      correlationId: req.headers["x-correlation-id"]?.toString(),
+      requestId: req.headers["x-request-id"]?.toString(),
+    }, (context) => {
+      const data = service.confirmHandoff({
+        shipmentId,
+        handedOffAt: input.handedOffAt as string,
+        handoffEvidence: input.handoffEvidence,
+        actualCharge: input.actualCharge as any,
+        operationId: commandOperationId,
+        actor: actor(req),
+      });
+      for (const event of data.outbox) context.addOutbox(event);
+      context.addOutbox({
+        topic: "shipping",
+        eventType: "shipping.dispatched.v1",
+        aggregateType: "shipment",
+        aggregateId: shipmentId,
+        payload: { shipment_id: shipmentId, reservation_id: data.shipment.reservationId },
+      });
+      return { statusCode: 200, body: { success: true, contract: "dsdst.shipment.v1", data: data.shipment } };
+    });
+  };
 
   router.get("/provider-contracts/geliver", dependencies.authorizeRead, (_req, res) =>
     res.json({ success: true, contract: "dsdst.carrier-provider-contract.v2", data: geliver.contract() }));
+
+  router.get("/shipments", dependencies.authorizeRead, (req, res) => {
+    try {
+      const data = service.listShipments({
+        scope: String(req.query.scope || "pending"),
+        query: String(req.query.q || ""),
+        limit: req.query.limit ? Number(req.query.limit) : 200,
+      });
+      return res.json({
+        success: true,
+        contract: "dsdst.shipment-list.v1",
+        data,
+      });
+    } catch (error) {
+      return sendError(error, res);
+    }
+  });
+
   router.get("/shipments/:id", dependencies.authorizeRead, (req, res) => {
     try { return res.json({ success: true, contract: "dsdst.shipment.v1", data: service.getShipment(req.params.id) }); }
     catch (error) { return sendError(error, res); }
@@ -214,18 +279,101 @@ export function createShippingV1Router(dependencies: Dependencies) {
     } catch (error) { return sendError(error, res); }
   });
 
-  router.post("/shipments/:id/handoff", dependencies.authorizeDispatch, (req, res) => {
-    const payload = { shipmentId: req.params.id, handedOffAt: req.body?.handedOffAt ?? null,
-      handoffEvidence: req.body?.handoffEvidence ?? null, actualCharge: req.body?.actualCharge ?? null };
+  router.post("/shipments/bulk-handoff", dependencies.authorizeDispatch, (req, res) => {
     try {
-      const outcome = execute(req, "shipping:dispatch", "shipping.handoff.confirm.v1", payload, (context) => {
-        const data = service.confirmHandoff({ shipmentId: req.params.id, handedOffAt: req.body?.handedOffAt,
-          handoffEvidence: req.body?.handoffEvidence, actualCharge: req.body?.actualCharge,
-          operationId: operationId(req), actor: actor(req) });
-        for (const event of data.outbox) context.addOutbox(event);
-        context.addOutbox({ topic: "shipping", eventType: "shipping.dispatched.v1", aggregateType: "shipment",
-          aggregateId: req.params.id, payload: { shipment_id: req.params.id, reservation_id: data.shipment.reservationId } });
-        return { statusCode: 200, body: { success: true, contract: "dsdst.shipment.v1", data: data.shipment } };
+      const batchOperationId = operationId(req);
+      if (!batchOperationId || batchOperationId.length > 200 || /[\u0000-\u001f\u007f]/.test(batchOperationId)) {
+        throw new CommandFoundationError(400, "INVALID_COMMAND", "A valid batch x-operation-id is required.");
+      }
+      if (!Array.isArray(req.body?.shipmentIds) || req.body.shipmentIds.length === 0) {
+        throw new ShipmentValidationError("BULK_HANDOFF_SHIPMENTS_REQUIRED", "shipmentIds must be a non-empty array.");
+      }
+      if (req.body.shipmentIds.length > BULK_HANDOFF_LIMIT) {
+        throw new ShipmentValidationError("BULK_HANDOFF_LIMIT_EXCEEDED", `A bulk handoff may contain at most ${BULK_HANDOFF_LIMIT} shipments.`);
+      }
+      const shipmentIds = req.body.shipmentIds.map((value: unknown) => typeof value === "string" ? value.trim() : "");
+      if (shipmentIds.some((value: string) => !value || value.length > 500 || /[\u0000-\u001f\u007f]/.test(value))) {
+        throw new ShipmentValidationError("BULK_HANDOFF_SHIPMENT_ID_INVALID", "Every shipment ID must be a valid non-empty string.");
+      }
+      if (new Set(shipmentIds).size !== shipmentIds.length) {
+        throw new ShipmentValidationError("BULK_HANDOFF_DUPLICATE_SHIPMENT", "shipmentIds must not contain duplicates.", 409);
+      }
+      if (typeof req.body?.handedOffAt !== "string" || !Number.isFinite(Date.parse(req.body.handedOffAt))) {
+        throw new ShipmentValidationError("SHIPMENT_VALIDATION_FAILED", "handedOffAt must be an ISO timestamp.");
+      }
+      if (req.body?.handoffEvidence === undefined || req.body?.handoffEvidence === null) {
+        throw new ShipmentValidationError("HANDOFF_EVIDENCE_REQUIRED", "Confirmed physical carrier handoff requires evidence.", 409);
+      }
+
+      const commonInput = {
+        handedOffAt: req.body.handedOffAt,
+        handoffEvidence: req.body.handoffEvidence,
+      };
+      const manifest = commands.execute({
+        operationId: batchOperationId,
+        commandType: "shipping.bulk-handoff.manifest.v1",
+        payload: { shipmentIds, ...commonInput },
+        actor: { human: actor(req) },
+        authorization: { decision: "ALLOW", capability: "shipping:dispatch" },
+        correlationId: req.headers["x-correlation-id"]?.toString(),
+        requestId: req.headers["x-request-id"]?.toString(),
+      }, () => ({
+        statusCode: 202,
+        body: { success: true, contract: "dsdst.shipment-bulk-handoff-manifest.v1", data: { shipmentIds } },
+      }));
+
+      const results = shipmentIds.map((shipmentId: string) => {
+        let before: any = null;
+        try { before = service.getShipment(shipmentId); } catch { /* reported by the canonical child command */ }
+        try {
+          const outcome = executeHandoff(req, shipmentId, childHandoffOperationId(batchOperationId, shipmentId), commonInput);
+          const shipment = (outcome.result.body as any).data;
+          return {
+            shipmentId,
+            orderNumber: shipment.orderNumber ?? before?.orderNumber ?? null,
+            success: true,
+            resultingState: shipment.state,
+            replayed: outcome.replayed,
+          };
+        } catch (error) {
+          if (!(error instanceof CommandFoundationError) && !(error instanceof ShipmentValidationError)) throw error;
+          let current = before;
+          try { current = service.getShipment(shipmentId); } catch { /* shipment may not exist */ }
+          return {
+            shipmentId,
+            orderNumber: current?.orderNumber ?? null,
+            success: false,
+            resultingState: current?.state ?? null,
+            errorCode: error.code,
+            message: error.message,
+          };
+        }
+      });
+
+      const failed = results.filter((result: any) => !result.success).length;
+      const alreadyProcessed = results.filter((result: any) => result.success && result.replayed).length;
+      return res.json({
+        success: true,
+        contract: "dsdst.shipment-bulk-handoff.v1",
+        batchOperationId,
+        batchReplayed: manifest.replayed,
+        data: results,
+        summary: {
+          requested: shipmentIds.length,
+          dispatched: shipmentIds.length - failed - alreadyProcessed,
+          failed,
+          alreadyProcessed,
+        },
+      });
+    } catch (error) { return sendError(error, res); }
+  });
+
+  router.post("/shipments/:id/handoff", dependencies.authorizeDispatch, (req, res) => {
+    try {
+      const outcome = executeHandoff(req, req.params.id, operationId(req), {
+        handedOffAt: req.body?.handedOffAt,
+        handoffEvidence: req.body?.handoffEvidence,
+        actualCharge: req.body?.actualCharge,
       });
       return send(res, outcome);
     } catch (error) { return sendError(error, res); }

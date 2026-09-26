@@ -126,13 +126,60 @@ type InboundEvent = {
   receivedAt: string;
 };
 
+type OrderAcceptedPushEvent = {
+  eventType: "channel.order.accepted.v1";
+  saleId: string;
+  channelOrderId: string;
+};
+
+type OrderTransitionPushEvent = {
+  eventType: "channel.order.cancelled.v1" | "channel.return.requested.v1";
+  saleId: string;
+  channelOrderId: string;
+};
+
+type StockExceptionPushEvent = {
+  exceptionType: "STOCK_EXCEPTION";
+  exceptionId: string;
+  channelOrderId: string;
+  productId: string;
+};
+
+type ChannelGatewayOptions = {
+  onOrderAccepted?: (event: OrderAcceptedPushEvent) => void | Promise<unknown>;
+  onOrderTransition?: (event: OrderTransitionPushEvent) => void | Promise<unknown>;
+  onStockException?: (event: StockExceptionPushEvent) => void | Promise<unknown>;
+  onIntegrationException?: (event: {
+    incidentId: string;
+    integration: string;
+    message: string;
+  }) => void | Promise<unknown>;
+};
+
 export class ChannelGatewayService {
   private readonly commands: CommandExecutor;
   private readonly sales: MarketplaceSaleAcceptanceService;
+  private readonly onOrderAccepted?: ChannelGatewayOptions["onOrderAccepted"];
+  private readonly onOrderTransition?: ChannelGatewayOptions["onOrderTransition"];
+  private readonly onStockException?: ChannelGatewayOptions["onStockException"];
+  private readonly onIntegrationException?: ChannelGatewayOptions["onIntegrationException"];
 
-  constructor(private readonly db: Database.Database) {
+  constructor(private readonly db: Database.Database, options: ChannelGatewayOptions = {}) {
     this.commands = new CommandExecutor(db);
     this.sales = new MarketplaceSaleAcceptanceService(db);
+    this.onOrderAccepted = options.onOrderAccepted;
+    this.onOrderTransition = options.onOrderTransition;
+    this.onStockException = options.onStockException;
+    this.onIntegrationException = options.onIntegrationException;
+  }
+
+  private runPostCommitSideEffect<T>(callback: ((event: T) => void | Promise<unknown>) | undefined, event: T) {
+    if (!callback) return;
+    try {
+      void Promise.resolve(callback(event)).catch(() => undefined);
+    } catch {
+      // Notification delivery is best-effort and cannot affect the committed command.
+    }
   }
 
   configureAccount(input: { id: string; channel: ChannelCode; merchantAccountId: string; environment: "STAGE" | "PRODUCTION"; secretReference?: string | null; config?: unknown; operationId: string; actor: Actor }) {
@@ -204,7 +251,9 @@ export class ChannelGatewayService {
   ingest(event: InboundEvent, operationId: string, serviceActorId: string) {
     const sanitized = redactProviderPayload(event.rawPayload);
     const payloadDigest = digest(sanitized);
-    return this.commands.execute({ operationId, commandType: "channels.inbound.process.v1", payload: { ...event, rawPayload: sanitized },
+    let orderTransitionPush: OrderTransitionPushEvent | null = null;
+    let stockExceptionPush: StockExceptionPushEvent | null = null;
+    const outcome = this.commands.execute({ operationId, commandType: "channels.inbound.process.v1", payload: { ...event, rawPayload: sanitized },
       actor: { service: { id: serviceActorId } }, authorization: { decision: "ALLOW", capability: "channels:ingest" } }, (context) => {
       const account = this.db.prepare("SELECT * FROM channel_accounts WHERE id=?").get(event.accountId) as any;
       if (!account) throw new ChannelGatewayError("CHANNEL_ACCOUNT_NOT_FOUND", "Channel account was not found.", 404);
@@ -253,8 +302,14 @@ export class ChannelGatewayService {
         this.db.prepare("UPDATE channel_orders SET order_state=?,latest_external_version=?,updated_at=? WHERE id=?")
           .run(transition.state, event.externalEventVersion, event.receivedAt, existingOrder.id);
         this.db.prepare("UPDATE channel_inbound_events SET processing_state='ACCEPTED',sale_id=? WHERE id=?").run(existingOrder.sale_id, eventId);
-        context.addOutbox({ topic: "channels", eventType: transition.state === "CANCELLED" ? "channel.order.cancelled.v1" : "channel.return.requested.v1",
+        const transitionEventType = transition.state === "CANCELLED" ? "channel.order.cancelled.v1" : "channel.return.requested.v1";
+        context.addOutbox({ topic: "channels", eventType: transitionEventType,
           aggregateType: "sale", aggregateId: existingOrder.sale_id, payload: { sale_id: existingOrder.sale_id, channel_order_id: existingOrder.id } });
+        orderTransitionPush = {
+          eventType: transitionEventType,
+          saleId: existingOrder.sale_id,
+          channelOrderId: existingOrder.id,
+        };
         return { statusCode: 200, body: { state: transition.state, saleId: existingOrder.sale_id, eventId } };
       }
       if (existingOrder?.sale_id) {
@@ -287,17 +342,31 @@ export class ChannelGatewayService {
           FROM channel_product_mappings m JOIN products p ON p.id=m.product_id
           WHERE m.account_id=? AND m.external_listing_id=? AND m.listing_state='ACTIVE'`).get(event.accountId, line.externalListingId) as any;
         const lineDigest = digest(line);
-        const lineId = randomUUID();
+        const existingLine = this.db.prepare(`SELECT * FROM channel_order_lines
+          WHERE channel_order_id=? AND external_line_id=?`).get(orderId, line.externalLineId) as any;
+        const lineId = existingLine?.id || randomUUID();
         const quantity = integer(line.quantityBaseInt, `lines[${index}].quantityBaseInt`, 1);
         const actual = integer(line.actualUnitGrossMinor, `lines[${index}].actualUnitGrossMinor`);
         const vatRateBps = integer(line.vatRateBps, `lines[${index}].vatRateBps`);
         const providerFinancial = this.providerLineFinancial(line, quantity, actual);
+
+        if (existingLine && existingLine.raw_line_digest !== lineDigest) {
+          this.insertException(event.accountId, eventId, orderId, "ORDER_VERSION_EXCEPTION", {
+            code: "EXCEPTION_ORDER_LINE_CHANGED",
+            externalLineId: line.externalLineId,
+            storedDigest: existingLine.raw_line_digest,
+            receivedDigest: lineDigest,
+          });
+          blocking = true;
+          continue;
+        }
         if (!mapping) {
           this.db.prepare(`INSERT INTO channel_order_lines
             (id,channel_order_id,external_line_id,external_package_id,external_listing_id,external_sku,quantity_base_int,
              actual_unit_gross_minor,vat_rate_bps,raw_line_digest,provider_gross_minor,provider_seller_discount_minor,
              provider_ty_discount_minor,provider_customer_total_minor,provider_financial_provenance_json)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(lineId, orderId, line.externalLineId, line.externalPackageId || null,
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(channel_order_id,external_line_id) DO NOTHING`).run(lineId, orderId, line.externalLineId, line.externalPackageId || null,
             line.externalListingId, line.externalSku || null, quantity, actual, vatRateBps, lineDigest, providerFinancial?.grossMinor ?? null,
             providerFinancial?.sellerDiscountMinor ?? null, providerFinancial?.tyDiscountMinor ?? null,
             providerFinancial?.customerTotalMinor ?? null, providerFinancial?.provenanceJson ?? null);
@@ -312,7 +381,8 @@ export class ChannelGatewayService {
             (id,channel_order_id,external_line_id,external_package_id,external_listing_id,external_sku,mapping_id,product_id,
              quantity_base_int,actual_unit_gross_minor,vat_rate_bps,raw_line_digest,provider_gross_minor,
              provider_seller_discount_minor,provider_ty_discount_minor,provider_customer_total_minor,provider_financial_provenance_json)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(lineId, orderId, line.externalLineId, line.externalPackageId || null,
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(channel_order_id,external_line_id) DO NOTHING`).run(lineId, orderId, line.externalLineId, line.externalPackageId || null,
             line.externalListingId, line.externalSku || null, mapping.id, mapping.product_id, quantity, actual, vatRateBps, lineDigest,
             providerFinancial?.grossMinor ?? null, providerFinancial?.sellerDiscountMinor ?? null,
             providerFinancial?.tyDiscountMinor ?? null, providerFinancial?.customerTotalMinor ?? null,
@@ -329,7 +399,8 @@ export class ChannelGatewayService {
           (id,channel_order_id,external_line_id,external_package_id,external_listing_id,external_sku,mapping_id,product_id,quantity_base_int,
            actual_unit_gross_minor,vat_rate_bps,commission_term_id,expected_unit_gross_minor,raw_line_digest,provider_gross_minor,
            provider_seller_discount_minor,provider_ty_discount_minor,provider_customer_total_minor,provider_financial_provenance_json)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(lineId, orderId, line.externalLineId, line.externalPackageId || null,
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          ON CONFLICT(channel_order_id,external_line_id) DO NOTHING`).run(lineId, orderId, line.externalLineId, line.externalPackageId || null,
           line.externalListingId, line.externalSku || null, mapping.id, mapping.product_id, quantity, actual, vatRateBps, term.id, expected,
           lineDigest, providerFinancial?.grossMinor ?? null, providerFinancial?.sellerDiscountMinor ?? null,
           providerFinancial?.tyDiscountMinor ?? null, providerFinancial?.customerTotalMinor ?? null,
@@ -337,7 +408,8 @@ export class ChannelGatewayService {
         if (actual !== expected) {
           this.db.prepare(`INSERT INTO channel_price_variances
             (id,channel_order_line_id,target_price_minor,expected_channel_price_minor,actual_channel_price_minor,difference_minor,provenance_json)
-            VALUES (?,?,?,?,?,?,?)`).run(randomUUID(), lineId, targetMinor, expected, actual, actual - expected,
+            VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(channel_order_line_id) DO NOTHING`).run(randomUUID(), lineId, targetMinor, expected, actual, actual - expected,
             stableJson({ source: "PROVIDER_ORDER", eventId: event.externalEventId, commissionTermId: term.id }));
           this.insertException(event.accountId, eventId, orderId, "PRICE_VARIANCE", { externalLineId: line.externalLineId, expected, actual });
         }
@@ -364,15 +436,51 @@ export class ChannelGatewayService {
         this.db.prepare(`UPDATE channel_orders SET order_state='ACCEPTED',sale_id=?,reservation_id=?,latest_external_version=?,accepted_at=?,updated_at=? WHERE id=?`)
           .run(accepted.saleId, accepted.reservationId, event.externalEventVersion, event.receivedAt, event.receivedAt, orderId);
         this.db.prepare("UPDATE channel_inbound_events SET processing_state='ACCEPTED',sale_id=? WHERE id=?").run(accepted.saleId, eventId);
+        this.db.prepare(`UPDATE channel_exceptions
+          SET state='RESOLVED',resolved_at=?,resolved_operation_id=?
+          WHERE channel_order_id=? AND state='OPEN'
+            AND exception_type IN ('CHANNEL_MAPPING_EXCEPTION','COMMISSION_EXCEPTION','STOCK_EXCEPTION')`)
+          .run(event.receivedAt, operationId, orderId);
         context.addOutbox({ topic: "channels", eventType: "channel.order.accepted.v1", aggregateType: "sale", aggregateId: accepted.saleId,
           payload: { sale_id: accepted.saleId, reservation_id: accepted.reservationId, channel_order_id: orderId } });
         return { statusCode: 201, body: { state: "ACCEPTED", saleId: accepted.saleId, reservationId: accepted.reservationId, eventId } };
       } catch (error) {
         if (!(error instanceof InventoryValidationError) || error.code !== "INSUFFICIENT_AVAILABLE_STOCK") throw error;
-        this.insertException(event.accountId, eventId, orderId, "STOCK_EXCEPTION", { code: error.code, message: error.message });
+        const productId = String(error.details?.productId || "").trim();
+        const exceptionId = this.insertException(event.accountId, eventId, orderId, "STOCK_EXCEPTION", {
+          code: error.code,
+          message: error.message,
+          productId: productId || null,
+          sku: error.details?.sku || null,
+        });
+        if (productId) stockExceptionPush = {
+          exceptionType: "STOCK_EXCEPTION",
+          exceptionId,
+          channelOrderId: orderId,
+          productId,
+        };
         return this.markOrderException(eventId, orderId);
       }
     });
+    const body = outcome.result.body as { state?: string; saleId?: string };
+    if (!outcome.replayed && body.state === "ACCEPTED" && body.saleId && this.onOrderAccepted) {
+      const channelOrderId = this.db.prepare("SELECT id FROM channel_orders WHERE sale_id=?")
+        .pluck().get(body.saleId) as string | undefined;
+      if (channelOrderId) {
+        this.runPostCommitSideEffect(this.onOrderAccepted, {
+          eventType: "channel.order.accepted.v1",
+          saleId: body.saleId,
+          channelOrderId,
+        });
+      }
+    }
+    if (!outcome.replayed && orderTransitionPush) {
+      this.runPostCommitSideEffect(this.onOrderTransition, orderTransitionPush);
+    }
+    if (!outcome.replayed && stockExceptionPush) {
+      this.runPostCommitSideEffect(this.onStockException, stockExceptionPush);
+    }
+    return outcome;
   }
 
   updatePollingCursor(input: { accountId: string; cursorName: string; checkpointValue: string; operationId: string; serviceActorId: string; updatedAt: string }) {
@@ -388,9 +496,31 @@ export class ChannelGatewayService {
     }).result.body;
   }
 
-  resolveAndReprocessOrder(input: { orderId: string; operationId: string; actor: Actor; resolvedAt: string }) {
-    return this.commands.execute<any>({ operationId: input.operationId, commandType: "channels.exception.resolve-reprocess.v1", payload: input,
-      actor: { human: input.actor }, authorization: { decision: "ALLOW", capability: "integrations:admin" } }, (context) => {
+  resolveAndReprocessOrder(input: {
+    orderId: string;
+    operationId: string;
+    actor: Actor;
+    resolvedAt: string;
+    serviceActorId?: string;
+  }) {
+    let stockExceptionPush: StockExceptionPushEvent | null = null;
+    const outcome = this.commands.execute<any>({
+      operationId: input.operationId,
+      commandType: "channels.exception.resolve-reprocess.v1",
+      payload: input,
+      actor: input.serviceActorId
+        ? {
+            service: {
+              id: input.serviceActorId,
+              name: input.actor.name || null,
+            },
+          }
+        : { human: input.actor },
+      authorization: {
+        decision: "ALLOW",
+        capability: "integrations:admin",
+      },
+    }, (context) => {
       const order = this.db.prepare(`SELECT o.*,a.channel,a.merchant_account_id FROM channel_orders o
         JOIN channel_accounts a ON a.id=o.account_id WHERE o.id=?`).get(input.orderId) as any;
       if (!order) throw new ChannelGatewayError("CHANNEL_ORDER_NOT_FOUND", "Channel order was not found.", 404);
@@ -458,12 +588,207 @@ export class ChannelGatewayService {
         return { statusCode: 200, body: { state: "ACCEPTED", saleId: accepted.saleId, reservationId: accepted.reservationId, replayed: false } };
       } catch (error) {
         if (!(error instanceof InventoryValidationError) || error.code !== "INSUFFICIENT_AVAILABLE_STOCK") throw error;
-        this.insertException(order.account_id, order.first_event_id, order.id, "STOCK_EXCEPTION",
-          { reprocessOperationId: input.operationId, code: error.code, message: error.message });
+        const productId = String(error.details?.productId || "").trim();
+        const exceptionId = this.insertException(order.account_id, order.first_event_id, order.id, "STOCK_EXCEPTION", {
+          reprocessOperationId: input.operationId,
+          code: error.code,
+          message: error.message,
+          productId: productId || null,
+          sku: error.details?.sku || null,
+        });
+        if (productId) stockExceptionPush = {
+          exceptionType: "STOCK_EXCEPTION",
+          exceptionId,
+          channelOrderId: order.id,
+          productId,
+        };
         return { statusCode: 202, body: { state: "EXCEPTION", saleId: null } };
       }
-    }).result.body;
+    });
+    if (!outcome.replayed && stockExceptionPush) {
+      this.runPostCommitSideEffect(this.onStockException, stockExceptionPush);
+    }
+    return outcome.result.body;
   }
+
+  tryAutoRecoverExceptionOrder(input: {
+    accountId: string;
+    externalOrderId: string;
+    serviceActorId: string;
+  }) {
+    const order = this.db.prepare(`
+      SELECT
+        o.id,
+        o.account_id,
+        o.external_order_id,
+        o.order_state,
+        o.sale_id,
+        e.received_at AS first_received_at
+      FROM channel_orders o
+      JOIN channel_inbound_events e
+        ON e.id=o.first_event_id
+      WHERE o.account_id=?
+        AND o.external_order_id=?
+      LIMIT 1
+    `).get(
+      input.accountId,
+      input.externalOrderId,
+    ) as any;
+
+    if (
+      !order
+      || order.sale_id
+      || order.order_state !== "EXCEPTION"
+    ) {
+      return null;
+    }
+
+    const exceptionTypes = (
+      this.db.prepare(`
+        SELECT DISTINCT exception_type
+        FROM channel_exceptions
+        WHERE channel_order_id=?
+          AND state='OPEN'
+        ORDER BY exception_type
+      `).all(order.id) as Array<{
+        exception_type: string;
+      }>
+    ).map((row) => row.exception_type);
+
+    const recoverableTypes = new Set([
+      "CHANNEL_MAPPING_EXCEPTION",
+      "COMMISSION_EXCEPTION",
+      "STOCK_EXCEPTION",
+    ]);
+
+    if (
+      exceptionTypes.length === 0
+      || exceptionTypes.some(
+        (type) => !recoverableTypes.has(type),
+      )
+    ) {
+      return {
+        state: "EXCEPTION",
+        saleId: null,
+        autoRecovery: "SKIPPED",
+        exceptionTypes,
+      };
+    }
+
+    const lines = this.db.prepare(`
+      SELECT
+        l.external_line_id,
+        l.external_listing_id,
+        l.quantity_base_int,
+        m.id AS mapping_id,
+        m.product_id,
+        m.category_ref,
+        m.listing_state
+      FROM channel_order_lines l
+      LEFT JOIN channel_product_mappings m
+        ON m.account_id=?
+       AND m.external_listing_id=l.external_listing_id
+       AND m.listing_state='ACTIVE'
+      WHERE l.channel_order_id=?
+      ORDER BY l.external_line_id
+    `).all(
+      input.accountId,
+      order.id,
+    ) as any[];
+
+    const inventory =
+      new InventoryService(this.db);
+
+    const remediationState = lines.map((line) => {
+      const productId =
+        line.product_id
+          ? String(line.product_id)
+          : null;
+
+      const term = productId
+        ? this.findCommissionTerm(
+            input.accountId,
+            productId,
+            line.category_ref || null,
+            String(order.first_received_at),
+          )
+        : null;
+
+      const availability = productId
+        ? inventory.getProductAvailability(productId)
+        : null;
+
+      return {
+        externalLineId: line.external_line_id,
+        externalListingId:
+          line.external_listing_id,
+        quantityBaseInt:
+          Number(line.quantity_base_int),
+
+        mapping: line.mapping_id
+          ? {
+              id: line.mapping_id,
+              productId,
+              categoryRef:
+                line.category_ref || null,
+              state:
+                line.listing_state || null,
+            }
+          : null,
+
+        commission: term
+          ? {
+              id: term.id,
+              version: term.version,
+              state: term.state,
+            }
+          : null,
+
+        availability: availability
+          ? {
+              onHandBaseInt:
+                availability.onHandBaseInt,
+              reservedBaseInt:
+                availability.reservedBaseInt,
+              availableBaseInt:
+                availability.availableBaseInt,
+            }
+          : null,
+      };
+    });
+
+    const remediationFingerprint = digest({
+      orderId: order.id,
+      exceptionTypes,
+      remediationState,
+    });
+
+    /*
+     * Same remediation state => same operation id => CommandExecutor replay.
+     * Mapping/commission/stock changes => fingerprint changes => one new
+     * recovery attempt. This avoids retry/audit spam every poll cycle.
+     */
+    return this.resolveAndReprocessOrder({
+      orderId: order.id,
+
+      operationId:
+        `channel-auto-recover:${order.id}:${remediationFingerprint}`,
+
+      actor: {
+        id: input.serviceActorId,
+        name: "Channel Automatic Recovery",
+      },
+
+      serviceActorId:
+        input.serviceActorId,
+
+      // Provider event receipt time is immutable, so command payload also
+      // remains stable while the remediation fingerprint is unchanged.
+      resolvedAt:
+        String(order.first_received_at),
+    });
+  }
+
 
   captureCanonicalProductChanges(input: { productId: string; kinds: ChannelProjectionKind[]; operationId: string; actor: Actor; occurredAt?: string }) {
     return this.commands.execute({ operationId: input.operationId, commandType: "channels.canonical-change.capture.v1", payload: input,
@@ -479,8 +804,20 @@ export class ChannelGatewayService {
     if (input.accountId) {
       const account = this.db.prepare("SELECT channel FROM channel_accounts WHERE id=?").get(input.accountId) as any;
       if (!account) throw new ChannelGatewayError("CHANNEL_ACCOUNT_NOT_FOUND", "Channel account was not found.", 404);
-      if (!CHANNEL_ADAPTERS[account.channel as ChannelCode]?.enabledTransport) {
-        throw new ChannelGatewayError("ADAPTER_TRANSPORT_DISABLED", "The channel adapter transport is disabled.", 409);
+      const channel = String(account.channel);
+
+      // V19: Shopify product/stock publishing remains disabled.
+      // Only Shopify shipment/fulfillment jobs are claimable.
+      // The candidate query below still restricts PRODUCT jobs to TRENDYOL.
+      if (
+        channel !== "SHOPIFY"
+        && !CHANNEL_ADAPTERS[channel as ChannelCode]?.enabledTransport
+      ) {
+        throw new ChannelGatewayError(
+          "ADAPTER_TRANSPORT_DISABLED",
+          "The channel adapter transport is disabled.",
+          409,
+        );
       }
     }
     return this.commands.execute({ operationId: input.operationId, commandType: "channels.outbound.claim.v1", payload: input,
@@ -496,7 +833,8 @@ export class ChannelGatewayService {
           SELECT j.id,'SHIPMENT' AS outbound_type,j.available_at,j.created_at FROM channel_shipment_outbound_jobs j
           JOIN channel_accounts a ON a.id=j.account_id
           WHERE j.state IN ('PENDING','RETRY') AND datetime(j.available_at)<=datetime(?)
-            AND (j.lease_token IS NULL OR datetime(j.lease_expires_at)<=datetime(?)) AND a.channel='TRENDYOL'
+            AND (j.lease_token IS NULL OR datetime(j.lease_expires_at)<=datetime(?))
+            AND a.channel IN ('TRENDYOL','SHOPIFY')
             AND (? IS NULL OR j.account_id=?)
         ) ORDER BY datetime(available_at),created_at,id LIMIT ?`)
         .all(input.claimedAt, input.claimedAt, input.accountId || null, input.accountId || null,
@@ -560,8 +898,12 @@ export class ChannelGatewayService {
       JOIN channel_accounts a ON a.id=j.account_id WHERE j.id=?`).get(input.jobId) as any;
     if (!job) throw new ChannelGatewayError("OUTBOUND_JOB_NOT_FOUND", "Outbound job was not found.", 404);
     if (job.state === "SUCCEEDED") return { id: job.id, state: "SUCCEEDED", replayed: true };
-    if (!CHANNEL_ADAPTERS[job.channel as ChannelCode]?.enabledTransport) {
-      throw new ChannelGatewayError("ADAPTER_TRANSPORT_DISABLED", "The channel adapter transport is disabled.", 409);
+    if (!["TRENDYOL", "SHOPIFY"].includes(String(job.channel))) {
+      throw new ChannelGatewayError(
+        "ADAPTER_TRANSPORT_DISABLED",
+        "The channel shipment adapter transport is disabled.",
+        409,
+      );
     }
     if (job.lease_token !== input.leaseToken || !job.lease_expires_at
       || new Date(job.lease_expires_at).getTime() < new Date(input.occurredAt).getTime()) {
@@ -591,24 +933,122 @@ export class ChannelGatewayService {
       if (!['https:', 'http:'].includes(parsedTrackingUrl.protocol)) {
         throw new ChannelGatewayError("CHANNEL_TRACKING_URL_INVALID", "Tracking URL protocol is invalid.", 409);
       }
-      const marketplacePackages = this.db.prepare(`SELECT external_package_id AS externalPackageId
-        FROM channel_order_packages WHERE channel_order_id=? AND package_state='ACTIVE' ORDER BY external_package_id`)
-        .all(job.channel_order_id) as Array<{ externalPackageId: string }>;
-      if (marketplacePackages.length !== 1) {
-        throw new ChannelGatewayError("CHANNEL_SHIPMENT_MAPPING_UNVERIFIED",
-          "Exactly one active marketplace package is required for the verified shipment publication path.", 409);
+      const trackingNumber =
+        typeof payload.packages[0]?.trackingNumber === "string"
+          ? payload.packages[0].trackingNumber.trim()
+          : "";
+
+      if (!trackingNumber) {
+        throw new ChannelGatewayError(
+          "CHANNEL_TRACKING_PENDING",
+          "Tracking number is not available yet.",
+          409,
+        );
       }
-      const externalPackageId = marketplacePackages[0].externalPackageId;
-      providerMutationId = `trendyol:alternative-delivery:${job.account_id}:${externalPackageId}:${job.payload_hash}`;
-      const response = await input.publish({ id: job.id, outboundType: "SHIPMENT", accountId: job.account_id,
-        shipmentId: job.shipment_id, channelOrderId: job.channel_order_id, kind: job.job_kind, payload,
-        payloadHash: job.payload_hash, channel: job.channel, externalPackageId, providerMutationId });
-      return this.recordShipmentOutboundAttempt({ jobId: job.id, providerMutationId, state: "SUCCEEDED", response,
-        operationId: input.operationId, serviceActorId: input.serviceActorId, occurredAt: input.occurredAt });
+
+      if (job.channel === "SHOPIFY") {
+        const channelOrder = this.db.prepare(`
+          SELECT external_order_id
+          FROM channel_orders
+          WHERE id=?
+        `).get(job.channel_order_id) as any;
+
+        const externalOrderId =
+          String(channelOrder?.external_order_id || "").trim();
+
+        if (!externalOrderId) {
+          throw new ChannelGatewayError(
+            "SHOPIFY_EXTERNAL_ORDER_ID_REQUIRED",
+            "Shopify channel order has no external order id.",
+            409,
+          );
+        }
+
+        providerMutationId =
+          `shopify:fulfillment:${job.account_id}:${externalOrderId}:${job.payload_hash}`;
+
+        const response = await input.publish({
+          id: job.id,
+          outboundType: "SHIPMENT",
+          accountId: job.account_id,
+          shipmentId: job.shipment_id,
+          channelOrderId: job.channel_order_id,
+          externalOrderId,
+          kind: job.job_kind,
+          payload,
+          payloadHash: job.payload_hash,
+          channel: job.channel,
+          trackingNumber,
+          trackingUrl,
+          company: payload.carrier || "Geliver",
+          providerMutationId,
+        });
+
+        return this.recordShipmentOutboundAttempt({
+          jobId: job.id,
+          providerMutationId,
+          state: "SUCCEEDED",
+          response,
+          operationId: input.operationId,
+          serviceActorId: input.serviceActorId,
+          occurredAt: input.occurredAt,
+        });
+      }
+
+      const marketplacePackages = this.db.prepare(`
+        SELECT external_package_id AS externalPackageId
+        FROM channel_order_packages
+        WHERE channel_order_id=?
+          AND package_state='ACTIVE'
+        ORDER BY external_package_id
+      `).all(job.channel_order_id) as Array<{
+        externalPackageId: string
+      }>;
+
+      if (marketplacePackages.length !== 1) {
+        throw new ChannelGatewayError(
+          "CHANNEL_SHIPMENT_MAPPING_UNVERIFIED",
+          "Exactly one active marketplace package is required for the verified shipment publication path.",
+          409,
+        );
+      }
+
+      const externalPackageId =
+        marketplacePackages[0].externalPackageId;
+
+      providerMutationId =
+        `trendyol:alternative-delivery:${job.account_id}:${externalPackageId}:${job.payload_hash}`;
+
+      const response = await input.publish({
+        id: job.id,
+        outboundType: "SHIPMENT",
+        accountId: job.account_id,
+        shipmentId: job.shipment_id,
+        channelOrderId: job.channel_order_id,
+        kind: job.job_kind,
+        payload,
+        payloadHash: job.payload_hash,
+        channel: job.channel,
+        externalPackageId,
+        providerMutationId,
+      });
+
+      return this.recordShipmentOutboundAttempt({
+        jobId: job.id,
+        providerMutationId,
+        state: "SUCCEEDED",
+        response,
+        operationId: input.operationId,
+        serviceActorId: input.serviceActorId,
+        occurredAt: input.occurredAt,
+      });
     } catch (error: any) {
       const blocked = ["CHANNEL_TRACKING_PENDING", "CHANNEL_SHIPMENT_MAPPING_UNVERIFIED", "CHANNEL_SHIPMENT_CONTRACT_INVALID",
         "CHANNEL_SHIPMENT_PAYLOAD_TAMPERED",
-        "CHANNEL_TRACKING_URL_INVALID"].includes(String(error?.code));
+        "CHANNEL_TRACKING_URL_INVALID",
+        "SHOPIFY_EXTERNAL_ORDER_ID_REQUIRED",
+        "SHOPIFY_ORDER_NOT_FOUND",
+        "SHOPIFY_FULFILLMENT_ORDER_NOT_OPEN"].includes(String(error?.code));
       const rateLimited = Number(error?.statusCode) === 429;
       const retryAt = blocked ? null : new Date(new Date(input.occurredAt).getTime()
         + Math.min(15 * 60, 30 * 2 ** Math.min(attemptNumber - 1, 5)) * 1000).toISOString();
@@ -624,7 +1064,7 @@ export class ChannelGatewayService {
     state: "SUCCEEDED" | "FAILED" | "RATE_LIMITED" | "BLOCKED"; response?: unknown; errorCode?: string | null;
     retryAt?: string | null; operationId: string; serviceActorId: string; occurredAt: string }) {
     const commandPayload = { ...input, response: input.response === undefined ? null : input.response };
-    return this.commands.execute<any>({ operationId: input.operationId, commandType: "channels.shipment-outbound-attempt.record.v1", payload: commandPayload,
+    const outcome = this.commands.execute<any>({ operationId: input.operationId, commandType: "channels.shipment-outbound-attempt.record.v1", payload: commandPayload,
       actor: { service: { id: input.serviceActorId } }, authorization: { decision: "ALLOW", capability: "channels:publish" } }, () => {
       const current = this.db.prepare("SELECT state,attempt_count FROM channel_shipment_outbound_jobs WHERE id=?").get(input.jobId) as any;
       if (!current) throw new ChannelGatewayError("OUTBOUND_JOB_NOT_FOUND", "Outbound job was not found.", 404);
@@ -642,7 +1082,17 @@ export class ChannelGatewayService {
         lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=?`).run(jobState, input.retryAt || null,
         input.errorCode || null, jobState, input.occurredAt, input.occurredAt, input.jobId);
       return { statusCode: 200, body: { id, state: input.state, providerMutationId: input.providerMutationId, replayed: false } };
-    }).result.body;
+    });
+    if (input.state === "BLOCKED" && !outcome.replayed) {
+      const job = this.db.prepare(`SELECT a.channel FROM channel_shipment_outbound_jobs j
+        JOIN channel_accounts a ON a.id=j.account_id WHERE j.id=?`).get(input.jobId) as { channel: string } | undefined;
+      if (job) this.runPostCommitSideEffect(this.onIntegrationException, {
+        incidentId: `channel-shipment-outbound:${input.jobId}`,
+        integration: job.channel,
+        message: String(input.errorCode || "Kalıcı kanal güncelleme hatası"),
+      });
+    }
+    return outcome.result.body;
   }
 
   enqueueStockSync(input: { accountId: string; productId: string; sourceVersion: string; operationId: string; actor: Actor }) {
@@ -894,9 +1344,21 @@ export class ChannelGatewayService {
   }
 
   private insertException(accountId: string, eventId: string | null, orderId: string | null, type: string, detail: unknown) {
+    const detailJson = stableJson(detail);
+
+    if (orderId) {
+      const existing = this.db.prepare(`SELECT id FROM channel_exceptions
+        WHERE account_id=? AND channel_order_id=? AND exception_type=?
+          AND state='OPEN' AND detail_json=?
+        ORDER BY created_at DESC LIMIT 1`)
+        .get(accountId, orderId, type, detailJson) as any;
+
+      if (existing?.id) return String(existing.id);
+    }
+
     const id = randomUUID();
     this.db.prepare(`INSERT INTO channel_exceptions (id,account_id,inbound_event_id,channel_order_id,exception_type,detail_json)
-      VALUES (?,?,?,?,?,?)`).run(id, accountId, eventId, orderId, type, stableJson(detail));
+      VALUES (?,?,?,?,?,?)`).run(id, accountId, eventId, orderId, type, detailJson);
     return id;
   }
 

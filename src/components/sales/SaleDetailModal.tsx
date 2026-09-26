@@ -5,6 +5,7 @@ import { api, createRetryOperation } from '../../lib/api';
 import { useAuth } from '../../App';
 import { SaleFinancialBreakdown } from './SaleFinancialBreakdown';
 import { SaleReturnsPanel } from './SaleReturnsPanel';
+import { Button } from '../ui';
 
 type SaleDetailFormData = {
   customer_name: string;
@@ -213,17 +214,17 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
           </div>
           <div className="flex items-center gap-3">
              {!isReadOnly && (!isEditing ? (
-               <button onClick={() => { setError(''); setSaved(false); setIsEditing(true); }} className="flex items-center gap-2 px-4 py-2 bg-gray-100/80 hover:bg-gray-200 text-gray-700 font-bold rounded-xl transition-colors">
+               <Button variant="secondary" onClick={() => { setError(''); setSaved(false); setIsEditing(true); }} className="flex items-center gap-2 px-4 py-2 bg-gray-100/80 hover:bg-gray-200 text-gray-700 font-bold rounded-xl transition-colors">
                  <Edit3 className="w-4 h-4" /> Düzenle
-               </button>
+               </Button>
              ) : (
-               <button disabled={saving || !hasChanges} onClick={handleSave} className="flex items-center gap-2 px-4 py-2 bg-primary text-white font-bold rounded-xl hover:bg-primary-hover transition-colors disabled:cursor-not-allowed disabled:opacity-50">
+               <Button loading={saving} disabled={!hasChanges} onClick={handleSave} className="flex items-center gap-2 px-4 py-2 bg-primary text-white font-bold rounded-xl hover:bg-primary-hover transition-colors disabled:cursor-not-allowed disabled:opacity-50">
                  {saving ? 'Kaydediliyor...' : <><Save className="w-4 h-4" /> Kaydet</>}
-               </button>
+               </Button>
              ))}
-            <button onClick={onClose} className="p-2 hover:bg-gray-100 text-gray-400 hover:text-gray-600 rounded-xl transition-colors">
+            <Button variant="ghost" size="sm" onClick={onClose} className="p-2 hover:bg-gray-100 text-gray-400 hover:text-gray-600 rounded-xl transition-colors">
               <X className="w-6 h-6" />
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -443,14 +444,15 @@ export default function SaleDetailModal({ sale, onClose, onUpdated }: { sale: an
                           placeholder="0,00"
                           className="min-w-0 flex-1 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-semibold outline-none focus:border-primary"
                         />
-                        <button
+                        <Button
+                          size="sm"
                           type="button"
                           disabled={expenseSaving !== null || expenseDrafts[category].trim() === ''}
                           onClick={() => handleExpenseSave(category, label)}
                           className="rounded-lg bg-primary px-3 py-2 text-xs font-black text-white disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           {isSavingCategory ? '...' : 'Kaydet'}
-                        </button>
+                        </Button>
                       </div>
                     </div>
                   );

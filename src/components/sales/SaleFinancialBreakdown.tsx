@@ -1,4 +1,5 @@
 import React from 'react';
+import { Badge, Card } from '../ui';
 
 const money = (minor: number | null | undefined, currency = 'TRY') => {
   if (minor === null || minor === undefined) return 'Bilinmiyor';
@@ -21,10 +22,10 @@ const stateLabels: Record<string, string> = {
 export function SaleFinancialBreakdown({ financial }: { financial: any }) {
   if (!financial || financial.state === 'LEGACY_UNSNAPSHOTTED') {
     return (
-      <section className="rounded-2xl border border-amber-200 bg-amber-50 p-5" data-testid="legacy-unsnapshotted">
+      <Card padding="md" className="rounded-2xl border-amber-200 bg-amber-50" data-testid="legacy-unsnapshotted">
         <h3 className="font-black text-amber-800">Finansal durum: {stateLabels.LEGACY_UNSNAPSHOTTED}</h3>
         <p className="mt-1 text-sm text-amber-700">KDV, komisyon, kur, gider veya maliyet tahmin edilmedi.</p>
-      </section>
+      </Card>
     );
   }
 
@@ -47,12 +48,12 @@ export function SaleFinancialBreakdown({ financial }: { financial: any }) {
   ];
 
   return (
-    <section className="rounded-2xl border border-gray-200 bg-gray-50 p-5" data-testid="sale-financial-breakdown">
+    <Card padding="md" className="rounded-2xl border-gray-200 bg-gray-50" data-testid="sale-financial-breakdown">
       <div className="mb-4 flex items-center justify-between gap-3">
         <h3 className="text-xs font-black uppercase tracking-widest text-gray-600">Satış Finansalları</h3>
-        <span className="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-black text-gray-700">
+        <Badge className="border-gray-200 bg-white text-gray-700">
           {stateLabels[financial.state] || financial.state}
-        </span>
+        </Badge>
       </div>
       <dl className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {rows.map(([label, value]) => (
@@ -108,7 +109,7 @@ export function SaleFinancialBreakdown({ financial }: { financial: any }) {
           </div>
         </details>
       )}
-    </section>
+    </Card>
   );
 }
 

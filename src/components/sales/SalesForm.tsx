@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { api, createRetryOperation } from '../../lib/api';
 import { ArrowLeft, User, Phone, MapPin, Truck, Hash, Search, Plus, Trash2, Package, AlertTriangle, CheckCircle2, Layers } from 'lucide-react';
+import { Button, Card } from '../ui';
 
 const DEFAULT_SALES_CHANNELS = ['Satış Sistemi', 'Website', 'Trendyol', 'Hepsiburada', 'Amazon', 'N11'];
 const DEFAULT_PENDING_CHANNELS = ['Trendyol', 'Hepsiburada', 'Amazon', 'N11'];
@@ -322,12 +323,12 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
   };
 
   return (
-    <div className="bg-white rounded-3xl shadow-lg border border-border-color overflow-hidden">
+    <Card className="rounded-3xl shadow-lg overflow-hidden">
       <div className="px-6 py-4 border-b border-border-color flex items-center justify-between bg-bg-main/50">
         <div className="flex items-center gap-4">
-          <button onClick={onBack} className="p-2 hover:bg-white rounded-xl transition-colors">
+          <Button variant="ghost" size="sm" onClick={onBack} className="p-2 hover:bg-white rounded-xl transition-colors">
             <ArrowLeft className="w-5 h-5 text-text-main" />
-          </button>
+          </Button>
           <h2 className="text-xl font-black text-text-main">Yeni Satış Ekle</h2>
         </div>
       </div>
@@ -721,19 +722,20 @@ export default function SalesForm({ onBack }: { onBack: () => void }) {
           </div>
 
           <div className="pt-6 border-t border-border-color flex justify-end gap-4">
-             <button type="button" onClick={onBack} className="px-6 py-3 font-bold text-gray-500 bg-gray-100 hover:bg-gray-200 rounded-xl transition-colors">
+             <Button variant="secondary" type="button" onClick={onBack} className="px-6 py-3 font-bold text-gray-500 bg-gray-100 hover:bg-gray-200 rounded-xl transition-colors">
                İptal
-             </button>
-             <button 
+             </Button>
+             <Button
                disabled={saving || selectedItems.some(i => i.quantity > i.total_stock) || hasBomShortage || selectedItems.length === 0}
                type="submit" 
+               loading={saving}
                className="px-8 py-3 font-bold text-white bg-primary hover:bg-primary-hover rounded-xl shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
              >
                {saving ? 'Kaydediliyor...' : 'Satışı Kaydet'}
-             </button>
+             </Button>
           </div>
         </form>
       </div>
-    </div>
+    </Card>
   );
 }

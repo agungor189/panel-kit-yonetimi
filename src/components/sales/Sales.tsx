@@ -4,6 +4,7 @@ import SalesList from './SalesList';
 import SalesForm from './SalesForm';
 import SaleDetailModal from './SaleDetailModal';
 import { useAuth } from '../../App';
+import { Button, Card, PageHeader } from '../ui';
 
 export default function Sales() {
   const { isReadOnly } = useAuth();
@@ -19,26 +20,19 @@ export default function Sales() {
     <div className="space-y-6 animate-in fade-in">
       {!showForm ? (
         <>
-          <div className="flex justify-between items-center bg-white p-6 rounded-3xl shadow-lg border border-border-color">
-            <div className="flex items-center space-x-4">
-              <div className="w-12 h-12 bg-primary/10 rounded-2xl flex items-center justify-center">
-                <ShoppingCart className="w-6 h-6 text-primary" />
-              </div>
-              <div>
-                <h1 className="text-2xl font-black text-text-main flex items-center tracking-tight">Sipariş Yönetimi</h1>
-                <p className="text-text-muted mt-1 font-medium">Satış, kargo ve sipariş takip süreçleri</p>
-              </div>
-            </div>
-            {!isReadOnly && (
-              <button
+          <Card padding="md" className="rounded-3xl shadow-lg">
+            <PageHeader
+              title="Sipariş Yönetimi"
+              description="Satış, kargo ve sipariş takip süreçleri"
+              actions={!isReadOnly ? <Button
                 onClick={() => setShowForm(true)}
-                className="flex items-center space-x-2 bg-primary text-white px-6 py-3 rounded-2xl font-bold shadow-soft hover:shadow-lg hover:-translate-y-0.5 transition-all"
+                className="rounded-2xl px-6 py-3 font-bold shadow-soft hover:-translate-y-0.5 hover:shadow-lg"
               >
                 <Plus className="w-5 h-5" />
                 <span>Yeni Satış Ekle</span>
-              </button>
-            )}
-          </div>
+              </Button> : undefined}
+            />
+          </Card>
 
           <SalesList refreshKey={refreshKey} onSaleClick={setSelectedSale} />
           {selectedSale && (

@@ -169,6 +169,10 @@ const businessTablesThatMustStartEmpty = [
   "reconciliation_blocks",
   "reconciliation_repair_proposals",
   "reconciliation_history",
+  "push_subscriptions",
+  "user_notification_preferences",
+  "notification_templates",
+  "push_notification_dispatches",
 ] as const;
 
 test("fresh production schema is exact, versioned and has zero business history", () => {
@@ -177,7 +181,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 86);
+  assert.equal(manifest.length, 92);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -199,6 +203,10 @@ test("fresh production schema is exact, versioned and has zero business history"
     warehouse_packages: ["current_location_id", "id", "planned_quantity", "remaining_quantity", "status"],
     users: ["id", "permissions", "role", "session_epoch"],
     user_sessions: ["expires_at", "id", "revoked_at", "service_principal_id", "session_epoch", "user_id"],
+    push_subscriptions: ["auth", "endpoint", "expiration_time", "failure_count", "id", "p256dh", "user_id"],
+    user_notification_preferences: ["backup_exception", "goods_receipt_exception", "integration_exception", "new_order", "order_cancel_return", "reconciliation_exception", "shipping_exception", "stock_exception", "user_id"],
+    notification_templates: ["category", "message_template", "title_template", "updated_by"],
+    push_notification_dispatches: ["category", "dedupe_key", "notification_tag", "notification_topic", "target_url"],
     command_operations: ["actor_scope", "command_type", "id", "operation_id", "payload_hash", "result_json", "result_status_code"],
     command_audit_log: ["command_type", "human_actor_id", "operation_id", "payload_hash", "service_actor_id"],
     command_outbox: ["event_type", "operation_record_id", "payload_hash", "payload_json", "status", "topic"],

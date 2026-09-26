@@ -1,12 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../../lib/api';
 import { Building2, Search, Plus, Filter, MessageSquare, Briefcase, ChevronRight } from 'lucide-react';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
-
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+import { Badge, Button, Card, EmptyState, Input, PageHeader, Select, cn } from '../ui';
 
 import B2BFirmDetail from './B2BFirmDetail';
 import B2BFirmForm from './B2BFirmForm';
@@ -45,21 +40,15 @@ export default function B2BFirms({ onFirmClick, onAddFirm }: any) {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col md:flex-row items-center justify-between gap-4">
-        <h2 className="text-xl font-bold flex items-center">
-          <Building2 className="w-6 h-6 mr-3 text-primary" />
-          Firma Listesi
-        </h2>
-        <button onClick={onAddFirm} className="bg-primary text-white px-4 py-2 rounded-xl text-sm font-bold flex items-center shadow shadow-primary/20 hover:scale-[1.02] transition-transform">
+      <PageHeader title="Firma Listesi" actions={<Button onClick={onAddFirm} className="rounded-xl px-4 py-2 font-bold shadow shadow-primary/20 hover:scale-[1.02]">
           <Plus className="w-4 h-4 mr-2" />
           Firma Ekle
-        </button>
-      </div>
+        </Button>} />
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="relative">
           <Search className="w-4 h-4 text-text-muted absolute left-3 top-3.5" />
-          <input 
+          <Input
             type="text" 
             placeholder="Firma veya kişi ara..." 
             value={search}
@@ -68,20 +57,20 @@ export default function B2BFirms({ onFirmClick, onAddFirm }: any) {
           />
         </div>
         
-        <select value={filterSector} onChange={e => setFilterSector(e.target.value)} className="px-4 py-2.5 bg-bg-main border border-border-color rounded-xl text-sm outline-none font-semibold">
+        <Select value={filterSector} onChange={e => setFilterSector(e.target.value)} className="px-4 py-2.5 bg-bg-main border border-border-color rounded-xl text-sm outline-none font-semibold">
           {sectors.map((s: any) => <option key={s} value={s}>{s}</option>)}
-        </select>
+        </Select>
         
-        <select value={filterCity} onChange={e => setFilterCity(e.target.value)} className="px-4 py-2.5 bg-bg-main border border-border-color rounded-xl text-sm outline-none font-semibold">
+        <Select value={filterCity} onChange={e => setFilterCity(e.target.value)} className="px-4 py-2.5 bg-bg-main border border-border-color rounded-xl text-sm outline-none font-semibold">
           {cities.map((s: any) => <option key={s} value={s}>{s}</option>)}
-        </select>
+        </Select>
         
-        <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-4 py-2.5 bg-bg-main border border-border-color rounded-xl text-sm outline-none font-semibold">
+        <Select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-4 py-2.5 bg-bg-main border border-border-color rounded-xl text-sm outline-none font-semibold">
           {statuses.map(s => <option key={s} value={s}>{s}</option>)}
-        </select>
+        </Select>
       </div>
 
-      <div className="card overflow-x-auto text-sm">
+      <Card className="overflow-x-auto text-sm">
         <table className="w-full text-left min-w-[800px]">
           <thead>
             <tr className="bg-bg-main text-text-muted uppercase tracking-widest text-[10px] font-bold border-b border-border-color">
@@ -109,13 +98,13 @@ export default function B2BFirms({ onFirmClick, onAddFirm }: any) {
                   <div className="text-[10px] text-text-muted">{firm.phone || '-'} / {firm.email || '-'}</div>
                 </td>
                 <td className="px-6 py-4">
-                  <span className={cn(
-                    "px-2 py-1 rounded border text-[10px] font-bold tracking-widest uppercase",
+                  <Badge className={cn(
+                    "rounded px-2 py-1 text-[10px] tracking-widest uppercase",
                     firm.status === 'Yeni' ? "bg-blue-50 text-blue-600 border-blue-200" :
                     firm.status === 'Müşteri Oldu' ? "bg-green-50 text-green-600 border-green-200" :
                     firm.status === 'Olumsuz' ? "bg-red-50 text-red-600 border-red-200" :
                     "bg-gray-50 text-gray-600 border-gray-200"
-                  )}>{firm.status || 'Yeni'}</span>
+                  )}>{firm.status || 'Yeni'}</Badge>
                 </td>
                 <td className="px-6 py-4 text-text-muted text-[11px] font-mono">
                   {new Date(firm.created_at).toLocaleDateString('tr-TR')}
@@ -130,9 +119,9 @@ export default function B2BFirms({ onFirmClick, onAddFirm }: any) {
           </tbody>
         </table>
         {filteredFirms.length === 0 && (
-          <div className="p-8 text-center text-text-muted">Firma bulunamadı.</div>
+          <EmptyState title="Firma bulunamadı." className="py-8" />
         )}
-      </div>
+      </Card>
     </div>
   );
 }

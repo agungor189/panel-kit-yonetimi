@@ -8,6 +8,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, LineChart, Line, Legend,
 } from "recharts";
+import { Button, Card as SurfaceCard, PageHeader, Select } from "../components/ui";
 
 type Tab = "overview" | "reorder" | "dead" | "top" | "critical" | "components" | "breakdown";
 
@@ -28,23 +29,23 @@ function fmt(n: any, opts: { decimals?: number; currency?: string } = {}) {
 
 function Card({ title, children, className = "" }: any) {
   return (
-    <div className={`bg-white border border-border-color shadow-sm rounded-xl p-5 ${className}`}>
+    <SurfaceCard padding="md" className={`rounded-xl shadow-sm ${className}`}>
       {title && <div className="text-sm font-bold text-slate-700 mb-3">{title}</div>}
       {children}
-    </div>
+    </SurfaceCard>
   );
 }
 
 function KpiCard({ icon: Icon, label, value, sub, color = "text-sky-600" }: any) {
   return (
-    <div className="bg-white border border-border-color shadow-sm rounded-xl p-5">
+    <SurfaceCard padding="md" className="rounded-xl shadow-sm">
       <div className="flex items-center justify-between mb-2">
         <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">{label}</span>
         <Icon className={`w-4 h-4 ${color}`} />
       </div>
       <div className="text-2xl font-black text-slate-900">{value}</div>
       {sub && <div className="text-xs font-medium text-slate-500 mt-1">{sub}</div>}
-    </div>
+    </SurfaceCard>
   );
 }
 
@@ -102,37 +103,37 @@ export default function InsightsPage() {
   }, [breakdown]);
 
   const tabBtn = (id: Tab, label: string, count?: number) => (
-    <button
+    <Button
+      variant={tab === id ? "primary" : "ghost"}
+      size="sm"
       key={id}
       onClick={() => setTab(id)}
       className={`px-3 py-2 text-sm font-bold rounded-lg transition ${tab === id ? "bg-primary text-white shadow-sm" : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"}`}
     >
       {label}
       {count !== undefined && <span className={`ml-1.5 text-xs ${tab === id ? "text-white/80" : "text-slate-400"}`}>({count})</span>}
-    </button>
+    </Button>
   );
 
   return (
     <div className="space-y-5 text-text-main">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-2xl font-black text-slate-900">Stok & Sipariş Analizi</h1>
-          <p className="text-sm font-medium text-slate-500">Satış, stok, sipariş önerisi ve component analizi tek panelde</p>
-        </div>
-        <div className="flex items-center gap-2">
+      <PageHeader
+        title="Stok & Sipariş Analizi"
+        description="Satış, stok, sipariş önerisi ve component analizi tek panelde"
+        actions={<div className="flex items-center gap-2">
           <span className="text-sm font-bold text-slate-500">Dönem</span>
-          <select value={period} onChange={(e) => setPeriod(Number(e.target.value))} className="bg-white border border-border-color rounded-lg px-3 py-2 text-sm font-bold text-slate-800 shadow-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary">
+          <Select value={period} onChange={(e) => setPeriod(Number(e.target.value))} className="bg-white border border-border-color rounded-lg px-3 py-2 text-sm font-bold text-slate-800 shadow-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary">
             <option value={7}>Son 7 gün</option>
             <option value={30}>Son 30 gün</option>
             <option value={60}>Son 60 gün</option>
             <option value={90}>Son 90 gün</option>
             <option value={180}>Son 180 gün</option>
-          </select>
-          <button onClick={refresh} disabled={loading} className="px-3 py-2 bg-primary hover:bg-primary-hover text-white rounded-lg text-sm font-bold flex items-center gap-2 disabled:opacity-50 shadow-sm">
+          </Select>
+          <Button onClick={refresh} loading={loading} className="px-3 py-2 bg-primary hover:bg-primary-hover text-white rounded-lg text-sm font-bold flex items-center gap-2 disabled:opacity-50 shadow-sm">
             <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} /> Yenile
-          </button>
-        </div>
-      </div>
+          </Button>
+        </div>}
+      />
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">

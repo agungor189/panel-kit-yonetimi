@@ -16,6 +16,7 @@ import rateLimit from "express-rate-limit";
 import AdmZip from "adm-zip";
 import crypto from "crypto";
 import bcrypt from "bcrypt";
+import webpush from "web-push";
 import { z } from "zod";
 import { createProductAnalyticsRouter } from "./server/routes/productAnalyticsRoutes.js";
 import { createInsightsRouter } from "./server/routes/insightsRoutes.js";
@@ -31,6 +32,8 @@ import { createKitPublicationV1Router } from "./server/routes/kitPublicationV1Ro
 import { createReturnsV1Router } from "./server/routes/returnsV1Routes.js";
 import { createShippingV1Router } from "./server/routes/shippingV1Routes.js";
 import { createReconciliationV1Router } from "./server/routes/reconciliationV1Routes.js";
+import { createPushNotificationRouter } from "./server/routes/pushNotificationRoutes.js";
+import { createProductCsvImportRouter } from "./server/routes/productCsvImportRoutes.js";
 import { startDailyReconciliationScheduler } from "./server/modules/reconciliation/reconciliationScheduler.js";
 import { rejectLegacyCatalogMutation } from "./server/modules/catalog/legacyCatalogGuard.js";
 import { CommandExecutor, CommandFoundationError } from "./server/modules/commands/commandFoundation.js";
@@ -39,12 +42,12 @@ import { SalesFinancialService, SalesFinancialValidationError } from "./server/m
 import { ChannelGatewayError, ChannelGatewayService } from "./server/modules/channels/channelGateway.js";
 import { enqueueCanonicalChannelChanges } from "./server/modules/channels/channelOutboundProjection.js";
 import { TrendyolGatewayTransport } from "./server/modules/channels/trendyolGatewayTransport.js";
+import { ShopifyGatewayTransport } from "./server/modules/channels/shopifyGatewayTransport.js";
 import { PublishedKitService } from "./server/modules/kits/publishedKitService.js";
 import { createPanelApiAuth } from "./server/middleware/panelApiAuth.js";
 import { generateNormalizedFields } from "./server/utils/normalizeProductFields.js";
 import { restoreUploadEntry } from "./server/utils/restoreUploads.js";
 import { initializeDatabase, openDatabase } from "./server/db/initialize.js";
-import { importProductsFromCsvRows } from "./server/services/productCsvImport.js";
 import {
   createAuthModule,
   parseUserPermissions,
@@ -54,6 +57,8 @@ import {
 import { mountWarehouseModule } from "./server/modules/warehouse/index.js";
 import { createProductStockModule } from "./server/modules/products/stock.js";
 import { createApiKeyHasher } from "./server/modules/integrations/apiKeys.js";
+import { createPushNotificationService } from "./server/modules/notifications/pushNotificationService.js";
+import { createOperationalPushNotifications } from "./server/modules/notifications/operationalPushNotifications.js";
 import {
   DEFAULT_BACKUP_CONFIG,
   normalizeBackupConfig,
@@ -152,7 +157,14 @@ initializeDatabase(db);
 const inventoryService = new InventoryService(db);
 const saleCommands = new CommandExecutor(db);
 const salesFinancials = new SalesFinancialService(db);
-const channelGateway = new ChannelGatewayService(db);
+const pushNotificationService = createPushNotificationService({ db, transport: webpush, env: process.env });
+const operationalPushNotifications = createOperationalPushNotifications(db, pushNotificationService);
+const channelGateway = new ChannelGatewayService(db, {
+  onOrderAccepted: operationalPushNotifications.orderAccepted,
+  onOrderTransition: operationalPushNotifications.orderCancelReturn,
+  onStockException: operationalPushNotifications.stockException,
+  onIntegrationException: operationalPushNotifications.integrationException,
+});
 const {
   getProductBomComponents,
   getProductStockProfile,
@@ -654,6 +666,11 @@ function failBackupRun(runId: string, err: any): void {
         completed_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(err?.message || String(err), runId);
+  try {
+    void Promise.resolve(operationalPushNotifications.backupException({ runId, phase: "local" })).catch(() => undefined);
+  } catch {
+    // Push is best-effort and cannot change backup failure handling.
+  }
 }
 
 function execRclone(args: string[], timeoutSeconds: number): Promise<{ stdout: string; stderr: string }> {
@@ -760,6 +777,11 @@ async function uploadBackupRunToCloud(runId: string, actor?: string | null): Pro
       cloudPath: destination,
       error: err?.message || String(err),
     });
+    try {
+      void Promise.resolve(operationalPushNotifications.backupException({ runId, phase: "cloud" })).catch(() => undefined);
+    } catch {
+      // Push is best-effort and cannot change backup failure handling.
+    }
     AppLogger.error("BACKUP", "Cloud backup upload failed", err);
     return { runId, cloud_status: "failed", cloud_path: destination, error: err?.message || String(err) };
   }
@@ -1408,6 +1430,11 @@ async function startServer() {
   app.use("/api/auth", auth.router);
   app.use("/api", auth.authenticateApi);
   app.use("/api", auth.requireCompletedPasswordChange);
+  app.use(
+    "/api/push",
+    auth.requireCapability("panel:read"),
+    createPushNotificationRouter(pushNotificationService, logActivity, auth.requireCapability("settings:admin")),
+  );
   app.use("/api", auth.authorizeApi);
   const requireIdentityAdmin = auth.requireCapability("identity:admin");
   const requireIntegrationsAdmin = auth.requireCapability("integrations:admin");
@@ -2298,29 +2325,13 @@ async function startServer() {
     return null;
   };
 
+  // The explicit canonical CSV command is mounted before the fail-closed
+  // legacy guard. Every other legacy product identity mutation remains blocked.
+  app.use("/api/products/import", createProductCsvImportRouter({
+    db,
+    authorize: auth.requireCapability("panel:write"),
+  }));
   app.use("/api/products", rejectLegacyCatalogMutation);
-
-  app.post("/api/products/import", (req, res) => {
-    try {
-      const rows = Array.isArray(req.body?.rows) ? req.body.rows : null;
-      const headers = Array.isArray(req.body?.headers) ? req.body.headers.map(String) : null;
-      if (!rows || !headers) {
-        return res.status(400).json({ error: "rows ve headers alanları zorunludur." });
-      }
-      const dryRun = req.body?.dry_run !== false;
-      const report = importProductsFromCsvRows(db, rows, headers, {
-        apply: !dryRun,
-        actorUsername: req.user?.username || "product-csv-import",
-        sourceName: cleanText(req.body?.source_name) || "products.csv",
-        sourceHash: crypto.createHash("sha256").update(JSON.stringify({ headers, rows })).digest("hex"),
-      });
-      if (!dryRun && report.validation_errors.length > 0) return res.status(422).json(report);
-      return res.json(report);
-    } catch (err: any) {
-      AppLogger.error("PRODUCT_CSV_IMPORT_ERROR", "Product CSV import failed", err);
-      return res.status(400).json({ error: err.message });
-    }
-  });
 
   app.post("/api/products/bulk-import", (req, res) => {
     const items = req.body;
@@ -4729,6 +4740,29 @@ async function startServer() {
     return summary;
   };
 
+  const recordIntegrationFailure = (input: {
+    accountId: string;
+    integration: string;
+    code: string;
+    occurredAt: string;
+  }) => {
+    try {
+      const prior = db.prepare("SELECT last_error_code FROM channel_accounts WHERE id=?")
+        .get(input.accountId) as { last_error_code: string | null } | undefined;
+      if (!prior) return;
+      db.prepare("UPDATE channel_accounts SET last_error_code=?,updated_at=? WHERE id=?")
+        .run(input.code, input.occurredAt, input.accountId);
+      if (prior.last_error_code) return;
+      void Promise.resolve(operationalPushNotifications.integrationException({
+        incidentId: `${input.integration.toLowerCase()}:poll:${input.accountId}:${input.occurredAt}`,
+        integration: input.integration,
+        message: input.code,
+      })).catch(() => undefined);
+    } catch {
+      // Failure recording and push are side effects; the provider error remains authoritative.
+    }
+  };
+
   const syncTrendyolShipmentPackages = async (config = getTrendyolConfig(), operationId = uuidv4(), actor: { id: string; name?: string | null } = { id: "trendyol-admin" }) => {
     const environment = normalizeTrendyolEnvironment(config.environment);
     const credentials = getTrendyolCredentials(config);
@@ -4822,6 +4856,171 @@ async function startServer() {
         actor: { id: req.user!.id, name: req.user!.username }, resolvedAt: req.body.resolvedAt || new Date().toISOString() }));
     } catch (err: any) {
       res.status(err.statusCode || 400).json({ success: false, error: { code: err.code || "CHANNEL_REPROCESS_FAILED", message: err.message } });
+    }
+  });
+
+
+  app.get("/api/integrations/shopify/status", requireIntegrationsAdmin, apiLimiter, async (_req, res) => {
+    try {
+      const shop = String(process.env.SHOPIFY_SHOP || "").trim().toLowerCase();
+
+      const account = db.prepare(`
+        SELECT
+          id,
+          channel,
+          merchant_account_id,
+          environment,
+          state,
+          last_poll_at,
+          last_sync_at,
+          last_error_code,
+          updated_at
+        FROM channel_accounts
+        WHERE channel='SHOPIFY'
+          AND merchant_account_id=?
+          AND environment='PRODUCTION'
+        LIMIT 1
+      `).get(shop) as any;
+
+      const transport = ShopifyGatewayTransport.fromEnvironment();
+      const connection = await transport.verifyConnection();
+
+      const stats = account
+        ? db.prepare(`
+            SELECT
+              COUNT(*) AS order_count,
+              SUM(CASE WHEN order_state='ACCEPTED' THEN 1 ELSE 0 END) AS accepted_count,
+              SUM(CASE WHEN order_state='EXCEPTION' THEN 1 ELSE 0 END) AS exception_count
+            FROM channel_orders
+            WHERE account_id=?
+          `).get(account.id)
+        : {
+            order_count: 0,
+            accepted_count: 0,
+            exception_count: 0,
+          };
+
+      res.json({
+        success: true,
+        account: account || null,
+        connection,
+        stats,
+        writeEnabled:
+          String(process.env.SHOPIFY_WRITE_ENABLED || "false").toLowerCase() === "true",
+      });
+    } catch (err: any) {
+      res.status(err.statusCode || 400).json({
+        success: false,
+        error: {
+          code: err.code || "SHOPIFY_STATUS_FAILED",
+          message: err.message,
+        },
+      });
+    }
+  });
+
+  app.post("/api/integrations/shopify/sync", requireIntegrationsAdmin, apiLimiter, async (req, res) => {
+    try {
+      const operationId = saleOperationId(req);
+
+      if (!operationId) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: "OPERATION_ID_REQUIRED",
+            message: "x-operation-id header is required.",
+          },
+        });
+      }
+
+      const shop = String(process.env.SHOPIFY_SHOP || "").trim().toLowerCase();
+
+      const account = db.prepare(`
+        SELECT *
+        FROM channel_accounts
+        WHERE channel='SHOPIFY'
+          AND merchant_account_id=?
+          AND environment='PRODUCTION'
+        LIMIT 1
+      `).get(shop) as any;
+
+      if (!account) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: "SHOPIFY_ACCOUNT_NOT_CONFIGURED",
+            message: "Shopify channel account is not configured.",
+          },
+        });
+      }
+
+      const query =
+        String(req.body?.query || "status:any").trim()
+        || "status:any";
+
+      const maxPages = Math.min(
+        5,
+        Math.max(
+          1,
+          Math.trunc(Number(req.body?.maxPages || 1)),
+        ),
+      );
+
+      const transport = ShopifyGatewayTransport.fromEnvironment();
+
+      await transport.verifyConnection();
+
+      const receivedAt = new Date().toISOString();
+
+      const summary = await transport.poll({
+        gateway: channelGateway,
+        accountId: account.id,
+        query,
+        serviceActorId: `shopify-poller:${account.id}`,
+        operationIdPrefix: operationId,
+        receivedAt,
+        maxPages,
+      });
+
+      db.prepare(`
+        UPDATE channel_accounts
+        SET last_sync_at=?,
+            last_error_code=NULL,
+            updated_at=?
+        WHERE id=?
+      `).run(
+        receivedAt,
+        receivedAt,
+        account.id,
+      );
+
+      logActivity(
+        "SHOPIFY_SYNCED",
+        "integration",
+        "Shopify",
+        {
+          after: {
+            query,
+            maxPages,
+            summary,
+          },
+        },
+        req.user?.id,
+      );
+
+      return res.json({
+        success: true,
+        accountId: account.id,
+        summary,
+      });
+    } catch (err: any) {
+      return res.status(err.statusCode || 400).json({
+        success: false,
+        error: {
+          code: err.code || "SHOPIFY_SYNC_FAILED",
+          message: err.message,
+        },
+      });
     }
   });
 
@@ -4924,6 +5123,22 @@ async function startServer() {
       logActivity("TRENDYOL_SYNCED", "integration", "Trendyol", { after: summary }, req.user?.id);
       res.json({ success: true, summary });
     } catch (err: any) {
+      try {
+        const config = { ...getTrendyolConfig(), ...req.body };
+        const environment = normalizeTrendyolEnvironment(config.environment);
+        const credentials = getTrendyolCredentials(config);
+        const account = db.prepare(`SELECT id FROM channel_accounts
+          WHERE channel='TRENDYOL' AND merchant_account_id=? AND environment=? LIMIT 1`)
+          .get(credentials.sellerId, environment === "prod" ? "PRODUCTION" : "STAGE") as { id: string } | undefined;
+        if (account) recordIntegrationFailure({
+          accountId: account.id,
+          integration: "TRENDYOL",
+          code: String(err?.code || "TRENDYOL_SYNC_FAILED").slice(0, 100),
+          occurredAt: new Date().toISOString(),
+        });
+      } catch {
+        // Invalid credentials may prevent resolving a canonical channel account.
+      }
       res.status(err.statusCode || 400).json({ success: false, error: { code: 'TRENDYOL_SYNC_FAILED', message: err.message } });
     }
   });
@@ -5548,7 +5763,74 @@ async function startServer() {
         UNION ALL SELECT account_id FROM channel_shipment_outbound_jobs WHERE id=? LIMIT 1)`)
         .get(req.params.id, req.params.id) as any;
       if (!account) throw new ChannelGatewayError("OUTBOUND_JOB_NOT_FOUND", "Outbound job was not found.", 404);
-      if (account.channel !== "TRENDYOL") throw new ChannelGatewayError("ADAPTER_TRANSPORT_DISABLED", "The channel adapter transport is disabled.", 409);
+
+      if (account.channel === "SHOPIFY") {
+        const isShipmentJob = Boolean(db.prepare(
+          "SELECT 1 FROM channel_shipment_outbound_jobs WHERE id=?"
+        ).get(req.params.id));
+
+        if (!isShipmentJob) {
+          throw new ChannelGatewayError(
+            "SHOPIFY_PRODUCT_WRITE_DISABLED",
+            "Shopify product/stock outbound writes are not enabled in V19.",
+            409,
+          );
+        }
+
+        const writeEnabled =
+          String(process.env.SHOPIFY_WRITE_ENABLED || "false")
+            .trim()
+            .toLowerCase() === "true";
+
+        if (!writeEnabled) {
+          throw new ChannelGatewayError(
+            "SHOPIFY_WRITE_DISABLED",
+            "SHOPIFY_WRITE_ENABLED is false.",
+            409,
+          );
+        }
+
+        const transport =
+          ShopifyGatewayTransport.fromEnvironment();
+
+        await transport.verifyConnection();
+
+        const outcome =
+          await channelGateway.processClaimedOutboundJob({
+            jobId: req.params.id,
+            leaseToken:
+              String(req.body.leaseToken || ""),
+            operationId,
+            serviceActorId:
+              `panel-api:${req.panelApiKey!.id}`,
+            occurredAt:
+              req.body.occurredAt
+              || new Date().toISOString(),
+            publish: (job) =>
+              transport.publishShipmentTracking({
+                externalOrderId:
+                  job.externalOrderId,
+                trackingNumber:
+                  job.trackingNumber,
+                trackingUrl:
+                  job.trackingUrl,
+                company:
+                  job.company,
+                notifyCustomer: false,
+              }),
+          });
+
+        return res.json(outcome);
+      }
+
+      if (account.channel !== "TRENDYOL") {
+        throw new ChannelGatewayError(
+          "ADAPTER_TRANSPORT_DISABLED",
+          "The channel adapter transport is disabled.",
+          409,
+        );
+      }
+
       const environment: TrendyolEnvironment = account.environment === "PRODUCTION" ? "prod" : "stage";
       const config = { ...getTrendyolConfig(), environment };
       const credentials = getTrendyolCredentials(config);
@@ -5635,6 +5917,7 @@ async function startServer() {
       authorizePrepare: auth.requireCapability("warehouse:pick_orders"),
       authorizeManage: auth.requireCapability("shipping:manage"),
       authorizeDispatch: auth.requireCapability("shipping:dispatch"),
+      notifyShippingException: operationalPushNotifications.shippingException,
     }),
   );
   app.use(
@@ -5645,6 +5928,7 @@ async function startServer() {
       authorizeRun: auth.requireCapability("reconciliation:run"),
       authorizePropose: auth.requireCapability("data:repair:propose"),
       authorizeApprove: auth.requireCapability("data:repair:approve"),
+      notifyOperationalFinding: operationalPushNotifications.reconciliationException,
     }),
   );
   mountWarehouseModule({
@@ -5655,6 +5939,9 @@ async function startServer() {
     uploadsDir,
     rateLimiters: [publicAuthFailedLimiter, publicApiLimiter],
     authenticateUserToken: (token, servicePrincipalId) => auth.authenticateUserToken(token, servicePrincipalId),
+    notifyShippingException: operationalPushNotifications.shippingException,
+    notifyGoodsReceiptException: operationalPushNotifications.goodsReceiptException,
+    notifyIntegrationException: operationalPushNotifications.integrationException,
   });
 
   app.get("/api/public/health", (req, res) => {
@@ -6203,8 +6490,299 @@ async function startServer() {
     }
   });
 
+
+  // Shopify inbound polling is read-only against Shopify.
+  // Outbound writes remain separately gated by SHOPIFY_WRITE_ENABLED.
+  const shopifyPollEnabled =
+    String(process.env.SHOPIFY_POLL_ENABLED || "false")
+      .trim()
+      .toLowerCase() === "true";
+
+  const shopifyWriteEnabled =
+    String(process.env.SHOPIFY_WRITE_ENABLED || "false")
+      .trim()
+      .toLowerCase() === "true";
+
+  const parsedShopifyPollInterval =
+    Number(process.env.SHOPIFY_POLL_INTERVAL_SECONDS || 60);
+
+  const shopifyPollIntervalSeconds =
+    Number.isFinite(parsedShopifyPollInterval)
+      ? Math.min(
+          3600,
+          Math.max(
+            15,
+            Math.trunc(parsedShopifyPollInterval),
+          ),
+        )
+      : 60;
+
+  const parsedShopifyPollMaxPages =
+    Number(process.env.SHOPIFY_POLL_MAX_PAGES || 1);
+
+  const shopifyPollMaxPages =
+    Number.isFinite(parsedShopifyPollMaxPages)
+      ? Math.min(
+          5,
+          Math.max(
+            1,
+            Math.trunc(parsedShopifyPollMaxPages),
+          ),
+        )
+      : 1;
+
+  let shopifyPollInFlight = false;
+  let shopifyScheduledTransport:
+    ShopifyGatewayTransport | null = null;
+  let shopifyConnectionVerified = false;
+
+  const runScheduledShopifyPoll = async () => {
+    if (!shopifyPollEnabled || shopifyPollInFlight) {
+      return;
+    }
+
+    shopifyPollInFlight = true;
+
+    const receivedAt = new Date().toISOString();
+    const shop = String(
+      process.env.SHOPIFY_SHOP || "",
+    ).trim().toLowerCase();
+
+    let account: any = null;
+
+    try {
+      if (!shop) {
+        throw new ChannelGatewayError(
+          "SHOPIFY_CONFIG_INVALID",
+          "SHOPIFY_SHOP is required.",
+          500,
+        );
+      }
+
+      account = db.prepare(`
+        SELECT *
+        FROM channel_accounts
+        WHERE channel='SHOPIFY'
+          AND merchant_account_id=?
+          AND environment='PRODUCTION'
+        LIMIT 1
+      `).get(shop) as any;
+
+      if (!account) {
+        throw new ChannelGatewayError(
+          "SHOPIFY_ACCOUNT_NOT_CONFIGURED",
+          "Shopify channel account is not configured.",
+          409,
+        );
+      }
+
+      if (!shopifyScheduledTransport) {
+        shopifyScheduledTransport =
+          ShopifyGatewayTransport.fromEnvironment();
+      }
+
+      // Connection/scope/location verification only needs to happen
+      // once per running process. Access-token renewal remains automatic.
+      if (!shopifyConnectionVerified) {
+        await shopifyScheduledTransport.verifyConnection();
+        shopifyConnectionVerified = true;
+      }
+
+      const summary =
+        await shopifyScheduledTransport.poll({
+          gateway: channelGateway,
+          accountId: account.id,
+          query: "status:any",
+          serviceActorId:
+            `shopify-poller:${account.id}`,
+          operationIdPrefix:
+            `shopify-auto:${receivedAt}`,
+          receivedAt,
+          maxPages: shopifyPollMaxPages,
+        });
+
+      if (shopifyWriteEnabled) {
+        const jobs =
+          channelGateway.claimReadyOutboundJobs({
+            accountId: account.id,
+            limit: 10,
+            leaseSeconds: 60,
+            operationId:
+              `shopify-fulfillment-claim:${receivedAt}`,
+            serviceActorId:
+              `shopify-fulfillment-worker:${account.id}`,
+            claimedAt: receivedAt,
+          }) as any[];
+
+        for (const job of jobs) {
+          if (job.outboundType !== "SHIPMENT") {
+            continue;
+          }
+
+          try {
+            await channelGateway.processClaimedOutboundJob({
+              jobId: job.id,
+              leaseToken: job.leaseToken,
+              operationId:
+                `shopify-fulfillment-publish:${job.id}:${receivedAt}`,
+              serviceActorId:
+                `shopify-fulfillment-worker:${account.id}`,
+              occurredAt: receivedAt,
+              publish: (publishJob) =>
+                shopifyScheduledTransport!
+                  .publishShipmentTracking({
+                    externalOrderId:
+                      publishJob.externalOrderId,
+                    trackingNumber:
+                      publishJob.trackingNumber,
+                    trackingUrl:
+                      publishJob.trackingUrl,
+                    company:
+                      publishJob.company,
+                    notifyCustomer: false,
+                  }),
+            });
+
+            AppLogger.info(
+              "SHOPIFY_FULFILLMENT",
+              "Shopify fulfillment tracking published.",
+              {
+                jobId: job.id,
+                shipmentId: job.shipmentId,
+              },
+            );
+          } catch (error: any) {
+            AppLogger.error(
+              "SHOPIFY_FULFILLMENT",
+              `Shopify fulfillment publish failed (${String(error?.code || "UNKNOWN")}).`,
+              error,
+            );
+          }
+        }
+      }
+
+      db.prepare(`
+        UPDATE channel_accounts
+        SET state='CONNECTED',
+            last_poll_at=?,
+            last_sync_at=?,
+            last_error_code=NULL,
+            updated_at=?
+        WHERE id=?
+      `).run(
+        receivedAt,
+        receivedAt,
+        receivedAt,
+        account.id,
+      );
+
+      db.prepare(`
+        INSERT INTO settings (key,value)
+        VALUES ('shopify_last_sync_at',?)
+        ON CONFLICT(key)
+        DO UPDATE SET value=excluded.value
+      `).run(receivedAt);
+
+      db.prepare(`
+        INSERT INTO settings (key,value)
+        VALUES ('shopify_last_sync_summary',?)
+        ON CONFLICT(key)
+        DO UPDATE SET value=excluded.value
+      `).run(JSON.stringify(summary));
+
+      if (
+        summary.accepted > 0
+        || summary.cancelled > 0
+        || summary.exception > 0
+      ) {
+        AppLogger.info(
+          "SHOPIFY_POLL",
+          "Shopify automatic order poll completed.",
+          {
+            accountId: account.id,
+            summary,
+          },
+        );
+      }
+    } catch (error: any) {
+      const code = String(
+        error?.code || "SHOPIFY_POLL_FAILED",
+      ).slice(0, 100);
+
+      if (account?.id) {
+        db.prepare(`
+          UPDATE channel_accounts
+          SET last_error_code=?,
+              updated_at=?
+          WHERE id=?
+        `).run(
+          code,
+          receivedAt,
+          account.id,
+        );
+        if (!account.last_error_code) {
+          try {
+            void Promise.resolve(operationalPushNotifications.integrationException({
+              incidentId: `shopify-poll:${account.id}:${receivedAt}`,
+              integration: "SHOPIFY",
+              message: code,
+            })).catch(() => undefined);
+          } catch {
+            // Push is best-effort and cannot change the polling outcome.
+          }
+        }
+      }
+
+      // Force a fresh verification on the next attempt.
+      shopifyConnectionVerified = false;
+
+      AppLogger.error(
+        "SHOPIFY_POLL",
+        `Shopify automatic poll failed (${code}).`,
+        error,
+      );
+    } finally {
+      shopifyPollInFlight = false;
+    }
+  };
+
+  if (shopifyPollEnabled) {
+    AppLogger.info(
+      "SHOPIFY_POLL",
+      "SHOPIFY_AUTOMATIC_POLL_STARTED",
+      {
+        intervalSeconds:
+          shopifyPollIntervalSeconds,
+        maxPages:
+          shopifyPollMaxPages,
+        writeEnabled:
+          shopifyWriteEnabled,
+      },
+    );
+
+    const initialShopifyPollTimer =
+      setTimeout(
+        () => void runScheduledShopifyPoll(),
+        10_000,
+      );
+
+    const shopifyPollTimer =
+      setInterval(
+        () => void runScheduledShopifyPoll(),
+        shopifyPollIntervalSeconds * 1000,
+      );
+
+    initialShopifyPollTimer.unref?.();
+    shopifyPollTimer.unref?.();
+  }
+
   startBackupScheduler();
-  startDailyReconciliationScheduler(db, AppLogger);
+  startDailyReconciliationScheduler(
+    db,
+    AppLogger,
+    process.env.RECONCILIATION_TIME_ZONE || undefined,
+    operationalPushNotifications.reconciliationException,
+  );
 
   // --- VITE MIDDLEWARE ---
 

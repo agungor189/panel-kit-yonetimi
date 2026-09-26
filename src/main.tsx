@@ -4,6 +4,14 @@ import App from './App.tsx';
 import { CurrencyProvider } from './CurrencyContext.tsx';
 import './index.css';
 
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    void navigator.serviceWorker.register('/service-worker.js', { scope: '/' }).catch((error) => {
+      console.warn('Service worker registration failed:', error);
+    });
+  });
+}
+
 class ErrorBoundary extends Component<{ children: React.ReactNode }, { hasError: boolean, error: Error | null }> {
   state = { hasError: false, error: null as Error | null };
 

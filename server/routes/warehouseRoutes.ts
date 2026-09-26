@@ -37,6 +37,9 @@ type WarehouseRouterDependencies = {
   ) => void;
   authenticateUserToken: (token: string, servicePrincipalId: string) => WarehouseUser | null;
   uploadsDir: string;
+  notifyShippingException?: (event: { shipmentId: string; jobId: string }) => void | Promise<unknown>;
+  notifyGoodsReceiptException?: (event: { receiptId: string }) => void | Promise<unknown>;
+  notifyIntegrationException?: (event: { incidentId: string; integration: string; message: string }) => void | Promise<unknown>;
 };
 
 const permissionsFor = (rawPermissions: unknown): string[] => {
@@ -66,6 +69,9 @@ export function createWarehouseRouter({
   logActivity,
   authenticateUserToken,
   uploadsDir,
+  notifyShippingException,
+  notifyGoodsReceiptException,
+  notifyIntegrationException,
 }: WarehouseRouterDependencies) {
   const router = express.Router();
   const service = new WarehouseService(db, logActivity);
@@ -81,9 +87,17 @@ export function createWarehouseRouter({
   const geliverService = new GeliverFlowService(db, geliverTransport, {
     senderAddressId: geliverTransport.senderAddressId,
     sourceIdentifier: geliverTransport.sourceIdentifier,
+    onOperationalException: (event) => Promise.allSettled([
+      notifyShippingException?.(event),
+      notifyIntegrationException?.({
+        incidentId: `geliver-booking:${event.jobId}`,
+        integration: "GELIVER",
+        message: "Sevkiyat sağlayıcı işlemi bloke oldu",
+      }),
+    ]),
   });
   const returnsService = new ReturnsService(db);
-  const executionService = new WarehouseExecutionService(db);
+  const executionService = new WarehouseExecutionService(db, { onGoodsReceiptException: notifyGoodsReceiptException });
   const printingService = new PrintingService(db);
   const reconciliationService = new ReconciliationService(db);
 
@@ -542,6 +556,36 @@ export function createWarehouseRouter({
   router.get("/shipping/provider-contracts/geliver", authenticate("read:warehouse_orders"), requireWarehouseUser,
     requireWarehousePermission("warehouse:pick_orders"), (_req, res) =>
       res.json({ success: true, contract: "dsdst.carrier-provider-contract.v2", data: geliverService.contract() }));
+
+  router.get("/shipping/shipments", authenticate("read:warehouse_orders"), requireWarehouseUser,
+    requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
+      try {
+        const requestedScope = queryText(req.query.scope, 20).toLowerCase();
+        const scope = ["pending", "completed", "all"].includes(requestedScope)
+          ? requestedScope
+          : "pending";
+
+        const query = queryText(req.query.q, 120);
+        const limit = Math.min(
+          500,
+          Math.max(1, Math.trunc(Number(req.query.limit)) || 200),
+        );
+
+        auditRead(req);
+
+        return res.json({
+          success: true,
+          contract: "dsdst.shipment-list.v1",
+          data: shipmentService.listShipments({
+            scope,
+            query,
+            limit,
+          }),
+        });
+      } catch (error) {
+        return handleServiceError(res, error);
+      }
+    });
 
   router.get("/shipping/shipments/:id", authenticate("read:warehouse_orders"), requireWarehouseUser,
     requireWarehousePermission("warehouse:pick_orders"), (req, res) => {

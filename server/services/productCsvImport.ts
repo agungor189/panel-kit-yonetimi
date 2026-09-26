@@ -8,6 +8,7 @@ import {
   type ProductType,
 } from "../../shared/productCsvMapping.js";
 import { generateNormalizedFields } from "../utils/normalizeProductFields.js";
+import { CatalogService } from "../modules/catalog/catalogService.js";
 
 type CsvRecord = Record<string, unknown>;
 
@@ -226,6 +227,7 @@ export function importProductsFromCsvRows(
   headers: string[],
   options: ProductCsvImportOptions = {},
 ): ProductCsvImportReport {
+  const catalog = new CatalogService(db);
   const apply = options.apply === true;
   const resolution = resolveProductCsvHeaders(headers);
   const errors: ValidationError[] = [];
@@ -564,12 +566,14 @@ export function importProductsFromCsvRows(
       product_series, tube_type_code, size, pipe_size, form_code, connection_type,
       central_stock, product_type, is_sellable, visible_in_catalog, exclude_from_analysis,
       purchase_price_usd, weight_grams, warehouse_location, barcode, notes, status,
+      mass_grams_int,
       normalized_material, normalized_model, normalized_size, normalized_tube_type, normalized_pipe_size
     ) VALUES (
       @id, @sku, @supplier_code, @name_tr, @name_en, @name, @title, @description, @material, @category, @model,
       @product_series, @tube_type_code, @size, @pipe_size, @form_code, @connection_type,
       @central_stock, @product_type, @is_sellable, @visible_in_catalog, @exclude_from_analysis,
       @purchase_price_usd, @weight_grams, @warehouse_location, @barcode, @notes, 'Active',
+      @weight_grams,
       @normalized_material, @normalized_model, @normalized_size, @normalized_tube_type, @normalized_pipe_size
     )
   `);
@@ -581,7 +585,8 @@ export function importProductsFromCsvRows(
       connection_type=@connection_type,
       product_type=@product_type, is_sellable=@is_sellable, visible_in_catalog=@visible_in_catalog,
       exclude_from_analysis=@exclude_from_analysis, purchase_price_usd=@purchase_price_usd,
-      weight_grams=@weight_grams, warehouse_location=@warehouse_location, barcode=@barcode, notes=@notes,
+      weight_grams=@weight_grams, mass_grams_int=@weight_grams,
+      warehouse_location=@warehouse_location, barcode=@barcode, notes=@notes,
       normalized_material=@normalized_material, normalized_model=@normalized_model, normalized_size=@normalized_size,
       normalized_tube_type=@normalized_tube_type, normalized_pipe_size=@normalized_pipe_size,
       updated_at=CURRENT_TIMESTAMP
@@ -643,6 +648,7 @@ export function importProductsFromCsvRows(
 
     for (const parentId of importedAssemblyIds) deleteBomForParent.run(parentId);
     for (const line of preparedBomLines) insertBom.run(crypto.randomUUID(), line.parentId, line.componentId, line.quantity);
+    for (const product of preparedProducts) catalog.captureImportedProductVersion(product.id);
 
     if (tableExists(db, "activity_logs")) {
       db.prepare(`

@@ -4,6 +4,18 @@ import { api } from '../lib/api';
 import { useCurrency } from '../CurrencyContext';
 import { Transaction, ExpenseAttachment, Settings } from '../types';
 import { useAuth } from '../App';
+import {
+  Badge,
+  Button,
+  Card,
+  ConfirmDialog,
+  EmptyState,
+  Input,
+  LoadingState,
+  Modal,
+  PageHeader,
+  Select,
+} from './ui';
 
 export default function Expenses({ settings }: { settings?: Settings | null }) {
   const { isReadOnly } = useAuth();
@@ -40,27 +52,25 @@ export default function Expenses({ settings }: { settings?: Settings | null }) {
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-        <div>
-          <h2 className="text-2xl font-black text-gray-900 tracking-tight">Gider Yönetimi</h2>
-          <p className="text-gray-500 mt-1">Fatura, fiş ve harcamalarınızı detaylı takip edin.</p>
-        </div>
-        {!isReadOnly && (
-          <button
+      <PageHeader
+        title="Gider Yönetimi"
+        description="Fatura, fiş ve harcamalarınızı detaylı takip edin."
+        actions={!isReadOnly ? (
+          <Button
             onClick={() => setShowAddModal(true)}
-            className="px-6 py-2.5 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition shadow-lg shadow-blue-200 flex items-center"
+            className="rounded-xl bg-blue-600 px-6 py-2.5 font-bold shadow-lg shadow-blue-200 hover:bg-blue-700"
           >
-            <Plus className="w-5 h-5 mr-2" />
+            <Plus className="h-5 w-5" />
             Yeni Gider Ekle
-          </button>
-        )}
-      </div>
+          </Button>
+        ) : undefined}
+      />
 
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+      <Card className="overflow-hidden rounded-2xl border-gray-100 shadow-sm">
         <div className="p-4 border-b border-gray-100 bg-gray-50 flex items-center gap-4">
           <div className="relative flex-1 max-w-sm">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
-            <input
+            <Input
               type="text"
               placeholder="Giderlerde ara..."
               value={search}
@@ -84,7 +94,12 @@ export default function Expenses({ settings }: { settings?: Settings | null }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
-              {filteredExpenses.map(expense => (
+              {loading && (
+                <tr>
+                  <td colSpan={7}><LoadingState label="Giderler yükleniyor..." /></td>
+                </tr>
+              )}
+              {!loading && filteredExpenses.map(expense => (
                 <tr
                   key={expense.id}
                   onClick={() => setSelectedExpense(expense)}
@@ -94,9 +109,9 @@ export default function Expenses({ settings }: { settings?: Settings | null }) {
                     {new Date(expense.date).toLocaleDateString('tr-TR')}
                   </td>
                   <td className="px-6 py-4">
-                    <span className="px-3 py-1 bg-gray-100 text-gray-700 text-xs font-bold rounded-lg whitespace-nowrap">
+                    <Badge className="whitespace-nowrap rounded-lg border-0 bg-gray-100 px-3 py-1 text-gray-700">
                       {expense.category || 'Belirsiz'}
-                    </span>
+                    </Badge>
                   </td>
                   <td className="px-6 py-4">
                     <div className="font-bold text-gray-900">{expense.title || expense.note || '-'}</div>
@@ -107,10 +122,10 @@ export default function Expenses({ settings }: { settings?: Settings | null }) {
                   </td>
                   <td className="px-6 py-4">
                     {expense.attachment_count && expense.attachment_count > 0 ? (
-                      <span className="flex items-center text-blue-600 font-medium text-sm bg-blue-50 px-2 py-1 rounded-md w-max">
+                      <Badge variant="primary" className="w-max rounded-md border-0 px-2 py-1 text-sm font-medium">
                         <Paperclip className="w-4 h-4 mr-1" />
                         {expense.attachment_count} Ek
-                      </span>
+                      </Badge>
                     ) : (
                       <span className="text-gray-400 text-sm">-</span>
                     )}
@@ -125,17 +140,15 @@ export default function Expenses({ settings }: { settings?: Settings | null }) {
                   </td>
                 </tr>
               ))}
-              {filteredExpenses.length === 0 && (
+              {!loading && filteredExpenses.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-6 py-12 text-center text-gray-500">
-                    Gider bulunamadı.
-                  </td>
+                  <td colSpan={7}><EmptyState title="Gider bulunamadı." /></td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
-      </div>
+      </Card>
 
       {selectedExpense && (
         <ExpenseDetailModal
@@ -205,31 +218,25 @@ function ExpenseAddModal({ onClose, onRefresh, settings }: { onClose: () => void
   };
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={onClose}></div>
-      <div className="bg-white w-full max-w-lg rounded-2xl shadow-2xl flex flex-col overflow-hidden relative animate-in zoom-in-95 duration-200">
-        <div className="px-6 py-5 border-b border-gray-100 flex items-center justify-between">
-          <h3 className="font-bold text-lg text-gray-900">Yeni Gider Ekle</h3>
-          <button onClick={onClose} className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <form onSubmit={handleSave} className="p-6 space-y-4 overflow-y-auto max-h-[70vh]">
+    <Modal
+      open
+      onClose={onClose}
+      title="Yeni Gider Ekle"
+      size="md"
+      className="max-w-lg animate-in zoom-in-95 duration-200"
+    >
+        <form onSubmit={handleSave} className="max-h-[70vh] space-y-4 overflow-y-auto">
           <div className="grid grid-cols-2 gap-4">
-             <div>
-                <label className="block text-sm font-bold text-gray-700 mb-1">Tarih</label>
-                <input
+             <Input
+                  label="Tarih"
                   type="date"
                   value={formData.date}
                   onChange={e => setFormData({...formData, date: e.target.value})}
                   className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white transition-colors"
                   required
                 />
-             </div>
-             <div>
-                <label className="block text-sm font-bold text-gray-700 mb-1">Kategori</label>
-                <select
+             <Select
+                  label="Kategori"
                   value={formData.category}
                   onChange={e => setFormData({...formData, category: e.target.value})}
                   className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white transition-colors"
@@ -237,13 +244,11 @@ function ExpenseAddModal({ onClose, onRefresh, settings }: { onClose: () => void
                 >
                   <option value="">Seçiniz...</option>
                   {categories.map((c: string) => <option key={c} value={c}>{c}</option>)}
-                </select>
-             </div>
+                </Select>
           </div>
 
-          <div>
-            <label className="block text-sm font-bold text-gray-700 mb-1">Başlık</label>
-            <input
+          <Input
+              label="Başlık"
               type="text"
               value={formData.title}
               onChange={e => setFormData({...formData, title: e.target.value})}
@@ -251,7 +256,6 @@ function ExpenseAddModal({ onClose, onRefresh, settings }: { onClose: () => void
               placeholder="Örn: Trendyol Kargo Gideri"
               required
             />
-          </div>
 
           <div>
             <label className="block text-sm font-bold text-gray-700 mb-1">Açıklama</label>
@@ -264,9 +268,8 @@ function ExpenseAddModal({ onClose, onRefresh, settings }: { onClose: () => void
           </div>
 
           <div className="grid grid-cols-2 gap-4">
-             <div>
-                <label className="block text-sm font-bold text-gray-700 mb-1">Tutar (₺)</label>
-                <input
+             <Input
+                  label="Tutar (₺)"
                   type="number"
                   step="0.01"
                   value={formData.amount}
@@ -275,10 +278,8 @@ function ExpenseAddModal({ onClose, onRefresh, settings }: { onClose: () => void
                   placeholder="0.00"
                   required
                 />
-             </div>
-             <div>
-                <label className="block text-sm font-bold text-gray-700 mb-1">Kasa Hesabı (Çıkış)</label>
-                <select
+             <Select
+                  label="Kasa Hesabı (Çıkış)"
                   value={formData.cash_account_id}
                   onChange={e => setFormData({...formData, cash_account_id: e.target.value})}
                   className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white transition-colors"
@@ -286,45 +287,40 @@ function ExpenseAddModal({ onClose, onRefresh, settings }: { onClose: () => void
                 >
                   <option value="">Seçiniz...</option>
                   {cashAccounts.map(a => <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>)}
-                </select>
-             </div>
+                </Select>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
-             <div>
-                <label className="block text-sm font-bold text-gray-700 mb-1">Firma / Tedarikçi</label>
-                <input
+             <Input
+                  label="Firma / Tedarikçi"
                   type="text"
                   value={formData.supplier}
                   onChange={e => setFormData({...formData, supplier: e.target.value})}
                   className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white transition-colors"
                   placeholder="Örn: Yurtiçi Kargo"
                 />
-             </div>
-             <div>
-                <label className="block text-sm font-bold text-gray-700 mb-1">Fatura Numarası</label>
-                <input
+             <Input
+                  label="Fatura Numarası"
                   type="text"
                   value={formData.invoice_number}
                   onChange={e => setFormData({...formData, invoice_number: e.target.value})}
                   className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white transition-colors"
                 />
-             </div>
           </div>
 
           <div className="pt-2">
              <p className="text-sm text-gray-500 mb-4 px-1">Fatura, fiş veya diğer ekleri gideri oluşturduktan sonra detay ekranından yükleyebilirsiniz.</p>
-             <button
+             <Button
                type="submit"
-               disabled={saving}
+               loading={saving}
+               loadingText="Kaydediliyor..."
                className="w-full py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition shadow-lg disabled:opacity-50"
              >
-               {saving ? "Kaydediliyor..." : "Gideri Kaydet"}
-             </button>
+               Gideri Kaydet
+             </Button>
           </div>
         </form>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -337,6 +333,7 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ type: 'expense' } | { type: 'attachment'; id: string } | null>(null);
 
   // Edit form state
   const [isEditing, setIsEditing] = useState(false);
@@ -381,9 +378,9 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
 
   const handleDelete = async () => {
     if (isReadOnly) return;
-    if (!confirm("Bu gider kaydını ve bağlı ekleri silmek istediğinize emin misiniz?")) return;
     try {
       await api.delete(`/expenses/${expense.id}`);
+      setDeleteTarget(null);
       onRefresh();
       onClose();
     } catch(err) {
@@ -440,9 +437,9 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
 
   const handleDeleteAttachment = async (attId: string) => {
     if (isReadOnly) return;
-    if (!confirm("Bunu silmek istediğinizden emin misiniz?")) return;
     try {
       await api.delete(`/expenses/${expense.id}/attachments/${attId}`);
+      setDeleteTarget(null);
       await loadDetails();
       onRefresh();
     } catch(err) {
@@ -451,6 +448,7 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
   };
 
   return (
+    <>
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={onClose}></div>
       <div className="bg-white w-full max-w-3xl rounded-2xl shadow-2xl flex flex-col overflow-hidden relative animate-in slide-in-from-bottom-8 duration-300 max-h-[90vh]">
@@ -461,7 +459,7 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
           </div>
           <div className="flex items-center gap-2">
             {!isReadOnly && (
-              <button onClick={handleDelete} className="p-2 text-danger hover:bg-red-50 rounded-lg transition-colors" title="Gideri Sil">
+              <button onClick={() => setDeleteTarget({ type: 'expense' })} className="p-2 text-danger hover:bg-red-50 rounded-lg transition-colors" title="Gideri Sil">
                 <Trash2 className="w-5 h-5" />
               </button>
             )}
@@ -484,14 +482,14 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
           >
             Fatura & Ekler
             {attachments.length > 0 && (
-              <span className="bg-gray-200 text-gray-700 px-2 py-0.5 rounded-full text-xs">{attachments.length}</span>
+              <Badge className="border-0 bg-gray-200 px-2 py-0.5 text-gray-700">{attachments.length}</Badge>
             )}
           </button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-6">
           {loading ? (
-             <div className="flex items-center justify-center p-12"><div className="w-8 h-8 rounded-full border-4 border-blue-200 border-t-blue-600 animate-spin"></div></div>
+             <LoadingState label="Gider detayı yükleniyor..." />
           ) : (
              <>
                {activeTab === 'details' && (
@@ -499,19 +497,16 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                    {isEditing ? (
                      <form onSubmit={handleUpdate} className="space-y-4">
                         <div className="grid grid-cols-2 gap-4">
-                           <div>
-                              <label className="block text-sm font-bold text-gray-700 mb-1">Tarih</label>
-                              <input
+                           <Input
+                                label="Tarih"
                                 type="date"
                                 value={formData.date}
                                 onChange={e => setFormData({...formData, date: e.target.value})}
                                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                                 required
                               />
-                           </div>
-                           <div>
-                              <label className="block text-sm font-bold text-gray-700 mb-1">Kategori</label>
-                              <select
+                           <Select
+                                label="Kategori"
                                 value={formData.category}
                                 onChange={e => setFormData({...formData, category: e.target.value})}
                                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
@@ -519,20 +514,17 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                               >
                                 <option value="">Seçiniz...</option>
                                 {categories.map((c: string) => <option key={c} value={c}>{c}</option>)}
-                              </select>
-                           </div>
+                              </Select>
                         </div>
 
-                        <div>
-                          <label className="block text-sm font-bold text-gray-700 mb-1">Başlık</label>
-                          <input
+                        <Input
+                            label="Başlık"
                             type="text"
                             value={formData.title}
                             onChange={e => setFormData({...formData, title: e.target.value})}
                             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                             required
                           />
-                        </div>
 
                         <div>
                           <label className="block text-sm font-bold text-gray-700 mb-1">Açıklama</label>
@@ -544,9 +536,8 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                         </div>
 
                         <div className="grid grid-cols-2 gap-4">
-                           <div>
-                              <label className="block text-sm font-bold text-gray-700 mb-1">Tutar (₺)</label>
-                              <input
+                           <Input
+                                label="Tutar (₺)"
                                 type="number"
                                 step="0.01"
                                 value={formData.amount}
@@ -554,10 +545,8 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 font-mono"
                                 required
                               />
-                           </div>
-                           <div>
-                              <label className="block text-sm font-bold text-gray-700 mb-1">Ödeme Yöntemi</label>
-                              <select
+                           <Select
+                                label="Ödeme Yöntemi"
                                 value={formData.payment_method}
                                 onChange={e => setFormData({...formData, payment_method: e.target.value})}
                                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
@@ -567,36 +556,29 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                                 <option value="Banka Transferi (Havale/EFT)">Banka Transferi</option>
                                 <option value="Nakit">Nakit</option>
                                 <option value="Şirket Hesabı">Şirket Hesabı</option>
-                              </select>
-                           </div>
+                              </Select>
                         </div>
 
                         <div className="grid grid-cols-2 gap-4">
-                           <div>
-                              <label className="block text-sm font-bold text-gray-700 mb-1">Firma / Tedarikçi</label>
-                              <input
+                           <Input
+                                label="Firma / Tedarikçi"
                                 type="text"
                                 value={formData.supplier}
                                 onChange={e => setFormData({...formData, supplier: e.target.value})}
                                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                               />
-                           </div>
-                           <div>
-                              <label className="block text-sm font-bold text-gray-700 mb-1">Fatura Numarası</label>
-                              <input
+                           <Input
+                                label="Fatura Numarası"
                                 type="text"
                                 value={formData.invoice_number}
                                 onChange={e => setFormData({...formData, invoice_number: e.target.value})}
                                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                               />
-                           </div>
                         </div>
 
                         <div className="flex justify-end gap-3 pt-4 border-t border-gray-100">
-                          <button type="button" onClick={() => setIsEditing(false)} className="px-4 py-2 bg-gray-100 text-gray-700 font-bold rounded-lg hover:bg-gray-200">İptal</button>
-                          <button type="submit" disabled={saving} className="px-4 py-2 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 disabled:opacity-50">
-                            {saving ? "Kaydediliyor..." : "Kaydet"}
-                          </button>
+                          <Button type="button" variant="secondary" onClick={() => setIsEditing(false)} className="bg-gray-100 font-bold text-gray-700 hover:bg-gray-200">İptal</Button>
+                          <Button type="submit" loading={saving} loadingText="Kaydediliyor..." className="bg-blue-600 font-bold hover:bg-blue-700">Kaydet</Button>
                         </div>
                      </form>
                    ) : (
@@ -607,9 +589,9 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                              <div className="text-3xl font-black text-gray-900 tracking-tight"><FormatAmount amount={expense.amount || 0} originalCurrency={(expense as any).currency || 'TRY'} exchangeRateAtTransaction={expense.exchange_rate_at_transaction} /></div>
                            </div>
                            {!isReadOnly && (
-                             <button onClick={() => setIsEditing(true)} className="px-4 py-2 bg-white border border-gray-200 text-gray-700 font-bold rounded-lg shadow-sm hover:bg-gray-50 transition-colors">
+                             <Button variant="secondary" onClick={() => setIsEditing(true)} className="border-gray-200 font-bold text-gray-700 shadow-sm hover:bg-gray-50">
                                Düzenle
-                             </button>
+                             </Button>
                            )}
                         </div>
 
@@ -689,7 +671,7 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                             )}
                             {!isReadOnly && <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
                               <button
-                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDeleteAttachment(att.id); }}
+                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); setDeleteTarget({ type: 'attachment', id: att.id }); }}
                                 className="p-1.5 bg-red-600 text-white rounded-md shadow-lg hover:bg-red-700"
                                 title="Sil"
                               >
@@ -704,10 +686,11 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                         )
                       })}
                       {attachments.length === 0 && (
-                        <div className="col-span-full py-12 flex flex-col items-center justify-center text-gray-400 border-2 border-dashed border-gray-200 rounded-2xl bg-gray-50/50">
-                          <ImageIcon className="w-12 h-12 mb-3 text-gray-300" />
-                          <p>Henüz hiç eklenmiş dosya yok.</p>
-                        </div>
+                        <EmptyState
+                          title="Henüz hiç eklenmiş dosya yok."
+                          icon={<ImageIcon className="h-12 w-12 text-gray-300" />}
+                          className="col-span-full rounded-2xl border-2 border-dashed border-gray-200 bg-gray-50/50 text-gray-400"
+                        />
                       )}
                     </div>
                  </div>
@@ -717,5 +700,18 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
         </div>
       </div>
     </div>
+    <ConfirmDialog
+      open={deleteTarget !== null}
+      onClose={() => setDeleteTarget(null)}
+      onConfirm={() => deleteTarget?.type === 'expense' ? handleDelete() : deleteTarget ? handleDeleteAttachment(deleteTarget.id) : undefined}
+      title={deleteTarget?.type === 'expense' ? 'Gideri sil' : 'Eki sil'}
+      description={deleteTarget?.type === 'expense'
+        ? 'Bu gider kaydı ve bağlı ekleri kalıcı olarak silinecek. Devam etmek istiyor musunuz?'
+        : 'Bu eki kalıcı olarak silmek istediğinize emin misiniz?'}
+      confirmLabel="Sil"
+      cancelLabel="İptal"
+      destructive
+    />
+    </>
   );
 }

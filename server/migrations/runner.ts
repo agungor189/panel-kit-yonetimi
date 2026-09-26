@@ -20,6 +20,12 @@ import { CHANNEL_SHIPMENT_OUTBOUND_SCHEMA_V84 } from "../db/channelShipmentOutbo
 import { PRINT_STATE_SCHEMA_V85 } from "../db/printStateSchema.js";
 import { PRINT_DEDUP_COLUMNS_SCHEMA_V86, PRINT_DEDUP_GUARDS_SCHEMA_V86 } from "../db/printDedupSchema.js";
 import { RECONCILIATION_SCHEMA_V87 } from "../db/reconciliationSchema.js";
+import { PUSH_SUBSCRIPTIONS_SCHEMA_V88 } from "../db/pushSubscriptionsSchema.js";
+import { NOTIFICATION_PREFERENCES_SCHEMA_V89 } from "../db/notificationPreferencesSchema.js";
+import { NOTIFICATION_TEMPLATES_SCHEMA_V90 } from "../db/notificationTemplatesSchema.js";
+import { PUSH_NOTIFICATION_DISPATCH_SCHEMA_V91 } from "../db/pushNotificationDispatchSchema.js";
+import { PUSH_NOTIFICATION_DISPATCH_CATEGORIES_SCHEMA_V92 } from "../db/pushNotificationDispatchCategoriesSchema.js";
+import { PUSH_NOTIFICATION_DISPATCH_ALL_CATEGORIES_SCHEMA_V93 } from "../db/pushNotificationDispatchAllCategoriesSchema.js";
 import { WAREHOUSE_EXECUTION_SCHEMA_V71, WAREHOUSE_REPLENISHMENT_RUNTIME_SCHEMA_V73 } from "../db/warehouseExecutionSchema.js";
 import { canonicalPayloadHash } from "../modules/commands/commandFoundation.js";
 
@@ -3038,9 +3044,51 @@ const migrations: Migration[] = [
       db.exec(RECONCILIATION_SCHEMA_V87);
     },
   },
+  {
+    version: 88,
+    name: "add_user_push_subscriptions",
+    up(db) {
+      db.exec(PUSH_SUBSCRIPTIONS_SCHEMA_V88);
+    },
+  },
+  {
+    version: 89,
+    name: "add_user_notification_preferences",
+    up(db) {
+      db.exec(NOTIFICATION_PREFERENCES_SCHEMA_V89);
+    },
+  },
+  {
+    version: 90,
+    name: "add_notification_categories_and_templates",
+    up(db) {
+      db.exec(NOTIFICATION_TEMPLATES_SCHEMA_V90);
+    },
+  },
+  {
+    version: 91,
+    name: "add_push_notification_dispatch_dedupe",
+    up(db) {
+      db.exec(PUSH_NOTIFICATION_DISPATCH_SCHEMA_V91);
+    },
+  },
+  {
+    version: 92,
+    name: "expand_push_notification_dispatch_categories",
+    up(db) {
+      db.exec(PUSH_NOTIFICATION_DISPATCH_CATEGORIES_SCHEMA_V92);
+    },
+  },
+  {
+    version: 93,
+    name: "expand_push_notification_dispatch_all_categories",
+    up(db) {
+      db.exec(PUSH_NOTIFICATION_DISPATCH_ALL_CATEGORIES_SCHEMA_V93);
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 87;
+export const CURRENT_SCHEMA_VERSION = 93;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),
@@ -3055,7 +3103,7 @@ export type MigrationManifestEntry = {
 };
 
 const checksumFor = (migration: Migration): string => createHash("sha256")
-  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}${migration.version === 69 ? `\0${INVENTORY_SCHEMA_V69}` : ""}${migration.version === 71 ? `\0${WAREHOUSE_EXECUTION_SCHEMA_V71}` : ""}${migration.version === 74 ? `\0${SALES_FINANCIAL_SCHEMA_V74}` : ""}${migration.version === 75 ? `\0${RETURNS_SCHEMA_V75}` : ""}${migration.version === 76 ? `\0${WAREHOUSE_PACKAGE_ORIGIN_SCHEMA_V76}` : ""}${migration.version === 77 ? `\0${PUBLISHED_KIT_SCHEMA_V77}` : ""}${migration.version === 78 ? `\0${PROFILE_CUT_REMEDIATION_SCHEMA_V78}` : ""}${migration.version === 79 ? `\0${CHANNEL_GATEWAY_SCHEMA_V79}` : ""}${migration.version === 80 ? `\0${CHANNEL_GATEWAY_REMEDIATION_SCHEMA_V80}` : ""}${migration.version === 81 ? `\0${CHANNEL_GATEWAY_CORRECTNESS_SCHEMA_V81}` : ""}${migration.version === 82 ? `\0${SHIPMENT_CARRIER_SCHEMA_V82}` : ""}${migration.version === 83 ? `\0${GELIVER_REMEDIATION_SCHEMA_V83}` : ""}${migration.version === 84 ? `\0${CHANNEL_SHIPMENT_OUTBOUND_SCHEMA_V84}` : ""}${migration.version === 85 ? `\0${PRINT_STATE_SCHEMA_V85}` : ""}${migration.version === 86 ? `\0${PRINT_DEDUP_COLUMNS_SCHEMA_V86}\0${PRINT_DEDUP_GUARDS_SCHEMA_V86}` : ""}${migration.version === 87 ? `\0${RECONCILIATION_SCHEMA_V87}` : ""}`)
+  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}${migration.version === 69 ? `\0${INVENTORY_SCHEMA_V69}` : ""}${migration.version === 71 ? `\0${WAREHOUSE_EXECUTION_SCHEMA_V71}` : ""}${migration.version === 74 ? `\0${SALES_FINANCIAL_SCHEMA_V74}` : ""}${migration.version === 75 ? `\0${RETURNS_SCHEMA_V75}` : ""}${migration.version === 76 ? `\0${WAREHOUSE_PACKAGE_ORIGIN_SCHEMA_V76}` : ""}${migration.version === 77 ? `\0${PUBLISHED_KIT_SCHEMA_V77}` : ""}${migration.version === 78 ? `\0${PROFILE_CUT_REMEDIATION_SCHEMA_V78}` : ""}${migration.version === 79 ? `\0${CHANNEL_GATEWAY_SCHEMA_V79}` : ""}${migration.version === 80 ? `\0${CHANNEL_GATEWAY_REMEDIATION_SCHEMA_V80}` : ""}${migration.version === 81 ? `\0${CHANNEL_GATEWAY_CORRECTNESS_SCHEMA_V81}` : ""}${migration.version === 82 ? `\0${SHIPMENT_CARRIER_SCHEMA_V82}` : ""}${migration.version === 83 ? `\0${GELIVER_REMEDIATION_SCHEMA_V83}` : ""}${migration.version === 84 ? `\0${CHANNEL_SHIPMENT_OUTBOUND_SCHEMA_V84}` : ""}${migration.version === 85 ? `\0${PRINT_STATE_SCHEMA_V85}` : ""}${migration.version === 86 ? `\0${PRINT_DEDUP_COLUMNS_SCHEMA_V86}\0${PRINT_DEDUP_GUARDS_SCHEMA_V86}` : ""}${migration.version === 87 ? `\0${RECONCILIATION_SCHEMA_V87}` : ""}${migration.version === 88 ? `\0${PUSH_SUBSCRIPTIONS_SCHEMA_V88}` : ""}${migration.version === 89 ? `\0${NOTIFICATION_PREFERENCES_SCHEMA_V89}` : ""}${migration.version === 90 ? `\0${NOTIFICATION_TEMPLATES_SCHEMA_V90}` : ""}${migration.version === 91 ? `\0${PUSH_NOTIFICATION_DISPATCH_SCHEMA_V91}` : ""}${migration.version === 92 ? `\0${PUSH_NOTIFICATION_DISPATCH_CATEGORIES_SCHEMA_V92}` : ""}`)
   .digest("hex");
 
 export function getMigrationManifest(): MigrationManifestEntry[] {

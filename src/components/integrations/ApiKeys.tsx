@@ -4,6 +4,7 @@ import { ApiKey } from '../../types';
 import { Key, Plus, Trash2, Edit2, Play, CheckCircle, XCircle, AlertTriangle, ShieldAlert } from 'lucide-react';
 import { useAuth } from '../../App';
 import toast, { Toaster } from 'react-hot-toast';
+import { Badge, Button, Card, ConfirmDialog, EmptyState, LoadingState, PageHeader } from '../ui';
 
 export default function ApiKeys() {
   const { isReadOnly } = useAuth();
@@ -137,31 +138,23 @@ export default function ApiKeys() {
     <div className="space-y-6 animate-in fade-in duration-500">
       <Toaster position="top-right" />
 
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-black text-text-main flex items-center space-x-3">
-            <div className="w-10 h-10 bg-primary/10 rounded-xl flex items-center justify-center">
+      <PageHeader
+        title={<span className="flex items-center gap-3"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10">
               <Key className="w-5 h-5 text-primary" />
-            </div>
-            <span>API Anahtarları</span>
-          </h2>
-          <p className="text-text-muted mt-2 text-sm max-w-xl">
-            Harici uygulamaların, pazar yerlerinin veya yapay zeka entegrasyonlarının API bağlantılarını
-            buradan 256-bit şifreleme ile güvenli bir şekilde yönetin.
-          </p>
-        </div>
-        {!isReadOnly && (
-          <button
+            </span>API Anahtarları</span>}
+        description="Harici uygulamaların, pazar yerlerinin veya yapay zeka entegrasyonlarının API bağlantılarını buradan 256-bit şifreleme ile güvenli bir şekilde yönetin."
+        actions={!isReadOnly && (
+          <Button
             onClick={() => openForm()}
             className="flex items-center space-x-2 bg-primary text-white px-4 py-2 rounded-xl hover:bg-primary/90 transition-colors font-bold shadow-lg shadow-primary/25"
           >
             <Plus className="w-5 h-5" />
             <span>Yeni Ekle</span>
-          </button>
+          </Button>
         )}
-      </div>
+      />
 
-      <div className="bg-white rounded-2xl border border-border-color overflow-hidden shadow-sm">
+      <Card className="rounded-2xl overflow-hidden shadow-sm">
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse min-w-[800px]">
             <thead>
@@ -177,14 +170,11 @@ export default function ApiKeys() {
             <tbody className="align-top divide-y divide-gray-100">
               {loading ? (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center text-text-muted">Yükleniyor...</td>
+                  <td colSpan={6}><LoadingState label="API anahtarları yükleniyor..." /></td>
                 </tr>
               ) : keys.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center text-text-muted">
-                    <ShieldAlert className="w-10 h-10 mx-auto text-gray-300 mb-3" />
-                    Henüz API anahtarı eklenmedi.
-                  </td>
+                  <td colSpan={6}><EmptyState icon={<ShieldAlert className="h-10 w-10" />} title="Henüz API anahtarı eklenmedi." /></td>
                 </tr>
               ) : (
                 keys.map((k) => (
@@ -194,12 +184,14 @@ export default function ApiKeys() {
                       <div className="text-xs text-text-muted">{k.service_name} • {k.key_name || 'Varsayılan'}</div>
                     </td>
                     <td className="py-4 px-6">
-                      <button
+                      <Button
+                        variant="ghost"
+                        size="sm"
                         onClick={() => toggleStatus(k.id, k.status)}
                         className={`px-3 py-1 text-xs font-bold rounded-full ${k.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}
                       >
                         {k.status === 'active' ? 'Aktif' : 'Pasif'}
-                      </button>
+                      </Button>
                     </td>
                     <td className="py-4 px-6 font-mono text-sm text-text-muted">
                       {k.maskedKey || `****${k.last4}`}
@@ -271,7 +263,7 @@ export default function ApiKeys() {
             </tbody>
           </table>
         </div>
-      </div>
+      </Card>
 
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in">
@@ -391,35 +383,15 @@ export default function ApiKeys() {
         </div>
       )}
 
-      {deleteId && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-white rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl">
-            <div className="p-6 text-center">
-              <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                <AlertTriangle className="w-8 h-8 text-red-500" />
-              </div>
-              <h3 className="text-xl font-bold text-gray-900 mb-2">Anahtarı Sil</h3>
-              <p className="text-gray-500 text-sm mb-6">
-                Bu API anahtarı silinirse ilgili entegrasyonlar çalışmayabilir. Silmek istediğinize emin misiniz?
-              </p>
-              <div className="flex flex-col gap-3">
-                <button
-                  onClick={handleDelete}
-                  className="w-full py-3 bg-red-500 hover:bg-red-600 text-white rounded-xl font-bold transition-colors"
-                >
-                  Evet, Sil
-                </button>
-                <button
-                  onClick={() => setDeleteId(null)}
-                  className="w-full py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-bold transition-colors"
-                >
-                  İptal
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog
+        open={Boolean(deleteId)}
+        onClose={() => setDeleteId(null)}
+        onConfirm={handleDelete}
+        title="Anahtarı Sil"
+        description="Bu API anahtarı silinirse ilgili entegrasyonlar çalışmayabilir. Silmek istediğinize emin misiniz?"
+        confirmLabel="Evet, Sil"
+        destructive
+      />
 
     </div>
   );

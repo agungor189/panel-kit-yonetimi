@@ -33,12 +33,7 @@ import {
 import { api } from '../lib/api';
 import { useCurrency } from '../CurrencyContext';
 import { Transaction, Product, Settings } from '../types';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
-
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+import { Button, LoadingState, PageHeader, Select, cn } from './ui';
 
 const COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#F43F5E'];
 
@@ -320,18 +315,16 @@ export default function Analytics({ settings, initialTab }: { settings: Settings
   }, [sales, settings]);
 
 
-  if (loading) return <div className="p-8 text-center text-gray-500 font-medium">Analizler hazırlanıyor...</div>;
+  if (loading) return <LoadingState label="Analizler hazırlanıyor..." />;
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-        <div>
-           <h1 className="text-2xl font-black text-gray-900 tracking-tight">Akıllı Analizler</h1>
-           <p className="text-sm font-medium text-gray-500 mt-1">Verilerinizi kazanca dönüştüren derinlemesine içgörüler</p>
-        </div>
-        <div className="flex items-center gap-3">
+      <PageHeader
+        title="Akıllı Analizler"
+        description="Verilerinizi kazanca dönüştüren derinlemesine içgörüler"
+        actions={(
            <div className="relative">
-              <select 
+              <Select
                  value={period}
                  onChange={(e) => setPeriod(e.target.value)}
                  className="appearance-none bg-white border border-gray-300 text-gray-700 font-bold text-sm rounded-xl pl-4 pr-10 py-2.5 outline-none focus:ring-2 focus:ring-blue-500 hover:bg-gray-50 transition-colors shadow-sm"
@@ -343,13 +336,13 @@ export default function Analytics({ settings, initialTab }: { settings: Settings
                  <option value="last_6_months">Son 6 Ay</option>
                  <option value="this_year">Bu Yıl</option>
                  <option value="all_time">Tüm Zamanlar</option>
-              </select>
+              </Select>
               <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-gray-500">
                  <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
               </div>
            </div>
-        </div>
-      </div>
+        )}
+      />
 
       {missingCostCount > 0 && (
          <div className="bg-orange-50 border border-orange-200 p-4 rounded-xl flex items-start gap-4">
@@ -374,7 +367,8 @@ export default function Analytics({ settings, initialTab }: { settings: Settings
            { id: 'cashflow', label: 'Nakit Akışı', icon: Banknote },
            { id: 'risk', label: 'Risk Analizi', icon: AlertTriangle }
          ].map(tab => (
-           <button
+           <Button
+             variant={activeTab === tab.id ? 'primary' : 'secondary'}
              key={tab.id}
              onClick={() => setActiveTab(tab.id)}
              className={cn(
@@ -386,7 +380,7 @@ export default function Analytics({ settings, initialTab }: { settings: Settings
            >
              <tab.icon className="w-4 h-4" />
              {tab.label}
-           </button>
+           </Button>
          ))}
       </div>
 

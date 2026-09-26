@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Building2, X, MapPin, Globe, Phone, Mail, User, Link, Package, FileText, Briefcase } from 'lucide-react';
+import { Building2, MapPin, Globe, Phone, Mail, User, Link, Package, FileText, Briefcase } from 'lucide-react';
 import { api } from '../../lib/api';
+import { Button, Modal } from '../ui';
 
 export default function B2BFirmForm({ onClose, onSave }: any) {
   const [loading, setLoading] = useState(false);
@@ -48,19 +49,19 @@ export default function B2BFirmForm({ onClose, onSave }: any) {
   );
 
   return (
-    <div className="fixed inset-0 z-[100] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-white rounded-[24px] w-full max-w-2xl max-h-[90vh] overflow-hidden shadow-2xl flex flex-col animate-in fade-in zoom-in duration-200">
-        <div className="flex items-center justify-between p-6 border-b border-border-color">
-          <h2 className="text-xl font-bold flex items-center">
-            <Building2 className="w-5 h-5 mr-3 text-primary" />
-            Firma Ekle
-          </h2>
-          <button onClick={onClose} className="p-2 hover:bg-bg-main rounded-xl transition-colors">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-        
-        <div className="p-6 overflow-y-auto">
+    <Modal
+      open
+      onClose={onClose}
+      title="Firma Ekle"
+      size="lg"
+      className="max-w-2xl rounded-[24px] animate-in fade-in zoom-in duration-200"
+      footer={(
+        <>
+          <Button variant="secondary" onClick={onClose} className="rounded-xl font-bold">İptal</Button>
+          <Button form="firm-form" type="submit" loading={loading} loadingText="Kaydediliyor..." className="rounded-xl font-bold shadow-lg shadow-primary/20">Firmayı Kaydet</Button>
+        </>
+      )}
+    >
           <form id="firm-form" onSubmit={handleSubmit} className="space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <InputField label="Firma Adı *" value={formData.name} onChange={(e: any) => setFormData({...formData, name: e.target.value})} icon={Building2} required />
@@ -93,15 +94,6 @@ export default function B2BFirmForm({ onClose, onSave }: any) {
               </div>
             </div>
           </form>
-        </div>
-
-        <div className="p-6 border-t border-border-color flex justify-end gap-3 bg-bg-main">
-          <button onClick={onClose} type="button" className="px-6 py-2.5 rounded-xl font-bold bg-white border border-border-color hover:bg-gray-50 transition-colors text-sm">İptal</button>
-          <button form="firm-form" type="submit" disabled={loading} className="px-6 py-2.5 rounded-xl font-bold bg-primary text-white hover:bg-primary-hover shadow-lg shadow-primary/20 transition-all text-sm">
-            {loading ? 'Kaydediliyor...' : 'Firmayı Kaydet'}
-          </button>
-        </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

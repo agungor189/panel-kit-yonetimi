@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../lib/api';
-import { Activity, Clock, FileText, X, ArrowRight, UserRound, Info, PlusCircle, Trash2 } from 'lucide-react';
+import { Activity, Clock, FileText, ArrowRight, UserRound, Info, PlusCircle, Trash2 } from 'lucide-react';
+import { Badge, Button, Card, EmptyState, LoadingState, Modal, PageHeader } from './ui';
 
 const getActionColor = (action: string) => {
   switch(action) {
@@ -332,7 +333,9 @@ const LogDetails = ({ detailsStr }: { detailsStr: string }) => {
 
   return (
     <div>
-      <button 
+      <Button
+        variant="ghost"
+        size="sm"
         onClick={() => setExpanded(true)} 
         className="flex items-center text-xs w-full text-left text-primary font-bold hover:bg-primary/10 px-3 py-1.5 rounded-lg transition-all"
       >
@@ -340,43 +343,18 @@ const LogDetails = ({ detailsStr }: { detailsStr: string }) => {
         <span className="truncate">
           Detayları Göster
         </span>
-      </button>
+      </Button>
       
-      {expanded && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200" onClick={() => setExpanded(false)}>
-          <div className="bg-white rounded-3xl w-full max-w-5xl max-h-[88vh] flex flex-col shadow-2xl relative" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-6 py-5 border-b border-border-color">
-              <div>
-                <h3 className="text-xl font-black text-text-main flex items-center">
-                  <Activity className="w-5 h-5 text-primary mr-2" />
-                  İşlem Detayları
-                </h3>
-                <p className="mt-1 text-sm font-semibold text-slate-500">Eski ve yeni değerler okunabilir şekilde karşılaştırılır.</p>
-              </div>
-              <button 
-                onClick={() => setExpanded(false)}
-                className="p-2 hover:bg-gray-100 rounded-full text-gray-500 transition-colors"
-                title="Kapat"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            
-            <div className="p-6 overflow-y-auto">
-              {renderContent()}
-            </div>
-            
-            <div className="px-6 py-4 border-t border-border-color flex justify-end">
-               <button 
-                 onClick={() => setExpanded(false)}
-                 className="px-6 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold rounded-xl transition-colors"
-               >
-                 Kapat
-               </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <Modal
+        open={expanded}
+        onClose={() => setExpanded(false)}
+        title={<span className="flex items-center"><Activity className="mr-2 h-5 w-5 text-primary" />İşlem Detayları</span>}
+        description="Eski ve yeni değerler okunabilir şekilde karşılaştırılır."
+        size="xl"
+        footer={<Button variant="secondary" onClick={() => setExpanded(false)}>Kapat</Button>}
+      >
+        {renderContent()}
+      </Modal>
     </div>
   )
 }
@@ -402,23 +380,18 @@ export default function ActivityLogs() {
 
   return (
     <div className="space-y-6 animate-in fade-in">
-      <div className="flex justify-between items-center bg-white p-6 rounded-3xl shadow-lg border border-border-color">
-        <div className="flex items-center space-x-4">
-          <div className="w-12 h-12 bg-primary/10 rounded-2xl flex items-center justify-center">
-             <Activity className="w-6 h-6 text-primary" />
-          </div>
-          <div>
-            <h1 className="text-2xl font-black text-text-main flex items-center tracking-tight">Geçmiş Aktiviteler</h1>
-            <p className="text-text-muted mt-1 font-medium">Sistemde yapılan son 100 işlem.</p>
-          </div>
-        </div>
-      </div>
+      <Card padding="md" className="rounded-3xl shadow-lg">
+        <PageHeader
+          title={<span className="flex items-center gap-3"><span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10"><Activity className="h-6 w-6 text-primary" /></span>Geçmiş Aktiviteler</span>}
+          description="Sistemde yapılan son 100 işlem."
+        />
+      </Card>
 
-      <div className="bg-white rounded-[32px] p-6 shadow-xl border border-border-color overflow-hidden">
+      <Card padding="md" className="rounded-[32px] shadow-xl overflow-hidden">
         {loading ? (
-          <div className="flex items-center justify-center py-20 text-text-muted font-bold animate-pulse">Yükleniyor...</div>
+          <LoadingState label="Aktiviteler yükleniyor..." />
         ) : logs.length === 0 ? (
-          <div className="text-center py-16 text-text-muted font-bold text-lg">Kayıt bulunamadı.</div>
+          <EmptyState title="Kayıt bulunamadı." />
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse min-w-[950px]">
@@ -465,10 +438,10 @@ export default function ActivityLogs() {
                             </div>
                           </td>
                           <td className="py-4 px-4 whitespace-nowrap">
-                            <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-bg-main border border-border-color rounded-full text-xs font-black text-text-main">
+                            <Badge>
                               <UserRound className="w-3 h-3 text-primary" />
                               <span>{log.username || 'Sistem'}</span>
-                            </div>
+                            </Badge>
                           </td>
                           <td className="py-4 px-4">
                             <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider ${getActionColor(log.action)}`}>
@@ -495,7 +468,7 @@ export default function ActivityLogs() {
             </table>
           </div>
         )}
-      </div>
+      </Card>
     </div>
   );
 }

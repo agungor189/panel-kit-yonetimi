@@ -18,12 +18,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { useCurrency } from '../../CurrencyContext';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
-
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+import { Button, Card, LoadingState, Select, cn } from '../ui';
 
 type OrderTab = 'all' | 'new' | 'shipping' | 'delivered' | 'problem' | 'missing_shipping';
 type SortKey = 'date_desc' | 'date_asc' | 'amount_desc' | 'amount_asc' | 'customer_asc';
@@ -148,7 +143,30 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   useEffect(() => {
-    loadSales();
+    void loadSales();
+
+    const timer = window.setInterval(() => {
+      void loadSales(true);
+    }, 15_000);
+
+    const refreshVisible = () => {
+      if (document.visibilityState === "visible") {
+        void loadSales(true);
+      }
+    };
+
+    const refreshFocus = () => {
+      void loadSales(true);
+    };
+
+    document.addEventListener("visibilitychange", refreshVisible);
+    window.addEventListener("focus", refreshFocus);
+
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshVisible);
+      window.removeEventListener("focus", refreshFocus);
+    };
   }, [refreshKey]);
 
   useEffect(() => {
@@ -156,8 +174,9 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
     setSelectedIds(new Set());
   }, [activeTab, filters, sortKey, pageSize]);
 
-  const loadSales = async () => {
-    setLoading(true);
+  const loadSales = async (silent = false) => {
+    if (!silent) setLoading(true);
+
     try {
       const data = await api.get('/sales');
       setSales(Array.isArray(data) ? data : []);
@@ -165,7 +184,7 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
     } catch (err) {
       console.error(err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
@@ -323,48 +342,43 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
   };
 
   if (loading) {
-    return (
-      <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center text-slate-500 shadow-sm">
-        <RefreshCw className="mx-auto mb-3 h-6 w-6 animate-spin text-primary" />
-        <div className="font-black">Siparişler yükleniyor...</div>
-      </div>
-    );
+    return <LoadingState label="Siparişler yükleniyor..." />;
   }
 
   return (
     <div className="space-y-5">
       <div className="grid gap-3 lg:grid-cols-4">
-        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <Card padding="sm" className="rounded-2xl border-slate-200 shadow-sm">
           <div className="text-xs font-black uppercase tracking-wider text-slate-500">Aktif İşlem</div>
           <div className="mt-2 flex items-end justify-between gap-3">
             <div className="text-2xl font-black text-slate-900">{stats.activeOrders} Adet</div>
             <ClipboardList className="h-6 w-6 text-primary" />
           </div>
-        </div>
-        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 shadow-sm">
+        </Card>
+        <Card padding="sm" className="rounded-2xl border-amber-200 bg-amber-50 shadow-sm">
           <div className="text-xs font-black uppercase tracking-wider text-amber-700">Geciken Siparişler</div>
           <div className="mt-2 flex items-end justify-between gap-3">
             <div className="text-2xl font-black text-amber-900">{stats.delayed} Adet</div>
             <AlertTriangle className="h-6 w-6 text-amber-600" />
           </div>
-        </div>
-        <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4 shadow-sm">
+        </Card>
+        <Card padding="sm" className="rounded-2xl border-blue-200 bg-blue-50 shadow-sm">
           <div className="text-xs font-black uppercase tracking-wider text-blue-700">Kargo Bekleyen</div>
           <div className="mt-2 flex items-end justify-between gap-3">
             <div className="text-2xl font-black text-blue-950">{stats.readyToShip} Adet</div>
             <Truck className="h-6 w-6 text-blue-600" />
           </div>
-        </div>
-        <div className="rounded-2xl border border-red-200 bg-red-50 p-4 shadow-sm">
+        </Card>
+        <Card padding="sm" className="rounded-2xl border-red-200 bg-red-50 shadow-sm">
           <div className="text-xs font-black uppercase tracking-wider text-red-700">Eksik Kargo Bilgisi</div>
           <div className="mt-2 flex items-end justify-between gap-3">
             <div className="text-2xl font-black text-red-950">{stats.missingShipping} Adet</div>
             <XCircle className="h-6 w-6 text-red-600" />
           </div>
-        </div>
+        </Card>
       </div>
 
-      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <Card className="overflow-hidden rounded-2xl border-slate-200 shadow-sm">
         <div className="flex overflow-x-auto border-b border-slate-200 bg-white">
           {tabOptions.map((tab) => (
             <button
@@ -435,12 +449,12 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
               <input value={draftFilters.product} onChange={(event) => updateDraftFilter('product', event.target.value)} placeholder="Ürün adı veya model" className={filterInputClass} />
             </div>
             <div className="flex items-end gap-2">
-              <button type="button" onClick={clearFilters} className="h-11 flex-1 rounded-lg border border-slate-900 px-4 text-sm font-black text-slate-800 transition hover:bg-slate-100">
+              <Button variant="secondary" type="button" onClick={clearFilters} className="h-11 flex-1 rounded-lg border border-slate-900 px-4 text-sm font-black text-slate-800 transition hover:bg-slate-100">
                 Temizle
-              </button>
-              <button type="button" onClick={applyFilters} className="h-11 flex-1 rounded-lg bg-slate-900 px-4 text-sm font-black text-white transition hover:bg-slate-800">
+              </Button>
+              <Button type="button" onClick={applyFilters} className="h-11 flex-1 rounded-lg bg-slate-900 px-4 text-sm font-black text-white transition hover:bg-slate-800">
                 Filtrele
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -463,13 +477,13 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
             >
               Seçili: {selectedIds.size}
             </button>
-            <select value={sortKey} onChange={(event) => setSortKey(event.target.value as SortKey)} className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-black text-slate-700 outline-none">
+            <Select value={sortKey} onChange={(event) => setSortKey(event.target.value as SortKey)} className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-black text-slate-700 outline-none">
               <option value="date_desc">Sipariş Tarihi (Yeniden Eskiye)</option>
               <option value="date_asc">Sipariş Tarihi (Eskiden Yeniye)</option>
               <option value="amount_desc">Tutar (Yüksekten Düşüğe)</option>
               <option value="amount_asc">Tutar (Düşükten Yükseğe)</option>
               <option value="customer_asc">Müşteri (A-Z)</option>
-            </select>
+            </Select>
             <button
               type="button"
               onClick={exportFilteredSales}
@@ -480,7 +494,7 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
             </button>
             <button
               type="button"
-              onClick={loadSales}
+              onClick={() => void loadSales()}
               className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 px-3 text-sm font-black text-slate-600 transition hover:bg-slate-100"
             >
               <RefreshCw className="h-4 w-4" />
@@ -635,11 +649,11 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
           </div>
           <div className="flex items-center gap-3">
             <label className="text-sm font-black text-slate-700">Her Sayfada</label>
-            <select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))} className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-black text-slate-700 outline-none">
+            <Select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))} className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-black text-slate-700 outline-none">
               <option value={20}>20 Ürün</option>
               <option value={50}>50 Ürün</option>
               <option value={100}>100 Ürün</option>
-            </select>
+            </Select>
             <button
               type="button"
               onClick={() => setPage((current) => Math.max(1, current - 1))}
@@ -659,7 +673,7 @@ export default function SalesList({ refreshKey = 0, onSaleClick }: { refreshKey?
             </button>
           </div>
         </div>
-      </div>
+      </Card>
     </div>
   );
 }

@@ -9,7 +9,12 @@ type LocationKind = "PICKING" | "RESERVE";
 type ReservationStatus = "ACTIVE" | "PICKED" | "PACKED" | "RELEASED" | "DISPATCHED" | "STOCK_DISCREPANCY";
 
 export class InventoryValidationError extends Error {
-  constructor(public readonly code: string, message: string, public readonly statusCode = 400) {
+  constructor(
+    public readonly code: string,
+    message: string,
+    public readonly statusCode = 400,
+    public readonly details?: { productId?: string; sku?: string },
+  ) {
     super(message);
     this.name = "InventoryValidationError";
   }
@@ -226,7 +231,12 @@ export class InventoryService {
           if (quantity > 0) allocations.push({ lotId: lot.id, quantityBaseInt: quantity, reservedQuantityBaseInt: quantity, fifoSequence });
           needed -= quantity;
         }
-        if (needed > 0) throw new InventoryValidationError("INSUFFICIENT_AVAILABLE_STOCK", `Insufficient available stock for product ${line.productId}.`, 409);
+        if (needed > 0) throw new InventoryValidationError(
+          "INSUFFICIENT_AVAILABLE_STOCK",
+          `Insufficient available stock for product ${line.productId}.`,
+          409,
+          { productId: line.productId, sku: product.sku || product.id },
+        );
         return { ...line, baseUomCode: product.base_uom_code as string, allocations };
       });
       this.db.prepare(`INSERT INTO inventory_reservations

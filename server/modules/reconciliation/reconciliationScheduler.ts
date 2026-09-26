@@ -33,7 +33,8 @@ export const nextDailyReconciliationAt = (from = new Date(), timeZone = process.
 };
 
 export function startDailyReconciliationScheduler(db:Database.Database,logger:Pick<Console,"error"|"info">=console,
-  timeZone=process.env.RECONCILIATION_TIME_ZONE || DEFAULT_RECONCILIATION_TIME_ZONE){
+  timeZone=process.env.RECONCILIATION_TIME_ZONE || DEFAULT_RECONCILIATION_TIME_ZONE,
+  onOperationalFinding?: (event:{findingId:string;runId:string})=>void|Promise<unknown>){
   partsInZone(new Date(), timeZone);
-  let timer:NodeJS.Timeout;const schedule=()=>{const target=nextDailyReconciliationAt(new Date(),timeZone);timer=setTimeout(()=>{try{const day=dateKeyInZone(new Date(),timeZone);new ReconciliationService(db).run({trigger:"SCHEDULED",actor:{type:"SYSTEM",id:"reconciliation-scheduler"},operationId:`reconciliation:daily:${day}`});logger.info(`[Reconciliation] Daily 03:00 scan completed (${timeZone}).`);}catch(value){logger.error("[Reconciliation] Daily scan failed.",value);}finally{schedule();}},Math.max(1,target.getTime()-Date.now()));timer.unref();};schedule();return()=>clearTimeout(timer);
+  let timer:NodeJS.Timeout;const schedule=()=>{const target=nextDailyReconciliationAt(new Date(),timeZone);timer=setTimeout(()=>{try{const day=dateKeyInZone(new Date(),timeZone);new ReconciliationService(db,{onOperationalFinding}).run({trigger:"SCHEDULED",actor:{type:"SYSTEM",id:"reconciliation-scheduler"},operationId:`reconciliation:daily:${day}`});logger.info(`[Reconciliation] Daily 03:00 scan completed (${timeZone}).`);}catch(value){logger.error("[Reconciliation] Daily scan failed.",value);}finally{schedule();}},Math.max(1,target.getTime()-Date.now()));timer.unref();};schedule();return()=>clearTimeout(timer);
 }
