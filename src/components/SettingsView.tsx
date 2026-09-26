@@ -29,6 +29,7 @@ import { useAuth } from '../App';
 import { Settings, type BackupConfig, type BackupRun, type BackupStatus, type ManagedUser, type UserRole } from '../types';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import PushNotificationSettings from './PushNotificationSettings';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -494,6 +495,8 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
           {saved ? <CheckCircle2 className="w-4 h-4 ml-2" /> : <Save className="w-4 h-4 ml-2" />}
         </button>
       </div>
+
+      <PushNotificationSettings />
 
       <div className="card overflow-hidden divide-y divide-border-color">
          {/* General Info */}

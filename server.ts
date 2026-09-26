@@ -16,6 +16,7 @@ import rateLimit from "express-rate-limit";
 import AdmZip from "adm-zip";
 import crypto from "crypto";
 import bcrypt from "bcrypt";
+import webpush from "web-push";
 import { z } from "zod";
 import { createProductAnalyticsRouter } from "./server/routes/productAnalyticsRoutes.js";
 import { createInsightsRouter } from "./server/routes/insightsRoutes.js";
@@ -31,6 +32,7 @@ import { createKitPublicationV1Router } from "./server/routes/kitPublicationV1Ro
 import { createReturnsV1Router } from "./server/routes/returnsV1Routes.js";
 import { createShippingV1Router } from "./server/routes/shippingV1Routes.js";
 import { createReconciliationV1Router } from "./server/routes/reconciliationV1Routes.js";
+import { createPushNotificationRouter } from "./server/routes/pushNotificationRoutes.js";
 import { startDailyReconciliationScheduler } from "./server/modules/reconciliation/reconciliationScheduler.js";
 import { rejectLegacyCatalogMutation } from "./server/modules/catalog/legacyCatalogGuard.js";
 import { CommandExecutor, CommandFoundationError } from "./server/modules/commands/commandFoundation.js";
@@ -55,6 +57,7 @@ import {
 import { mountWarehouseModule } from "./server/modules/warehouse/index.js";
 import { createProductStockModule } from "./server/modules/products/stock.js";
 import { createApiKeyHasher } from "./server/modules/integrations/apiKeys.js";
+import { createPushNotificationService } from "./server/modules/notifications/pushNotificationService.js";
 import {
   DEFAULT_BACKUP_CONFIG,
   normalizeBackupConfig,
@@ -154,6 +157,7 @@ const inventoryService = new InventoryService(db);
 const saleCommands = new CommandExecutor(db);
 const salesFinancials = new SalesFinancialService(db);
 const channelGateway = new ChannelGatewayService(db);
+const pushNotificationService = createPushNotificationService({ db, transport: webpush, env: process.env });
 const {
   getProductBomComponents,
   getProductStockProfile,
@@ -1409,6 +1413,7 @@ async function startServer() {
   app.use("/api/auth", auth.router);
   app.use("/api", auth.authenticateApi);
   app.use("/api", auth.requireCompletedPasswordChange);
+  app.use("/api/push", auth.requireCapability("panel:read"), createPushNotificationRouter(pushNotificationService, logActivity));
   app.use("/api", auth.authorizeApi);
   const requireIdentityAdmin = auth.requireCapability("identity:admin");
   const requireIntegrationsAdmin = auth.requireCapability("integrations:admin");
