@@ -26,6 +26,7 @@ function cn(...inputs: ClassValue[]) {
 export default function RecurringPayments({ settings }: { settings: Settings | null }) {
   const { isReadOnly } = useAuth();
   const { FormatAmount } = useCurrency();
+  const expenseCategories = settings?.expense_categories?.length ? settings.expense_categories : ['Kira'];
   const [plans, setPlans] = useState<RecurringPaymentPlan[]>([]);
   const [occurrences, setOccurrences] = useState<RecurringPaymentOccurrence[]>([]);
   const [showAdd, setShowAdd] = useState(false);
@@ -35,7 +36,7 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
   // State for Add Plan
   const [formData, setFormData] = useState<Partial<RecurringPaymentPlan>>({
     title: '',
-    category: settings?.expense_categories[0] || 'Kira',
+    category: expenseCategories[0],
     payment_type: 'expense',
     amount: 0,
     currency: 'TRY',
@@ -80,7 +81,7 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
       // Reset form
       setFormData({
         title: '',
-        category: settings?.expense_categories[0] || 'Kira',
+        category: expenseCategories[0],
         payment_type: 'expense',
         amount: 0,
         currency: 'TRY',
@@ -464,7 +465,7 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
                        <div className="space-y-2">
                           <label className="text-xs font-bold text-text-main">Kategori</label>
                           <select value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})} className="form-input">
-                             {settings?.expense_categories.map(c => <option key={c} value={c}>{c}</option>)}
+                             {expenseCategories.map(c => <option key={c} value={c}>{c}</option>)}
                           </select>
                        </div>
                     </div>
