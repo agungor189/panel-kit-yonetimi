@@ -10,13 +10,8 @@ import {
 } from 'lucide-react';
 import { api, createRetryOperation, PLATFORMS } from '../lib/api';
 import { Settings } from '../types';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
 import { useCurrency } from '../CurrencyContext';
-
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+import { Button, cn } from './ui';
 
 interface ProductWizardProps {
   productId?: string | null;
@@ -262,12 +257,12 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
             <h2 className="text-xl lg:text-2xl font-black text-text-main tracking-tight">{productId ? 'Ürünü Düzenle' : 'Yeni Ürün Kaydı'}</h2>
             <p className="text-[10px] text-text-muted font-bold uppercase tracking-widest mt-1">Lütfen aşağıdaki tüm bilgileri eksiksiz doldurunuz.</p>
           </div>
-          <button 
+          <Button variant="ghost"
             onClick={onClose}
             className="p-2.5 hover:bg-bg-main rounded-2xl text-text-muted hover:text-text-main transition-all"
           >
             <X className="w-6 h-6" />
-          </button>
+          </Button>
         </div>
 
         {/* Content */}
@@ -748,14 +743,16 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
           </div>
 
           <div className="flex items-center space-x-4 w-full sm:w-auto">
-             <button 
+             <Button variant="ghost"
                onClick={onClose}
                className="flex-1 sm:flex-none px-8 py-3.5 text-text-muted font-bold text-sm hover:text-text-main transition-colors"
              >
                Vazgeç
-             </button>
-             <button 
+             </Button>
+             <Button
                onClick={handleSubmit}
+               loading={loading}
+               loadingText="Kaydediliyor..."
                disabled={
                  loading ||
                  (!formData.name_tr && !formData.name_en && !formData.title) ||
@@ -765,18 +762,11 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                }
                className="flex-[2] sm:flex-none flex items-center justify-center px-12 py-3.5 bg-primary text-white rounded-2xl font-black text-sm shadow-2xl shadow-primary/20 hover:scale-[1.02] active:scale-95 transition-all disabled:opacity-50 disabled:scale-100 disabled:shadow-none"
              >
-               {loading ? (
-                 <span className="flex items-center">
-                   <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2"></div>
-                   Kaydediliyor...
-                 </span>
-               ) : (
                  <span className="flex items-center">
                    <CheckCircle2 className="w-4 h-4 mr-2" />
                    {productId ? 'Değişiklikleri Kaydet' : 'Ürünü Sisteme Kaydet'}
                  </span>
-               )}
-             </button>
+             </Button>
           </div>
         </div>
       </div>

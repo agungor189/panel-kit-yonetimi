@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AlertTriangle, CheckCircle2, CircleOff, RefreshCw, ShoppingCart } from 'lucide-react';
 import { api } from '../../lib/api';
+import { Button, Card, EmptyState, LoadingState, PageHeader } from '../ui';
 
 type Dashboard = {
   adapters: Record<string, { enabledTransport: boolean; verifiedTransportScope: string }>;
@@ -26,16 +27,12 @@ export default function ChannelsIntegration() {
     finally { setLoading(false); }
   };
   useEffect(() => { void load(); }, []);
-  if (loading) return <div className="rounded-2xl border bg-white p-10 text-center"><RefreshCw className="mx-auto h-6 w-6 animate-spin" /></div>;
+  if (loading) return <Card className="rounded-2xl"><LoadingState label="Kanal durumu yükleniyor..." /></Card>;
   if (!data) return <div className="rounded-2xl border border-red-200 bg-red-50 p-5 text-red-700">{error}</div>;
   return <div className="space-y-6">
-    <div className="flex items-center justify-between rounded-3xl border bg-white p-6 shadow-sm">
-      <div className="flex items-center gap-4"><div className="rounded-2xl bg-cyan-50 p-3 text-cyan-700"><ShoppingCart /></div><div>
-        <h2 className="text-2xl font-black">Kanal Geçidi</h2>
-        <p className="text-sm font-semibold text-slate-500">Panel stok, fiyat, satış ve finans otoritesi; kanal kayıtları güvenli gelen kutusu ve yayın projeksiyonudur.</p>
-      </div></div>
-      <button onClick={load} className="rounded-xl border px-4 py-2 font-bold"><RefreshCw className="mr-2 inline h-4 w-4" />Yenile</button>
-    </div>
+    <Card padding="md" className="rounded-3xl shadow-sm">
+      <PageHeader title="Kanal Geçidi" description="Panel stok, fiyat, satış ve finans otoritesi; kanal kayıtları güvenli gelen kutusu ve yayın projeksiyonudur." actions={<Button variant="secondary" onClick={load} className="rounded-xl font-bold"><RefreshCw className="h-4 w-4" />Yenile</Button>} />
+    </Card>
     <div className="grid gap-4 md:grid-cols-4">{Object.entries(data.adapters).map(([name, adapter]) => <div key={name} className="rounded-2xl border bg-white p-4">
       <div className="flex items-center justify-between"><b>{name}</b>{adapter.enabledTransport ? <CheckCircle2 className="text-emerald-600" /> : <CircleOff className="text-amber-600" />}</div>
       <p className="mt-2 text-xs text-slate-500">{adapter.verifiedTransportScope}</p>
@@ -55,7 +52,7 @@ export default function ChannelsIntegration() {
     </section>
     <div className="grid gap-6 lg:grid-cols-2">
       <section className="rounded-2xl border bg-white p-5"><h3 className="mb-3 text-lg font-black"><AlertTriangle className="mr-2 inline text-amber-600" />Açık istisnalar</h3>
-        <div className="space-y-2">{data.exceptions.length ? data.exceptions.map(e => <div key={e.id} className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm"><b>{e.type}</b><div className="break-all text-xs">{e.detail}</div></div>) : <p className="text-sm text-slate-500">Açık istisna yok.</p>}</div>
+        <div className="space-y-2">{data.exceptions.length ? data.exceptions.map(e => <div key={e.id} className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm"><b>{e.type}</b><div className="break-all text-xs">{e.detail}</div></div>) : <EmptyState title="Açık istisna yok." className="py-6" />}</div>
       </section>
       <section className="rounded-2xl border bg-white p-5"><h3 className="mb-3 text-lg font-black">Senkron işleri ve poll checkpoint</h3>
         <div className="space-y-2 text-sm">{data.jobs.map(j => <div key={j.id} className="rounded-xl bg-slate-50 p-3"><b>{j.kind}</b> · {j.state} · deneme {j.attemptCount}{j.lastErrorCode ? ` · ${j.lastErrorCode}` : ''}</div>)}
@@ -64,4 +61,3 @@ export default function ChannelsIntegration() {
     </div>
   </div>;
 }
-

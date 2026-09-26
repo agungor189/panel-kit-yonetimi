@@ -2,12 +2,7 @@ import { useEffect, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Clock3, Database, Link2, Play, RefreshCw, Save, ShoppingBag } from 'lucide-react';
 import { api } from '../../lib/api';
 import type { TrendyolConfig, TrendyolMarketplaceOrder, TrendyolStatus } from '../../types';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
-
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+import { Button, Card, LoadingState, PageHeader, cn } from '../ui';
 
 const defaultConfig: TrendyolConfig = {
   enabled: false,
@@ -126,44 +121,33 @@ export default function TrendyolIntegration() {
   };
 
   if (loading) {
-    return (
-      <div className="rounded-2xl border border-border-color bg-white p-10 text-center text-text-muted">
-        <RefreshCw className="mx-auto mb-3 h-6 w-6 animate-spin text-primary" />
-        <div className="font-black">Trendyol entegrasyonu yükleniyor...</div>
-      </div>
-    );
+    return <LoadingState label="Trendyol entegrasyonu yükleniyor..." />;
   }
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
-      <div className="flex flex-col gap-4 rounded-3xl border border-border-color bg-white p-6 shadow-sm lg:flex-row lg:items-center lg:justify-between">
-        <div className="flex items-start gap-4">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-orange-50 text-orange-600">
+      <Card padding="md" className="rounded-3xl shadow-sm">
+        <PageHeader
+          title={<span className="flex items-center gap-4"><span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-orange-50 text-orange-600">
             <ShoppingBag className="h-6 w-6" />
-          </div>
-          <div>
-            <h2 className="text-2xl font-black tracking-tight text-text-main">Trendyol Entegrasyonu</h2>
-            <p className="mt-1 max-w-2xl text-sm font-semibold text-text-muted">
-              Önce test ortamında bağlantıyı doğrulayın, sonra Trendyol paketlerini güvenli ara tabloya senkron edin.
-              Panel satışına aktarma, barkod eşleşmesi onaylandıktan sonra açılmalıdır.
-            </p>
-          </div>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <button onClick={saveConfig} disabled={working} className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm font-black text-white transition hover:bg-slate-800 disabled:opacity-50">
+          </span>Trendyol Entegrasyonu</span>}
+          description="Önce test ortamında bağlantıyı doğrulayın, sonra Trendyol paketlerini güvenli ara tabloya senkron edin."
+          actions={<div className="flex flex-wrap gap-2">
+          <Button onClick={saveConfig} disabled={working} className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm font-black text-white transition hover:bg-slate-800 disabled:opacity-50">
             <Save className="h-4 w-4" />
             Ayarları Kaydet
-          </button>
-          <button onClick={testConnection} disabled={working || !config.api_key_id} className="inline-flex items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-black text-blue-700 transition hover:bg-blue-100 disabled:opacity-50">
+          </Button>
+          <Button variant="secondary" onClick={testConnection} disabled={working || !config.api_key_id} className="inline-flex items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-black text-blue-700 transition hover:bg-blue-100 disabled:opacity-50">
             <Play className="h-4 w-4" />
             Bağlantıyı Test Et
-          </button>
-          <button onClick={syncOrders} disabled={working || !config.api_key_id} className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-3 text-sm font-black text-white transition hover:bg-primary/90 disabled:opacity-50">
+          </Button>
+          <Button onClick={syncOrders} disabled={working || !config.api_key_id} className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-3 text-sm font-black text-white transition hover:bg-primary/90 disabled:opacity-50">
             <RefreshCw className={cn('h-4 w-4', working && 'animate-spin')} />
             Siparişleri Senkronla
-          </button>
-        </div>
-      </div>
+          </Button>
+        </div>}
+        />
+      </Card>
 
       {message && (
         <div className={cn(
@@ -289,10 +273,10 @@ export default function TrendyolIntegration() {
               </h3>
               <p className="mt-1 text-sm font-semibold text-text-muted">Bu liste satışa otomatik yazmaz; önce Trendyol raw paketi güvenle saklar.</p>
             </div>
-            <button onClick={() => loadOrders(config.environment)} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2 text-sm font-black text-slate-700 hover:bg-slate-50">
+            <Button variant="secondary" onClick={() => loadOrders(config.environment)} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2 text-sm font-black text-slate-700 hover:bg-slate-50">
               <RefreshCw className="h-4 w-4" />
               Yenile
-            </button>
+            </Button>
           </div>
 
           <div className="overflow-x-auto">

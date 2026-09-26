@@ -15,13 +15,8 @@ import {
 import { api } from '../lib/api';
 import { useCurrency } from '../CurrencyContext';
 import { RecurringPaymentPlan, RecurringPaymentOccurrence, Settings } from '../types';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
 import { useAuth } from '../App';
-
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+import { Badge, Button, Card, EmptyState, Modal, PageHeader, cn } from './ui';
 
 export default function RecurringPayments({ settings }: { settings: Settings | null }) {
   const { isReadOnly } = useAuth();
@@ -200,57 +195,55 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
 
   return (
     <div className="space-y-6 animate-in slide-in-from-bottom-4 duration-500 max-w-[1600px] mx-auto pb-12">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h2 className="text-xl lg:text-2xl font-bold text-text-main tracking-tight">Ödeme Takvimi</h2>
-          <p className="text-xs lg:text-sm text-text-muted">Aylık finansal yükümlülüklerinizi (kira, elektrik, aidat, muhasebe vb.) takip edin ve yönetin.</p>
-        </div>
-        {!isReadOnly && (
+      <PageHeader
+        title="Ödeme Takvimi"
+        description="Aylık finansal yükümlülüklerinizi (kira, elektrik, aidat, muhasebe vb.) takip edin ve yönetin."
+        actions={!isReadOnly && (
           <div className="flex items-center space-x-2 sm:space-x-3 w-full sm:w-auto">
-            <button
+            <Button
               disabled={loading}
               onClick={processDuePayments}
               className="flex-1 sm:flex-none flex items-center justify-center px-4 sm:px-5 py-2.5 bg-success text-white rounded-xl font-bold text-sm shadow-lg shadow-green-100 hover:scale-[1.02] transition-all disabled:opacity-50"
             >
               <PlayCircle className="w-4 h-4 mr-2" />
               <span className="truncate">Otomatik İşle (Vadesi Gelenler)</span>
-            </button>
-            <button
+            </Button>
+            <Button
               onClick={() => setShowAdd(true)}
               className="flex-1 sm:flex-none flex items-center justify-center px-4 sm:px-5 py-2.5 bg-primary text-white rounded-xl font-bold text-sm shadow-lg shadow-blue-100 hover:scale-[1.02] transition-all"
             >
               <Plus className="w-4 h-4 mr-2" />
               <span className="truncate">Plan Ekle</span>
-            </button>
+            </Button>
           </div>
         )}
-      </div>
+      />
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-         <div className="card p-4">
+         <Card padding="sm">
             <p className="text-[10px] uppercase font-bold text-text-muted">Bu Ay Bekleyen İşlem</p>
             <p className="text-2xl font-black mt-1">{stats.pendingCount}</p>
-         </div>
-         <div className="card p-4">
+         </Card>
+         <Card padding="sm">
             <p className="text-[10px] uppercase font-bold text-text-muted">Bu Ay Bekleyen Tutar</p>
             <p className="text-2xl font-black mt-1 text-primary"><FormatAmount amount={stats.pendingTotal} /></p>
-         </div>
-         <div className="card p-4">
+         </Card>
+         <Card padding="sm">
             <p className="text-[10px] uppercase font-bold text-text-muted">Otomatik İşlenecek</p>
             <p className="text-2xl font-black mt-1 text-blue-600">{stats.autoCount}</p>
-         </div>
-         <div className="card p-4">
+         </Card>
+         <Card padding="sm">
             <p className="text-[10px] uppercase font-bold text-text-muted">Geciken Ödeme</p>
             <p className="text-2xl font-black mt-1 text-red-600">{stats.overdueCount}</p>
-         </div>
-         <div className="card p-4 bg-success text-white">
+         </Card>
+         <Card padding="sm" className="bg-success text-white">
             <p className="text-[10px] uppercase font-bold opacity-80">İşlenen Ödeme</p>
             <p className="text-2xl font-black mt-1">{stats.processedCount}</p>
-         </div>
+         </Card>
       </div>
 
       {/* Calendar */}
-      <div className="card shadow-md border-none overflow-hidden flex flex-col bg-white">
+      <Card className="shadow-md border-none overflow-hidden flex flex-col bg-white">
         <div className="px-5 py-4 border-b border-border-color flex justify-between items-center bg-white">
           <div className="flex items-center space-x-4">
             <h3 className="text-xl font-black text-text-main w-48">{monthInfo.monthName}</h3>
@@ -338,16 +331,18 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
              </div>
            ))}
         </div>
-      </div>
+      </Card>
 
      {/* Occurrence Action Modal */}
-     {selectedOccurrence && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
-           <div className="absolute inset-0 bg-[#0F172A]/40 backdrop-blur-sm" onClick={() => setSelectedOccurrence(null)}></div>
-           <div className="bg-white w-full max-w-sm rounded-[24px] shadow-2xl flex flex-col relative animate-in zoom-in-95 duration-200">
-              <div className="p-6">
-                 <h3 className="text-lg font-black">{selectedOccurrence.plan_title}</h3>
-                 <p className="text-xs text-text-muted">Vade: {new Date(selectedOccurrence.due_date).toLocaleDateString()}</p>
+     <Modal
+       open={Boolean(selectedOccurrence)}
+       onClose={() => setSelectedOccurrence(null)}
+       title={selectedOccurrence?.plan_title}
+       description={selectedOccurrence ? `Vade: ${new Date(selectedOccurrence.due_date).toLocaleDateString()}` : undefined}
+       size="sm"
+     >
+       {selectedOccurrence && (
+              <div>
 
                  <div className="mt-4 p-4 rounded-xl bg-bg-main border border-border-color space-y-2">
                     <div className="flex justify-between text-sm">
@@ -362,12 +357,12 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
 
                  {!isReadOnly && selectedOccurrence.status !== 'processed' && selectedOccurrence.status !== 'cancelled' && (
                    <div className="mt-6 space-y-2">
-                     <button onClick={() => handleOccurrenceAction(selectedOccurrence.id, 'process')} className="w-full btn-success py-3 text-sm">
+                     <Button onClick={() => handleOccurrenceAction(selectedOccurrence.id, 'process')} className="w-full btn-success py-3 text-sm">
                         Kasaya İşle (Gider Ekle)
-                     </button>
+                     </Button>
                      <div className="flex gap-2">
-                       <button onClick={() => handleOccurrenceAction(selectedOccurrence.id, 'skip')} className="flex-1 btn-secondary py-2 text-xs">Atla</button>
-                       <button onClick={() => handleOccurrenceAction(selectedOccurrence.id, 'cancel')} className="flex-1 btn-danger py-2 text-xs">İptal Et</button>
+                       <Button variant="secondary" onClick={() => handleOccurrenceAction(selectedOccurrence.id, 'skip')} className="flex-1 btn-secondary py-2 text-xs">Atla</Button>
+                       <Button variant="danger" onClick={() => handleOccurrenceAction(selectedOccurrence.id, 'cancel')} className="flex-1 btn-danger py-2 text-xs">İptal Et</Button>
                      </div>
                    </div>
                  )}
@@ -377,12 +372,11 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
                    </div>
                  )}
               </div>
-           </div>
-        </div>
-     )}
+       )}
+     </Modal>
 
       {/* Plans List below calendar */}
-      <div className="card overflow-hidden">
+      <Card className="overflow-hidden">
         <div className="px-6 py-4 flex justify-between items-center border-b border-border-color">
           <h3 className="font-bold text-lg">Aktif Ödeme Planları</h3>
         </div>
@@ -409,7 +403,7 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
                      {p.frequency === 'weekly' && `Haftalık / ${['Pzt','Sal','Çar','Per','Cum','Cmt','Pzr'][(p.week_day || 1)-1]}`}
                      {p.frequency === 'custom' && `${p.custom_interval_days} Günde Bir`}
                    </td>
-                   <td className="px-6 py-4"><span className="px-2 py-1 bg-gray-100 rounded-md text-[10px] font-bold">{p.category}</span></td>
+                   <td className="px-6 py-4"><Badge className="rounded-md text-[10px]">{p.category}</Badge></td>
                    <td className="px-6 py-4 font-black text-right"><FormatAmount amount={p.amount} /></td>
                    <td className="px-6 py-4 text-center">
                       <div className={cn("inline-flex w-4 h-4 rounded-full border items-center justify-center", p.auto_process ? "bg-green-500 border-green-600" : "bg-gray-200 border-gray-300")}>
@@ -417,16 +411,14 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
                       </div>
                    </td>
                    <td className="px-6 py-4 text-right">
-                     {!isReadOnly && <button onClick={() => handleDeletePlan(p.id)} className="p-1 text-text-muted hover:text-red-500"><Trash2 className="w-4 h-4"/></button>}
+                     {!isReadOnly && <Button variant="ghost" size="sm" onClick={() => handleDeletePlan(p.id)} className="p-1 text-text-muted hover:text-red-500"><Trash2 className="w-4 h-4"/></Button>}
                    </td>
                 </tr>
              ))}
-             {plans.length === 0 && (
-                <tr><td colSpan={6} className="px-6 py-8 text-center text-text-muted">Plan kaydı bulunamadı.</td></tr>
-             )}
+             {plans.length === 0 && <tr><td colSpan={6}><EmptyState title="Plan kaydı bulunamadı." className="border-0" /></td></tr>}
            </tbody>
         </table>
-      </div>
+      </Card>
 
       {!isReadOnly && showAdd && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
@@ -565,9 +557,9 @@ export default function RecurringPayments({ settings }: { settings: Settings | n
 
                  </div>
 
-                 <button disabled={loading} className="w-full btn-primary py-4 mt-6 font-black text-lg">
+                 <Button type="submit" loading={loading} className="w-full btn-primary py-4 mt-6 font-black text-lg">
                    {loading ? 'Kaydediliyor...' : 'Planı Oluştur'}
-                 </button>
+                 </Button>
               </form>
            </div>
         </div>

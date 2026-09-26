@@ -27,14 +27,8 @@ import { useCurrency } from '../CurrencyContext';
 import { api } from '../lib/api';
 import { useAuth } from '../App';
 import { Settings, type BackupConfig, type BackupRun, type BackupStatus, type ManagedUser, type UserRole } from '../types';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
 import PushNotificationSettings from './PushNotificationSettings';
-import { Button } from './ui';
-
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+import { Button, Card, LoadingState, PageHeader, cn } from './ui';
 
 interface SettingsViewProps {
   onUpdate: () => void;
@@ -478,28 +472,26 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
     }
   };
 
-  if (!settings) return null;
+  if (!settings) return <LoadingState label="Ayarlar yükleniyor..." />;
 
   return (
     <div className="max-w-3xl mx-auto space-y-8 animate-in slide-in-from-bottom-4 duration-500 pb-20">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h2 className="text-xl lg:text-2xl font-bold text-text-main tracking-tight">Sistem Ayarları</h2>
-          <p className="text-xs lg:text-sm text-text-muted">Panel yapılandırmasını buradan özelleştirin.</p>
-        </div>
-        <Button
+      <PageHeader
+        title="Sistem Ayarları"
+        description="Panel yapılandırmasını buradan özelleştirin."
+        actions={<Button
           onClick={handleSave}
-          disabled={loading}
+          loading={loading}
           className="btn-primary h-11 w-full gap-0 border-0 px-8 active:scale-95 sm:w-auto"
         >
           <span>{loading ? 'Kaydediliyor...' : saved ? 'Ayarlar Kaydedildi' : 'Değişiklikleri Kaydet'}</span>
           {saved ? <CheckCircle2 className="w-4 h-4 ml-2" /> : <Save className="w-4 h-4 ml-2" />}
-        </Button>
-      </div>
+        </Button>}
+      />
 
       <PushNotificationSettings />
 
-      <div className="card overflow-hidden divide-y divide-border-color">
+      <Card className="overflow-hidden divide-y divide-border-color">
          {/* General Info */}
          <div className="p-6 lg:p-8 space-y-6">
             <h3 className="text-xs font-bold text-text-muted uppercase tracking-widest flex items-center">
@@ -703,7 +695,7 @@ export default function SettingsView({ onUpdate }: SettingsViewProps) {
                <p className="text-[11px] text-blue-700 leading-relaxed font-bold uppercase tracking-tight opacity-80">Bu liste yeni satış formunda Platform / Satış Kanalı seçeneklerini belirler. Komisyon oranları net kâr ve platform analizlerinde kullanılır.</p>
             </div>
          </div>
-      </div>
+      </Card>
 
       {isAdmin && (
         <div className="card overflow-hidden mt-8">

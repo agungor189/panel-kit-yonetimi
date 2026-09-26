@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Lock, User, LogIn, Zap, KeyRound, ShieldCheck } from 'lucide-react';
 import { api } from '../lib/api';
 import type { UserRole } from '../types';
+import { Button, Card } from './ui';
 
 type Props = { onLogin: (role: UserRole, permissions?: Record<string, unknown>) => void };
 
@@ -92,7 +93,7 @@ export default function LoginPage({ onLogin }: Props) {
           <span className="text-2xl font-black tracking-tight text-text-main uppercase">DSDST Panel</span>
         </div>
 
-        <div className="w-full bg-white rounded-[30px] lg:rounded-[40px] shadow-2xl shadow-blue-900/5 p-8 lg:p-12 border border-border-color">
+        <Card className="w-full rounded-[30px] p-8 shadow-2xl shadow-blue-900/5 lg:rounded-[40px] lg:p-12">
           {view === 'login' ? (
             <>
               <div className="text-center mb-8">
@@ -127,12 +128,10 @@ export default function LoginPage({ onLogin }: Props) {
                   </div>
                 )}
 
-                <button disabled={loginLoading}
+                <Button type="submit" loading={loginLoading} loadingText="Giriş Yap" disabled={loginLoading}
                   className="w-full h-14 bg-primary text-white rounded-2xl font-black text-lg shadow-xl shadow-blue-200 hover:scale-[1.02] transition-all flex items-center justify-center group">
-                  {loginLoading
-                    ? <div className="w-6 h-6 border-b-2 border-white rounded-full animate-spin" />
-                    : <><span>Giriş Yap</span><LogIn className="w-5 h-5 ml-2 group-hover:translate-x-1 transition-transform" /></>}
-                </button>
+                  <span>Giriş Yap</span><LogIn className="w-5 h-5 ml-2 group-hover:translate-x-1 transition-transform" />
+                </Button>
               </form>
             </>
           ) : (
@@ -184,16 +183,14 @@ export default function LoginPage({ onLogin }: Props) {
                   </div>
                 )}
 
-                <button disabled={cpLoading}
+                <Button type="submit" loading={cpLoading} loadingText="Şifremi Güncelle" disabled={cpLoading}
                   className="w-full h-14 bg-primary text-white rounded-2xl font-black text-lg shadow-xl shadow-blue-200 hover:scale-[1.02] transition-all flex items-center justify-center group">
-                  {cpLoading
-                    ? <div className="w-6 h-6 border-b-2 border-white rounded-full animate-spin" />
-                    : <><span>Şifremi Güncelle</span><ShieldCheck className="w-5 h-5 ml-2" /></>}
-                </button>
+                  <span>Şifremi Güncelle</span><ShieldCheck className="w-5 h-5 ml-2" />
+                </Button>
               </form>
             </>
           )}
-        </div>
+        </Card>
       </div>
 
       <div className="mt-20 text-[10px] font-black text-text-muted uppercase tracking-[0.3em] opacity-40">

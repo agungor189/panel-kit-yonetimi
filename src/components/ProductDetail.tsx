@@ -19,13 +19,8 @@ import {
 import { api, PLATFORMS } from '../lib/api';
 import { useCurrency } from '../CurrencyContext';
 import { Product, ProductPlatform } from '../types';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
 import { useAuth } from '../App';
-
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+import { Badge, Button, Card, ConfirmDialog, EmptyState, LoadingState, cn } from './ui';
 
 const productKindStyles: Record<string, string> = {
   kit: "bg-emerald-50 text-emerald-700 border-emerald-100",
@@ -46,12 +41,12 @@ function getProductKind(product: Product) {
 function ProductKindBadge({ product }: { product: Product }) {
   const kind = getProductKind(product);
   return (
-    <span className={cn(
+    <Badge className={cn(
       "inline-flex items-center rounded-full border px-3 py-1 text-[10px] font-black uppercase tracking-widest",
       productKindStyles[kind.key] || productKindStyles.normal
     )}>
       {kind.label}
-    </span>
+    </Badge>
   );
 }
 
@@ -132,10 +127,7 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
   };
 
   if (loading || !product) return (
-    <div className="flex flex-col items-center justify-center py-24 space-y-4">
-      <div className="w-12 h-12 border-4 border-[#0F172A]/10 border-t-[#0F172A] rounded-full animate-spin"></div>
-      <p className="text-sm font-bold text-[#64748B]">Yükleniyor...</p>
-    </div>
+    <LoadingState label="Ürün yükleniyor..." className="py-24" />
   );
 
   const bufferedCostTRY = product.purchase_cost * (1 + (product.buffer_percentage || 0) / 100);
@@ -148,56 +140,40 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
     <div className="space-y-8 animate-in slide-in-from-bottom-4 duration-500">
       {/* Top Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-         <button
+         <Button variant="ghost"
            onClick={onBack}
            className="flex items-center text-[#64748B] hover:text-[#0F172A] transition-colors p-2 -ml-2 rounded-lg hover:bg-[#F1F5F9] w-fit"
          >
            <ArrowLeft className="w-5 h-5 mr-2" />
            <span className="font-bold text-sm">Listeye Dön</span>
-         </button>
+         </Button>
          <div className="flex items-center space-x-3 w-full sm:w-auto">
              {!isReadOnly && product?.catalog_type !== 'KIT' && (
-               <button
+               <Button
                  onClick={onEdit}
                  className="flex-1 sm:flex-none flex items-center justify-center px-4 py-2.5 bg-[#0F172A] text-white rounded-xl font-bold text-sm hover:scale-105 transition-all shadow-md"
                >
                  <Edit3 className="w-4 h-4 mr-2" />
                  Düzenle
-               </button>
+               </Button>
              )}
 
-             {!isReadOnly && product?.catalog_type !== 'KIT' && (!showDeleteConfirm ? (
-               <button
+             {!isReadOnly && product?.catalog_type !== 'KIT' && (
+               <Button variant="secondary"
                  onClick={() => setShowDeleteConfirm(true)}
                  className="p-2.5 border border-[#E2E8F0] text-rose-500 rounded-xl hover:bg-rose-50 transition-colors"
                  title="Ürünü Sil"
                >
                  <Trash2 className="w-4 h-4" />
-               </button>
-             ) : (
-               <div className="flex items-center space-x-2 animate-in fade-in zoom-in duration-200">
-                 <span className="text-[10px] font-bold text-rose-500 uppercase tracking-tight hidden sm:block">Silinsin mi?</span>
-                 <button
-                   onClick={deleteProduct}
-                   className="px-3 py-2 bg-rose-500 text-white rounded-lg font-bold text-xs hover:bg-rose-600 transition-colors shadow-sm"
-                 >
-                   Evet, Sil
-                 </button>
-                 <button
-                   onClick={() => setShowDeleteConfirm(false)}
-                   className="px-3 py-2 bg-bg-main border border-border-color text-text-muted rounded-lg font-bold text-xs hover:bg-white transition-colors"
-                 >
-                   Vazgeç
-                 </button>
-               </div>
-             ))}
+               </Button>
+             )}
          </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* Gallery */}
         <div className="lg:col-span-1 space-y-4">
-           <div className="aspect-square bg-white border border-border-color rounded-2xl overflow-hidden shadow-sm relative p-8">
+           <Card className="relative aspect-square overflow-hidden rounded-2xl p-8 shadow-sm">
               {activeImage ? (
                 <img src={activeImage} className="w-full h-full object-contain" referrerPolicy="no-referrer" />
               ) : (
@@ -206,14 +182,14 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
                 </div>
               )}
               <div className="absolute top-4 right-4">
-                 <span className={cn(
+                 <Badge className={cn(
                    "px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-tight border shadow-sm",
                    product.status === 'Active' ? 'bg-success text-white border-success' : 'bg-text-muted text-white border-text-muted'
                  )}>
                    {product.status === 'Active' ? 'Satışta' : 'Pasif'}
-                 </span>
+                 </Badge>
               </div>
-           </div>
+           </Card>
            <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-hide">
               {product.images?.map((img) => (
                 <button
@@ -232,7 +208,7 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
 
         {/* Info */}
         <div className="lg:col-span-2 space-y-6">
-           <section className="card p-8 space-y-6">
+           <Card padding="lg" className="space-y-6">
               <div>
                 <p className="text-[10px] font-bold text-primary uppercase tracking-widest mb-1">
                   {[product.category, seriesLabel ? `${seriesLabel} Seri` : null, product.model].filter(Boolean).join(' / ')}
@@ -416,9 +392,9 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
                   </div>
                 </div>
               </div>
-           </section>
+           </Card>
 
-           <section className="card">
+           <Card>
               <div className="p-6 border-b border-border-color flex items-center space-x-2">
                 <History className="w-4 h-4 text-text-muted" />
                 <h3 className="font-bold text-text-main text-sm">Stok Hareket Geçmişi</h3>
@@ -461,11 +437,21 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
                      </div>
                    );
                  })}
-                 {stockLogs.length === 0 && <div className="py-12 text-center italic text-text-muted text-sm px-6">Henüz bir hareket kaydı yok.</div>}
+                 {stockLogs.length === 0 && <EmptyState title="Henüz bir hareket kaydı yok." />}
               </div>
-           </section>
+           </Card>
         </div>
       </div>
+      <ConfirmDialog
+        open={showDeleteConfirm}
+        onClose={() => setShowDeleteConfirm(false)}
+        onConfirm={deleteProduct}
+        title="Ürünü sil"
+        description="Bu ürün kaydını silmek istediğinize emin misiniz?"
+        confirmLabel="Evet, Sil"
+        cancelLabel="Vazgeç"
+        destructive
+      />
     </div>
   );
 }

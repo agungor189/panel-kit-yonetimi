@@ -21,18 +21,13 @@ import { api } from '../lib/api';
 import { useCurrency } from '../CurrencyContext';
 import { Product } from '../types';
 import Papa from 'papaparse';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
 import BarcodeScannerModal from './BarcodeScannerModal';
 import PricingSettingsModal from './PricingSettingsModal';
 import { Calculator, Loader2, CheckCircle, AlertTriangle } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useAuth } from '../App';
 import { chunkItems, PRODUCT_IMAGE_CLIENT_BATCH_SIZE } from '../../shared/productImageBatch';
-
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+import { Badge, Button, Card, EmptyState, Input, PageHeader, Select, cn } from './ui';
 
 const PRODUCT_KIND_STYLE: Record<string, string> = {
   kit: "bg-emerald-50 text-emerald-700 border-emerald-100",
@@ -61,12 +56,12 @@ function getProductKind(product: Product) {
 function ProductKindBadge({ product }: { product: Product }) {
   const kind = getProductKind(product);
   return (
-    <span className={cn(
+    <Badge className={cn(
       "inline-flex items-center rounded-full border px-2 py-0.5 text-[9px] font-black uppercase tracking-widest",
       PRODUCT_KIND_STYLE[kind.key] || PRODUCT_KIND_STYLE.normal
     )}>
       {kind.label}
-    </span>
+    </Badge>
   );
 }
 
@@ -99,7 +94,7 @@ function FilterSelect({
         {label}
       </span>
       <div className="relative">
-        <select
+        <Select
           value={value}
           onChange={(event) => onChange(event.target.value)}
           className="h-11 w-full appearance-none rounded-xl border border-border-color bg-bg-main px-3 pr-9 text-sm font-bold text-text-main outline-none transition-all hover:border-primary focus:border-primary focus:ring-2 focus:ring-primary/20"
@@ -109,7 +104,7 @@ function FilterSelect({
               {option === 'Hepsi' ? allLabel : labels[option] || option}
             </option>
           ))}
-        </select>
+        </Select>
         <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-text-muted" />
       </div>
     </label>
@@ -516,12 +511,10 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
           products={products}
         />
       )}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h2 className="text-xl lg:text-2xl font-bold text-text-main tracking-tight">Ürün Yönetimi</h2>
-          <p className="text-xs lg:text-sm text-text-muted">{products.length} toplam ürün listeleniyor.</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
+      <PageHeader
+        title="Ürün Yönetimi"
+        description={`${products.length} toplam ürün listeleniyor.`}
+        actions={<>
           <input
             type="file"
             ref={csvInputRef}
@@ -539,37 +532,37 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
           />
           {!isReadOnly && (
             <>
-              <button
+              <Button variant="secondary"
                 onClick={() => setShowPricingModal(true)}
                 className="px-4 h-11 border border-blue-200 bg-blue-50/50 rounded-xl text-xs font-bold text-blue-700 hover:bg-blue-100 transition-all flex items-center shadow-sm"
               >
                 <Calculator className="w-4 h-4 mr-2" />
                 Toplu Fiyat Yönetimi
-              </button>
-              <button
+              </Button>
+              <Button variant="secondary"
                 onClick={() => csvInputRef.current?.click()}
                 className="px-4 h-11 border border-border-color bg-white rounded-xl text-xs font-bold text-text-muted hover:text-primary hover:border-primary transition-all flex items-center shadow-sm"
               >
                 <Upload className="w-4 h-4 mr-2" />
                 Gelişmiş İçe Aktar
-              </button>
-              <button
+              </Button>
+              <Button variant="secondary"
                 onClick={() => bulkImageInputRef.current?.click()}
                 className="px-4 h-11 border border-border-color bg-white rounded-xl text-xs font-bold text-text-muted hover:text-primary hover:border-primary transition-all flex items-center shadow-sm"
               >
                 <Images className="w-4 h-4 mr-2" />
                 Toplu Görsel Yükle
-              </button>
+              </Button>
             </>
           )}
-          <button
+          <Button variant="secondary"
             onClick={exportToCsv}
             className="px-4 h-11 border border-border-color bg-white rounded-xl text-xs font-bold text-text-muted hover:text-primary hover:border-primary transition-all flex items-center"
           >
             <Download className="w-4 h-4 mr-2" />
             CSV Dışa Aktar
-          </button>
-          <button
+          </Button>
+          <Button variant="secondary"
             onClick={() => {
               const data = [{
                 'SKU': 'URUN-001',
@@ -608,9 +601,9 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
           >
             <FileText className="w-4 h-4 mr-2" />
             Şablon İndir
-          </button>
+          </Button>
           {!isReadOnly && products.length > 0 && (
-            <button
+            <Button variant="secondary"
               onClick={() => {
                 setDeleteAllInput("");
                 setShowDeleteAllConfirm(true);
@@ -619,19 +612,19 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
             >
               <Trash2 className="w-4 h-4 mr-2" />
               Tümünü Sil
-            </button>
+            </Button>
           )}
           {!isReadOnly && (
-            <button
+            <Button
               onClick={onAddProduct}
               className="btn-primary px-6 py-2 leading-none flex items-center justify-center h-11 w-full sm:w-auto"
             >
               <Plus className="w-4 h-4 mr-2" />
               <span>Yeni Ürün Ekle</span>
-            </button>
+            </Button>
           )}
-        </div>
-      </div>
+        </>}
+      />
 
       {showDeleteAllConfirm && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200" onClick={() => setShowDeleteAllConfirm(false)}>
@@ -645,7 +638,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                 Bu işlem geri alınamaz. Onaylamak için lütfen kutuya büyük harflerle <strong>SİL</strong> yazın.
               </p>
               <div className="mb-6">
-                <input
+                <Input
                   type="text"
                   value={deleteAllInput}
                   onChange={(e) => setDeleteAllInput(e.target.value)}
@@ -654,20 +647,20 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                 />
               </div>
               <div className="flex flex-col gap-3">
-                <button
+                <Button variant="danger"
                   onClick={deleteAllProducts}
                   disabled={deletingAll || deleteAllInput !== "SİL"}
                   className="w-full py-3 bg-rose-500 hover:bg-rose-600 text-white rounded-xl font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {deletingAll ? "Siliniyor..." : "Evet, Tümünü Seçili Sil"}
-                </button>
-                <button
+                </Button>
+                <Button variant="secondary"
                   onClick={() => setShowDeleteAllConfirm(false)}
                   disabled={deletingAll}
                   className="w-full py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-bold transition-colors disabled:opacity-50"
                 >
                   İptal
-                </button>
+                </Button>
               </div>
             </div>
           </div>
@@ -675,12 +668,13 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
       )}
 
       {/* Filters Bar */}
-      <div className="card bg-white p-4 shadow-sm">
+      <Card padding="sm" className="bg-white shadow-sm">
         <div className="flex flex-col gap-4">
           <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
             <div className="relative flex min-w-[260px] flex-1 items-center">
               <Search className="absolute left-3.5 h-4 w-4 text-text-muted" />
-              <input
+              <Input
+                containerClassName="flex-1"
                 type="text"
                 placeholder="TR/EN ad, SKU, tedarikçi kodu veya barkod ara..."
                 value={search}
@@ -821,7 +815,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
             />
           </div>
         </div>
-      </div>
+      </Card>
 
       {viewMode === 'grid' ? (
         <div className="grid grid-cols-1 xs:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-4 lg:gap-6">
@@ -1026,11 +1020,12 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
       )}
 
       {filteredProducts.length === 0 && (
-        <div className="py-24 text-center bg-white rounded-3xl border-2 border-dashed border-border-color">
-          <Package className="w-16 h-16 text-border-color mx-auto mb-4" />
-          <h3 className="text-xl font-bold text-text-main">Ürün bulunamadı</h3>
-          <p className="text-text-muted mt-1">Arama kriterlerinizi değiştirmeyi deneyin.</p>
-        </div>
+        <EmptyState
+          title="Ürün bulunamadı"
+          description="Arama kriterlerinizi değiştirmeyi deneyin."
+          icon={<Package className="h-16 w-16 text-border-color" />}
+          className="rounded-3xl border-2 border-dashed border-border-color bg-white py-24"
+        />
       )}
 
       {/* CSV mapping and validation report */}

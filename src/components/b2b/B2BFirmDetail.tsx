@@ -1,14 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../../lib/api';
 import { ArrowLeft, Building2, MapPin, Globe, Phone, Mail, User, Link, Package, FileText, CheckCircle2, Clock, X, MessageSquare, Briefcase } from 'lucide-react';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
-
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
-
 import { useAuth } from '../../App';
+import { Button, Card, EmptyState, Input, LoadingState, Select, cn } from '../ui';
 
 export default function B2BFirmDetail({ firmId, onBack }: any) {
   const [firm, setFirm] = useState<any>(null);
@@ -38,31 +32,31 @@ export default function B2BFirmDetail({ firmId, onBack }: any) {
     }
   };
 
-  if (!firm) return <div className="p-8 text-center">Yükleniyor...</div>;
+  if (!firm) return <LoadingState label="Firma yükleniyor..." />;
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <button onClick={onBack} className="w-10 h-10 rounded-xl bg-white border border-border-color flex items-center justify-center hover:bg-bg-main transition-colors text-text-muted hover:text-text-main shadow-sm">
+        <Button variant="secondary" onClick={onBack} className="h-10 w-10 rounded-xl p-0 text-text-muted shadow-sm hover:text-text-main">
            <ArrowLeft className="w-5 h-5" />
-        </button>
+        </Button>
         <div className="flex items-center gap-2">
           {['Yeni', 'İncelendi', 'Ulaşıldı', 'Teklif Verildi', 'Müşteri Oldu', 'Olumsuz'].map(s => (
-             <button 
+             <Button variant={firm.status === s ? 'primary' : 'secondary'} size="sm"
                key={s} 
                onClick={() => updateStatus(s)}
                className={cn(
-                 "px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all",
+                 "rounded-lg px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider transition-all",
                  firm.status === s ? "bg-primary text-white shadow" : "bg-white border border-border-color text-text-muted hover:bg-bg-main"
                )}
-             >{s}</button>
+             >{s}</Button>
           ))}
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-1 space-y-6">
-          <div className="card p-6 divide-y divide-border-color">
+          <Card padding="md" className="divide-y divide-border-color">
              <div className="pb-6">
                 <div className="w-12 h-12 bg-primary/10 rounded-2xl flex items-center justify-center mb-4">
                   <Building2 className="w-6 h-6 text-primary" />
@@ -89,7 +83,7 @@ export default function B2BFirmDetail({ firmId, onBack }: any) {
                  <p className="text-sm text-text-main whitespace-pre-wrap">{firm.notes}</p>
                </div>
              )}
-          </div>
+          </Card>
         </div>
 
         <div className="lg:col-span-2 space-y-6">
@@ -108,11 +102,11 @@ export default function B2BFirmDetail({ firmId, onBack }: any) {
              ))}
           </div>
 
-          <div className="card p-6 min-h-[400px]">
+          <Card padding="md" className="min-h-[400px]">
              {activeTab === 'notes' && <FirmNotes firmId={firmId} initialNotes={firm.notes_list || []} onRefresh={loadFirm} />}
              {activeTab === 'offers' && <FirmOffers firmId={firmId} initialOffers={firm.offers || []} onRefresh={loadFirm} />}
              {activeTab === 'follow_ups' && <FirmFollowUps firmId={firmId} initialFollowUps={firm.follow_ups || []} onRefresh={loadFirm} />}
-          </div>
+          </Card>
         </div>
       </div>
     </div>
@@ -155,14 +149,15 @@ function FirmNotes({ firmId, initialNotes, onRefresh }: any) {
   return (
     <div className="space-y-6">
       <form onSubmit={handleAdd} className="flex gap-4">
-        <input 
+        <Input
+          containerClassName="flex-1"
           type="text" 
           value={note} 
           onChange={e => setNote(e.target.value)} 
           placeholder="Yeni takip notu ekle..." 
           className="flex-1 px-4 py-2 bg-bg-main border border-border-color rounded-xl text-sm font-semibold outline-none focus:ring-2 focus:border-primary"
         />
-        <button type="submit" className="px-6 py-2 bg-primary text-white font-bold rounded-xl text-sm hover:bg-primary-hover shadow-md transition-colors">Ekle</button>
+        <Button type="submit" className="rounded-xl px-6 py-2 font-bold shadow-md">Ekle</Button>
       </form>
       <div className="space-y-4">
         {initialNotes.map((n: any) => (
@@ -171,7 +166,7 @@ function FirmNotes({ firmId, initialNotes, onRefresh }: any) {
             <p className="text-[10px] text-text-muted font-mono">{new Date(n.created_at).toLocaleString('tr-TR')}</p>
           </div>
         ))}
-        {initialNotes.length === 0 && <div className="text-center text-text-muted text-sm py-4">Henüz not eklenmemiş.</div>}
+        {initialNotes.length === 0 && <EmptyState title="Henüz not eklenmemiş." className="py-4" />}
       </div>
     </div>
   );
@@ -207,24 +202,24 @@ function FirmOffers({ firmId, initialOffers, onRefresh }: any) {
       {!showAdd ? (
         <div className="flex justify-between items-center">
           <h3 className="font-bold text-text-main">Teklif Geçmişi</h3>
-          <button onClick={() => setShowAdd(true)} className="px-4 py-2 bg-primary text-white font-bold rounded-xl text-sm hover:scale-[1.02] transition-transform">Teklif Ekle</button>
+          <Button onClick={() => setShowAdd(true)} className="rounded-xl px-4 py-2 font-bold hover:scale-[1.02]">Teklif Ekle</Button>
         </div>
       ) : (
         <div className="bg-bg-main p-4 rounded-xl border border-border-color">
           <form onSubmit={handleAdd} className="space-y-4">
-            <input required type="text" placeholder="Teklif Başlığı" value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} className="w-full px-4 py-2 border rounded-xl text-sm" />
+            <Input required type="text" placeholder="Teklif Başlığı" value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} className="w-full px-4 py-2 border rounded-xl text-sm" />
             <textarea placeholder="Açıklama" value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} className="w-full px-4 py-2 border rounded-xl text-sm" />
             <div className="flex gap-4">
-              <input type="number" placeholder="Tutar" value={formData.amount} onChange={e => setFormData({...formData, amount: e.target.value})} className="flex-1 px-4 py-2 border rounded-xl text-sm" />
-              <select value={formData.currency} onChange={e => setFormData({...formData, currency: e.target.value})} className="w-24 px-4 py-2 border rounded-xl text-sm">
+              <Input containerClassName="flex-1" type="number" placeholder="Tutar" value={formData.amount} onChange={e => setFormData({...formData, amount: e.target.value})} className="px-4 py-2 border rounded-xl text-sm" />
+              <Select containerClassName="w-24" value={formData.currency} onChange={e => setFormData({...formData, currency: e.target.value})} className="w-24 px-4 py-2 border rounded-xl text-sm">
                 <option value="₺">₺</option>
                 <option value="$">$</option>
                 <option value="€">€</option>
-              </select>
+              </Select>
             </div>
             <div className="flex justify-end gap-2">
-              <button type="button" onClick={() => setShowAdd(false)} className="px-4 py-2 bg-white border font-bold rounded-xl text-sm">İptal</button>
-              <button type="submit" className="px-4 py-2 bg-primary text-white font-bold rounded-xl text-sm">Kaydet</button>
+              <Button type="button" variant="secondary" onClick={() => setShowAdd(false)} className="rounded-xl px-4 py-2 font-bold">İptal</Button>
+              <Button type="submit" className="rounded-xl px-4 py-2 font-bold">Kaydet</Button>
             </div>
           </form>
         </div>
@@ -240,7 +235,7 @@ function FirmOffers({ firmId, initialOffers, onRefresh }: any) {
             </div>
             <div className="text-right flex flex-col items-end gap-2">
               <div className="font-bold text-lg text-primary">{o.amount || 0} {o.currency}</div>
-              <select 
+              <Select
                 value={o.status} 
                 onChange={(e) => updateStatus(o.id, e.target.value)}
                 className={cn(
@@ -255,7 +250,7 @@ function FirmOffers({ firmId, initialOffers, onRefresh }: any) {
                 <option value="Kabul Edildi">Kabul Edildi</option>
                 <option value="Reddedildi">Reddedildi</option>
                 <option value="Revize Edilecek">Revize</option>
-              </select>
+              </Select>
             </div>
           </div>
         ))}
@@ -285,22 +280,22 @@ function FirmFollowUps({ firmId, initialFollowUps, onRefresh }: any) {
       {!showAdd ? (
         <div className="flex justify-between items-center">
           <h3 className="font-bold text-text-main">Planlanan Takipler</h3>
-          <button onClick={() => setShowAdd(true)} className="px-4 py-2 bg-primary text-white font-bold rounded-xl text-sm hover:scale-[1.02] transition-transform">Takip Ekle</button>
+          <Button onClick={() => setShowAdd(true)} className="rounded-xl px-4 py-2 font-bold hover:scale-[1.02]">Takip Ekle</Button>
         </div>
       ) : (
         <div className="bg-bg-main p-4 rounded-xl border border-border-color">
           <form onSubmit={handleAdd} className="space-y-4">
-            <select value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})} className="w-full px-4 py-2 border rounded-xl text-sm">
+            <Select value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})} className="w-full px-4 py-2 border rounded-xl text-sm">
               <option value="Arama">Arama Yapılacak</option>
               <option value="E-Posta">E-Posta Gönderilecek</option>
               <option value="Toplantı">Toplantı / Görüşme</option>
               <option value="Ziyaret">Firma Ziyareti</option>
-            </select>
+            </Select>
             <textarea required placeholder="Takip Notu" value={formData.note} onChange={e => setFormData({...formData, note: e.target.value})} className="w-full px-4 py-2 border rounded-xl text-sm" />
-            <input type="datetime-local" required value={formData.next_follow_up_date} onChange={e => setFormData({...formData, next_follow_up_date: e.target.value})} className="w-full px-4 py-2 border rounded-xl text-sm" />
+            <Input type="datetime-local" required value={formData.next_follow_up_date} onChange={e => setFormData({...formData, next_follow_up_date: e.target.value})} className="w-full px-4 py-2 border rounded-xl text-sm" />
             <div className="flex justify-end gap-2">
-              <button type="button" onClick={() => setShowAdd(false)} className="px-4 py-2 bg-white border font-bold rounded-xl text-sm">İptal</button>
-              <button type="submit" className="px-4 py-2 bg-primary text-white font-bold rounded-xl text-sm">Kaydet</button>
+              <Button type="button" variant="secondary" onClick={() => setShowAdd(false)} className="rounded-xl px-4 py-2 font-bold">İptal</Button>
+              <Button type="submit" className="rounded-xl px-4 py-2 font-bold">Kaydet</Button>
             </div>
           </form>
         </div>

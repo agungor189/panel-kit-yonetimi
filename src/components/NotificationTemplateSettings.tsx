@@ -12,6 +12,7 @@ import {
   validateNotificationTemplate,
   type NotificationCategory,
 } from '../../shared/notificationTemplates';
+import { Badge, Button, Card, Input, LoadingState } from './ui';
 
 type ManagedTemplate = {
   category: NotificationCategory;
@@ -99,7 +100,7 @@ export default function NotificationTemplateSettings() {
   };
 
   return (
-    <section className="card overflow-hidden">
+    <Card className="overflow-hidden">
       <div className="space-y-5 p-6 lg:p-8">
         <div>
           <h3 className="text-xs font-bold uppercase tracking-widest text-text-muted">Bildirim Şablonları</h3>
@@ -108,7 +109,7 @@ export default function NotificationTemplateSettings() {
           </p>
         </div>
 
-        {loading && <p className="flex items-center text-xs text-text-muted"><Loader2 className="mr-2 h-4 w-4 animate-spin" />Şablonlar yükleniyor…</p>}
+        {loading && <LoadingState label="Şablonlar yükleniyor…" compact className="justify-start px-0" />}
         {error && <p className="rounded-xl border border-red-200 bg-red-50 p-3 text-xs font-semibold text-red-700">{error}</p>}
         {message && <p className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs font-semibold text-emerald-700">{message}</p>}
 
@@ -125,17 +126,17 @@ export default function NotificationTemplateSettings() {
             const preview = renderNotificationTemplate(category, NOTIFICATION_TEMPLATE_PREVIEW_VALUES[category], template);
             const isSaving = saving === category;
             return (
-              <div key={category} className="space-y-4 rounded-2xl border border-border-color bg-bg-main p-4 lg:p-5">
+              <Card key={category} padding="sm" className="space-y-4 rounded-2xl bg-bg-main lg:p-5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <h4 className="text-sm font-black text-text-main">{categoryLabels[category]}</h4>
-                  <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-bold text-text-muted">
+                  <Badge className="border-0 bg-white text-[10px] text-text-muted">
                     {template.is_default ? 'Varsayılan' : 'Özelleştirilmiş'}
-                  </span>
+                  </Badge>
                 </div>
                 <div className="grid gap-4 lg:grid-cols-2">
                   <label className="space-y-2 text-xs font-bold text-text-muted">
                     <span>Başlık</span>
-                    <input
+                    <Input
                       value={template.title}
                       maxLength={NOTIFICATION_TEMPLATE_TITLE_MAX_LENGTH}
                       onChange={(event) => updateLocal(category, 'title', event.target.value)}
@@ -165,28 +166,30 @@ export default function NotificationTemplateSettings() {
                   {validationError && <p className="mt-2 text-[11px] font-semibold text-red-600">{validationError} Preview güvenli varsayılanı gösteriyor.</p>}
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <button
+                  <Button
                     type="button"
                     onClick={() => void save(template)}
+                    loading={isSaving}
                     disabled={isSaving || Boolean(validationError)}
                     className="inline-flex h-10 items-center rounded-xl bg-primary px-4 text-xs font-black text-white disabled:opacity-50"
                   >
-                    {isSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Check className="mr-2 h-4 w-4" />}Kaydet
-                  </button>
-                  <button
+                    {!isSaving && <Check className="h-4 w-4" />}Kaydet
+                  </Button>
+                  <Button
                     type="button"
+                    variant="secondary"
                     onClick={() => void reset(category)}
                     disabled={isSaving}
                     className="inline-flex h-10 items-center rounded-xl border border-border-color bg-white px-4 text-xs font-black text-text-main disabled:opacity-50"
                   >
-                    <RotateCcw className="mr-2 h-4 w-4" />Varsayılana Döndür
-                  </button>
+                    <RotateCcw className="h-4 w-4" />Varsayılana Döndür
+                  </Button>
                 </div>
-              </div>
+              </Card>
             );
           })}
         </div>
       </div>
-    </section>
+    </Card>
   );
 }

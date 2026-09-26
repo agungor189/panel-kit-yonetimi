@@ -11,6 +11,7 @@ import { BusinessMetricWidget } from './widgets/BusinessMetricWidget';
 import { BusinessChartWidget } from './widgets/BusinessChartWidget';
 import { useAuth } from '../../App';
 import { getDashboardWidgetDefinition } from './dashboardCatalog';
+import { Button, Card, EmptyState, LoadingState, PageHeader, Select } from '../ui';
 
 type GridItem = { i: string; x: number; y: number; w: number; h: number; minW?: number; minH?: number };
 type Widget = {
@@ -313,7 +314,7 @@ export function DashboardWidgetGrid() {
     const isInternalTitle = isDashboardMetric(widget.widget_key);
     return (
       <div key={widget.id} className="h-full min-w-0">
-        <div className={`dashboard-widget-card relative flex h-full min-w-0 flex-col overflow-hidden rounded-2xl border bg-white p-5 shadow-sm transition-all sm:p-6 ${editMode ? 'border-primary/40 ring-2 ring-primary/10' : 'border-slate-200 hover:shadow-md'}`}>
+        <Card className={`dashboard-widget-card relative flex h-full min-w-0 flex-col overflow-hidden rounded-2xl p-5 shadow-sm transition-all sm:p-6 ${editMode ? 'border-primary/40 ring-2 ring-primary/10' : 'border-slate-200 hover:shadow-md'}`}>
           {editMode && (
             <div className="dashboard-drag-handle absolute right-4 top-4 z-10 flex cursor-move items-center gap-1 rounded-lg bg-slate-900/80 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-white">
               <GripVertical className="h-3 w-3" />
@@ -329,66 +330,65 @@ export function DashboardWidgetGrid() {
           <div className="min-h-0 min-w-0 flex-1">
             {renderWidgetContent(widget)}
           </div>
-        </div>
+        </Card>
       </div>
     );
   };
 
   if (loading && widgets.length === 0) {
-    return <div className="p-8 text-center font-medium text-slate-500">Yükleniyor...</div>;
+    return <LoadingState label="Dashboard yükleniyor..." />;
   }
 
   return (
     <div className="w-full">
-      <div className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <h2 className="text-2xl font-black tracking-tight text-slate-900">Dashboard</h2>
-          <p className="mt-1 text-sm font-semibold text-slate-500">Ciro, kâr, stok ve finans göstergeleri tek ekranda.</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
+      <PageHeader
+        className="mb-6"
+        title="Dashboard"
+        description="Ciro, kâr, stok ve finans göstergeleri tek ekranda."
+        actions={<>
           <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
             <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Dönem</span>
-            <select
+            <Select
               value={dashboardPeriod}
               onChange={(event) => setDashboardPeriod(event.target.value)}
-              className="bg-transparent text-sm font-black text-slate-700 outline-none"
+              className="border-0 bg-transparent p-0 text-sm font-black text-slate-700 outline-none"
               aria-label="Dashboard dönemi"
             >
               {DASHBOARD_PERIOD_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
               ))}
-            </select>
+            </Select>
           </label>
-          <button onClick={() => setRefreshKey((key) => key + 1)} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 shadow-sm transition-colors hover:bg-slate-50">
+          <Button variant="secondary" onClick={() => setRefreshKey((key) => key + 1)} className="rounded-xl border-slate-200 px-4 py-2.5 font-bold text-slate-700 shadow-sm hover:bg-slate-50">
             <RefreshCw className="h-4 w-4" />
             Yenile
-          </button>
+          </Button>
           {!isReadOnly && !editMode && (
             <>
-              <button onClick={() => setShowSettings(true)} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 shadow-sm transition-colors hover:bg-slate-50">
+              <Button variant="secondary" onClick={() => setShowSettings(true)} className="rounded-xl border-slate-200 px-4 py-2.5 font-bold text-slate-700 shadow-sm hover:bg-slate-50">
                 <Settings className="h-4 w-4" />
                 Widget Ekle/Sil
-              </button>
-              <button onClick={startEdit} className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-primary-hover">
+              </Button>
+              <Button onClick={startEdit} className="rounded-xl px-4 py-2.5 font-bold shadow-sm">
                 <LayoutGrid className="h-4 w-4" />
                 Düzenle
-              </button>
+              </Button>
             </>
           )}
           {!isReadOnly && editMode && (
             <>
-              <button onClick={cancelEdit} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 shadow-sm transition-colors hover:bg-slate-50">
+              <Button variant="secondary" onClick={cancelEdit} className="rounded-xl border-slate-200 px-4 py-2.5 font-bold text-slate-700 shadow-sm hover:bg-slate-50">
                 <RotateCcw className="h-4 w-4" />
                 Vazgeç
-              </button>
-              <button onClick={saveEdit} className="flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-emerald-700">
+              </Button>
+              <Button onClick={saveEdit} className="rounded-xl bg-emerald-600 px-4 py-2.5 font-bold shadow-sm hover:bg-emerald-700">
                 <Check className="h-4 w-4" />
                 Yerleşimi Kaydet
-              </button>
+              </Button>
             </>
           )}
-        </div>
-      </div>
+        </>}
+      />
 
       {editMode && (
         <div className="mb-4 rounded-2xl border border-primary/20 bg-primary/5 px-4 py-3 text-sm font-bold text-primary">
@@ -414,13 +414,12 @@ export function DashboardWidgetGrid() {
           {activeWidgets.map(renderWidget)}
         </ResponsiveGridLayout>
       ) : (
-        <div className="rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50 py-20 text-center">
-          <h3 className="mb-2 text-lg font-bold text-slate-500">Gösterilecek Veri Yok</h3>
-          <p className="text-sm text-slate-400">Widget Ekle/Sil ekranından görüntülemek istediğiniz verileri seçebilirsiniz.</p>
-          {!isReadOnly && (
-            <button onClick={() => setShowSettings(true)} className="mt-4 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm">Seçim Yap</button>
-          )}
-        </div>
+        <EmptyState
+          title="Gösterilecek Veri Yok"
+          description="Widget Ekle/Sil ekranından görüntülemek istediğiniz verileri seçebilirsiniz."
+          className="rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50 py-20"
+          action={!isReadOnly ? <Button variant="secondary" onClick={() => setShowSettings(true)} className="border-slate-200 text-slate-700 shadow-sm">Seçim Yap</Button> : undefined}
+        />
       )}
 
       {!isReadOnly && showSettings && (

@@ -9,6 +9,7 @@ import {
 } from '../lib/pushNotifications';
 import { type NotificationCategory } from '../../shared/notificationTemplates';
 import NotificationTemplateSettings from './NotificationTemplateSettings';
+import { Button, Card, LoadingState } from './ui';
 
 type ServerPushStatus = {
   available: boolean;
@@ -184,7 +185,7 @@ export default function PushNotificationSettings() {
 
   return (
     <div className="space-y-6">
-    <div className="card overflow-hidden">
+    <Card className="overflow-hidden">
       <div className="p-6 lg:p-8 space-y-5">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
@@ -197,24 +198,26 @@ export default function PushNotificationSettings() {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <button
+            <Button
               type="button"
               onClick={enabled ? disable : enable}
+              loading={loading}
               disabled={loading || (!enabled && Boolean(unavailableMessage))}
               className="inline-flex h-10 items-center justify-center rounded-xl bg-primary px-4 text-xs font-black text-white transition-colors hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : enabled ? <BellOff className="mr-2 h-4 w-4" /> : <BellRing className="mr-2 h-4 w-4" />}
+              {!loading && (enabled ? <BellOff className="h-4 w-4" /> : <BellRing className="h-4 w-4" />)}
               {enabled ? 'Bildirimleri Kapat' : 'Bildirimleri Aç'}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
+              variant="secondary"
               onClick={sendTest}
               disabled={loading || !enabled || !serverStatus?.available}
               className="inline-flex h-10 items-center justify-center rounded-xl border border-border-color bg-white px-4 text-xs font-black text-text-main transition-colors hover:bg-bg-main disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <Send className="mr-2 h-4 w-4" />
+              <Send className="h-4 w-4" />
               Test Bildirimi
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -242,7 +245,7 @@ export default function PushNotificationSettings() {
         )}
 
         {loading && !serverStatus && support.supported && (
-          <p className="flex items-center text-xs text-text-muted"><Loader2 className="mr-2 h-4 w-4 animate-spin" />Bildirim durumu kontrol ediliyor…</p>
+          <LoadingState label="Bildirim durumu kontrol ediliyor…" compact className="justify-start px-0" />
         )}
         {unavailableMessage && (
           <p className="flex items-start rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-800">
@@ -260,7 +263,7 @@ export default function PushNotificationSettings() {
           </p>
         )}
       </div>
-    </div>
+    </Card>
     <NotificationTemplateSettings />
     </div>
   );
