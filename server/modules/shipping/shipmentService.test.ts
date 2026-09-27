@@ -160,6 +160,42 @@ test("PACKED creates one preparation and neither preparation nor tracking/label 
   db.close();
 });
 
+test("PACKED snapshots the canonical marketplace recipient before Warehouse fulfillment", () => {
+  const { db } = setup(marketplaceRecipient);
+  db.prepare("UPDATE sales SET platform='SHOPIFY' WHERE id='sale'").run();
+  db.prepare("UPDATE channel_accounts SET channel='SHOPIFY' WHERE id='channel-account'").run();
+
+  const service = new ShipmentService(db);
+  const shipment = service.packAndPrepare({
+    reservationId: "reservation",
+    operationId: "shopify-pack",
+    actor,
+  }).shipment;
+
+  assert.deepEqual(shipment.recipient, {
+    ...marketplaceRecipient,
+    districtID: "0",
+  });
+
+  const snapshot = db.prepare(`SELECT name,email,phone,address1,address2,country_code,city_name,city_code,district_name,district_id,zip
+    FROM shipment_recipient_snapshots WHERE shipment_id=?`).get(shipment.id);
+  assert.deepEqual(snapshot, {
+    name: marketplaceRecipient.name,
+    email: marketplaceRecipient.email,
+    phone: marketplaceRecipient.phone,
+    address1: marketplaceRecipient.address1,
+    address2: marketplaceRecipient.address2,
+    country_code: marketplaceRecipient.countryCode,
+    city_name: marketplaceRecipient.cityName,
+    city_code: marketplaceRecipient.cityCode,
+    district_name: marketplaceRecipient.districtName,
+    district_id: "0",
+    zip: marketplaceRecipient.zip,
+  });
+
+  db.close();
+});
+
 test("carrier choice is explicit, multi-package measurements prefer measured values, recipe is marked, and missing data fails closed", () => {
   const { db } = setup();
   const service = new ShipmentService(db, { recipeResolver: (_orderId, number) => number === 2
@@ -622,7 +658,7 @@ test("Geliver infers missing Turkish Shopify district from address1 and verifies
   db.close();
 });
 
-test("Geliver automatically resolves marketplace recipient against provider geo data", async () => {
+test("Geliver keeps the canonical shipment recipient snapshot and sends provider-normalized geo data", async () => {
   const { db, shipment, geliver } = prepareLiveGeliver();
 
   const resolvedRecipient = await geliver.resolveRecipient({
@@ -653,7 +689,7 @@ test("Geliver automatically resolves marketplace recipient against provider geo 
     address1: marketplaceRecipient.address1,
     country_code: "TR",
     city_name: "İstanbul",
-    city_code: "34",
+    city_code: marketplaceRecipient.cityCode,
     district_name: "Ümraniye",
     zip: marketplaceRecipient.zip,
   });

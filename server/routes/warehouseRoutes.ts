@@ -660,7 +660,6 @@ export function createWarehouseRouter({
       try {
         const recipient = await geliverService.resolveRecipient({
           shipmentId: req.params.id,
-          recipient: req.body?.recipient ?? null,
         });
 
         const payload = { shipmentId: req.params.id, recipient };

@@ -250,16 +250,21 @@ export class GeliverFlowService {
 
   async resolveRecipient(input: {
     shipmentId: string;
-    recipient?: RecipientInput | null;
   }): Promise<RecipientInput> {
     const shipmentId = required(input.shipmentId, "shipmentId", 200);
 
     const existing = this.recipientSnapshot(shipmentId);
-    if (existing) return existing;
+    const original = existing ?? this.recipientFromChannelOrder(shipmentId);
+    const countryCode = required(original.countryCode, "recipient.countryCode", 3).toUpperCase();
+    const address1 = required(original.address1, "recipient.address1", 500);
+    const explicitDistrict = String(original.districtName ?? "").trim();
+    const source = {
+      ...original,
+      countryCode,
+      address1,
+      districtName: explicitDistrict || (countryCode === "TR" ? String(address1.split(",")[0] ?? "").trim() : ""),
+    };
 
-    const source = input.recipient ?? this.recipientFromChannelOrder(shipmentId);
-
-    const countryCode = required(source.countryCode, "recipient.countryCode", 3).toUpperCase();
     const cityName = required(source.cityName, "recipient.cityName", 100);
     const districtName = required(source.districtName, "recipient.districtName", 100);
 
@@ -341,7 +346,6 @@ export class GeliverFlowService {
       }
       const priorRecipient = this.db.prepare("SELECT snapshot_hash FROM shipment_recipient_snapshots WHERE shipment_id=?").get(shipmentId) as any;
       const recipientHash = hash(recipient);
-      if (priorRecipient && priorRecipient.snapshot_hash !== recipientHash) throw new ShipmentValidationError("RECIPIENT_SNAPSHOT_CONFLICT", "Recipient snapshot is immutable.", 409);
       if (!priorRecipient) this.db.prepare(`INSERT INTO shipment_recipient_snapshots
         (id,shipment_id,name,email,phone,address1,address2,country_code,city_name,city_code,district_name,district_id,zip,snapshot_hash,created_operation_id,created_actor_id,created_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(randomUUID(), shipmentId, recipient.name, recipient.email, recipient.phone,

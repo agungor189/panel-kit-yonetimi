@@ -189,7 +189,6 @@ export function createShippingV1Router(dependencies: Dependencies) {
     try {
       const recipient = await geliver.resolveRecipient({
         shipmentId: req.params.id,
-        recipient: req.body?.recipient ?? null,
       });
 
       const payload = {

@@ -267,8 +267,8 @@ test("Shopify poll normalizes a paid order and sends it to ChannelGateway", asyn
                 name: "Test Customer",
                 phone: "+905000000000",
                 address1: "Test Address",
-                address2: null,
-                city: "Istanbul",
+                address2: "Apartment 4",
+                city: "Umraniye",
                 province: "Istanbul",
                 provinceCode: "34",
                 zip: "34000",
@@ -419,10 +419,19 @@ test("Shopify poll normalizes a paid order and sends it to ChannelGateway", asyn
     1800,
   );
 
-  assert.equal(
-    event.rawPayload.recipient.cityName,
-    "Istanbul",
-  );
+  assert.deepEqual(event.rawPayload.recipient, {
+    name: "Test Customer",
+    email: "customer@example.test",
+    phone: "+905000000000",
+    address1: "Test Address",
+    address2: "Apartment 4",
+    cityName: "Istanbul",
+    cityCode: "34",
+    districtName: "Umraniye",
+    districtID: null,
+    zip: "34000",
+    countryCode: "TR",
+  });
 });
 
 test("Shopify shipment tracking creates fulfillment and is replay-safe", async () => {

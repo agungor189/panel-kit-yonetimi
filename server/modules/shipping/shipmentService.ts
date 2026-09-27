@@ -184,6 +184,54 @@ export class ShipmentService {
     this.reconciliationGuard.assertShipmentSkus(shipmentId, error);
   }
 
+  private snapshotMarketplaceRecipient(input: {
+    shipmentId: string;
+    orderId: string;
+    operationId: string;
+    actorId: string;
+    createdAt: string;
+  }) {
+    const row = this.db.prepare(`SELECT e.raw_payload_json
+      FROM channel_orders o
+      JOIN channel_inbound_events e ON e.id=o.first_event_id
+      WHERE o.sale_id=?
+      LIMIT 1`).get(input.orderId) as any;
+    if (!row?.raw_payload_json) return;
+
+    let payload: any;
+    try {
+      payload = JSON.parse(row.raw_payload_json);
+    } catch {
+      throw new ShipmentValidationError("RECIPIENT_SNAPSHOT_INVALID", "Canonical order recipient payload is invalid.", 409);
+    }
+    const source = payload?.recipient;
+    if (!source || typeof source !== "object" || Array.isArray(source)) return;
+    const value = (field: string) => typeof source[field] === "string" ? source[field].trim() : "";
+    const nullable = (field: string) => value(field) || null;
+    const recipient = {
+      name: value("name"),
+      email: value("email"),
+      phone: nullable("phone"),
+      address1: value("address1"),
+      address2: nullable("address2"),
+      countryCode: value("countryCode").toUpperCase(),
+      cityName: value("cityName"),
+      cityCode: value("cityCode"),
+      districtName: value("districtName"),
+      districtID: source.districtID == null || source.districtID === "" ? null : String(source.districtID).trim(),
+      zip: nullable("zip"),
+    };
+
+    this.db.prepare(`INSERT INTO shipment_recipient_snapshots
+      (id,shipment_id,name,email,phone,address1,address2,country_code,city_name,city_code,district_name,district_id,zip,
+       snapshot_hash,created_operation_id,created_actor_id,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      randomUUID(), input.shipmentId, recipient.name, recipient.email, recipient.phone, recipient.address1, recipient.address2,
+      recipient.countryCode, recipient.cityName, recipient.cityCode, recipient.districtName, recipient.districtID, recipient.zip,
+      digest(recipient), input.operationId, input.actorId, input.createdAt,
+    );
+  }
+
   private activeDiagnostic(shipmentId: string, shipmentState: ShipmentState): ShipmentActiveDiagnostic | null {
     const outbound = this.db.prepare(`SELECT state,last_error_code FROM channel_shipment_outbound_jobs
       WHERE shipment_id=? ORDER BY datetime(updated_at) DESC,id DESC LIMIT 1`).get(shipmentId) as any;
@@ -253,6 +301,7 @@ export class ShipmentService {
       this.db.prepare(`INSERT INTO shipment_preparations
         (id,order_id,reservation_id,state,created_operation_id,created_at,updated_at)
         VALUES (?,?,?,'PREPARING',?,?,?)`).run(shipmentId, reservation.orderId, reservationId, operationId, packedAt, packedAt);
+      this.snapshotMarketplaceRecipient({ shipmentId, orderId: reservation.orderId, operationId, actorId: actor.id, createdAt: packedAt });
       this.insertStateEvent(shipmentId, null, "PREPARING", operationId, actor.id, { source: "PACKED", reservationId }, packedAt);
       return { shipment: this.getShipment(shipmentId), reservation };
     }).immediate();

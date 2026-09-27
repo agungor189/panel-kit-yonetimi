@@ -1084,19 +1084,37 @@ export class ShopifyGatewayTransport {
             || order.billingAddress
             || {};
 
+          const countryCode =
+            clean(address.countryCodeV2).toUpperCase()
+            || "TR";
+          const locality = clean(address.city);
+          const province = clean(address.province);
+          const provinceCode = clean(address.provinceCode);
+          const sameArea = locality.localeCompare(
+            province,
+            "tr-TR",
+            { sensitivity: "base" },
+          ) === 0;
+          const turkishAddress = countryCode === "TR";
+
           const recipient = {
             name: clean(address.name),
             email: clean(order.email),
             phone: clean(address.phone),
             address1: clean(address.address1),
             address2: clean(address.address2),
-            cityName: clean(address.city),
-            districtName: "",
-            province: clean(address.province),
+            cityName:
+              turkishAddress
+                ? province || locality
+                : locality || province,
+            cityCode: provinceCode,
+            districtName:
+              turkishAddress && province && !sameArea
+                ? locality
+                : "",
+            districtID: null,
             zip: clean(address.zip),
-            countryCode:
-              clean(address.countryCodeV2).toUpperCase()
-              || "TR",
+            countryCode,
           };
 
           // Keep the canonical raw payload stable with the V19 bootstrap
