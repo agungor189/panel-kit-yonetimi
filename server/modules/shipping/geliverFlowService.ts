@@ -94,6 +94,10 @@ type OfferPollLog = {
   providerShipmentId: string;
   statusCode: string | null;
   offerCount: number;
+  percentageCompleted: number | null;
+  hasError: boolean;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
   pollingAttempt: number;
   elapsedMs: number;
 };
@@ -496,8 +500,14 @@ export class GeliverFlowService {
       const elapsedMs = Math.max(0, now() - startedAt);
       const offerCount = response.offers?.list?.length || 0;
       const statusCode = optional(response.statusCode, "statusCode", 100);
-      this.logOfferPoll({ shipmentId: parent.shipment_id, providerShipmentId, statusCode, offerCount,
-        pollingAttempt: attempt, elapsedMs });
+      const percentageValue = response.offers?.percentageCompleted;
+      const parsedPercentage = percentageValue == null || percentageValue === "" ? NaN : Number(percentageValue);
+      const percentageCompleted = Number.isFinite(parsedPercentage) ? parsedPercentage : null;
+      const hasError = response.hasError === true;
+      const lastErrorCode = optional(response.lastErrorCode, "lastErrorCode", 100);
+      const lastErrorMessage = optional(response.lastErrorMessage, "lastErrorMessage", 500);
+      this.logOfferPoll({ shipmentId: parent.shipment_id, providerShipmentId, statusCode, offerCount, percentageCompleted,
+        hasError, lastErrorCode, lastErrorMessage, pollingAttempt: attempt, elapsedMs });
 
       this.throwIfProviderFailed(response);
       if (offerCount > 0) return this.withOfferPollingState(providerShipmentId, "READY");
@@ -529,8 +539,7 @@ export class GeliverFlowService {
 
   private offerGenerationCompleted(shipment: Shipment) {
     const statusCode = String(shipment.statusCode || "").toUpperCase();
-    const percentageCompleted = Number(shipment.offers?.percentageCompleted);
-    return statusCode === "GOT_OFFERS" || Number.isFinite(percentageCompleted) && percentageCompleted >= 100;
+    return statusCode === "GOT_OFFERS";
   }
 
   private withOfferPollingState(providerShipmentId: string, offerPollingState: OfferPollingState) {

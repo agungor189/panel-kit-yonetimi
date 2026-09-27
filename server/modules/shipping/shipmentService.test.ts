@@ -670,7 +670,7 @@ test("Geliver create binds once and polls the same provider shipment until async
   const [job] = geliver.prepareCreateJobs({ shipmentId: shipment.id, recipient, operationId: "async-offers", actor });
   const providerId = `provider-${job.providerOrderNumber}`;
   transport.queueGetResponses(
-    { statusCode: "CREATED", offers: { percentageCompleted: 30, list: [] } },
+    { statusCode: "CREATED", offers: { percentageCompleted: 100, list: [] } },
     readyOfferPatch(providerId),
   );
 
@@ -683,19 +683,45 @@ test("Geliver create binds once and polls the same provider shipment until async
   assert.equal(transport.getCalls, 2);
   assert.equal(db.prepare("SELECT COUNT(*) FROM geliver_provider_shipments").pluck().get(), 1);
   assert.equal(db.prepare("SELECT COUNT(*) FROM geliver_offer_observations").pluck().get(), 1);
-  assert.deepEqual(Object.keys(pollLogs[0]).sort(), ["elapsedMs", "offerCount", "pollingAttempt", "providerShipmentId", "shipmentId", "statusCode"]);
+  assert.deepEqual(Object.keys(pollLogs[0]).sort(), ["elapsedMs", "hasError", "lastErrorCode", "lastErrorMessage", "offerCount",
+    "percentageCompleted", "pollingAttempt", "providerShipmentId", "shipmentId", "statusCode"]);
   assert.deepEqual(pollLogs.map((entry) => ({
     shipmentId: entry.shipmentId,
     providerShipmentId: entry.providerShipmentId,
     statusCode: entry.statusCode,
     offerCount: entry.offerCount,
+    percentageCompleted: entry.percentageCompleted,
+    hasError: entry.hasError,
+    lastErrorCode: entry.lastErrorCode,
+    lastErrorMessage: entry.lastErrorMessage,
     pollingAttempt: entry.pollingAttempt,
     elapsedMs: entry.elapsedMs,
   })), [
-    { shipmentId: shipment.id, providerShipmentId: providerId, statusCode: "CREATED", offerCount: 0, pollingAttempt: 0, elapsedMs: 0 },
-    { shipmentId: shipment.id, providerShipmentId: providerId, statusCode: "CREATED", offerCount: 0, pollingAttempt: 1, elapsedMs: 1_000 },
-    { shipmentId: shipment.id, providerShipmentId: providerId, statusCode: "GOT_OFFERS", offerCount: 1, pollingAttempt: 2, elapsedMs: 2_000 },
+    { shipmentId: shipment.id, providerShipmentId: providerId, statusCode: "CREATED", offerCount: 0, percentageCompleted: 0,
+      hasError: false, lastErrorCode: null, lastErrorMessage: null, pollingAttempt: 0, elapsedMs: 0 },
+    { shipmentId: shipment.id, providerShipmentId: providerId, statusCode: "CREATED", offerCount: 0, percentageCompleted: 100,
+      hasError: false, lastErrorCode: null, lastErrorMessage: null, pollingAttempt: 1, elapsedMs: 1_000 },
+    { shipmentId: shipment.id, providerShipmentId: providerId, statusCode: "GOT_OFFERS", offerCount: 1, percentageCompleted: 100,
+      hasError: false, lastErrorCode: null, lastErrorMessage: null, pollingAttempt: 2, elapsedMs: 2_000 },
   ]);
+  db.close();
+});
+
+test("Geliver reports COMPLETE_EMPTY only for terminal GOT_OFFERS with no offers", async () => {
+  const { db, shipment, transport, geliver } = prepareLiveGeliver(marketplaceRecipient, undefined, {
+    offerPolling: { intervalMs: 1_000, timeoutMs: 12_000, sleep: async () => undefined },
+    logOfferPoll: () => undefined,
+  });
+  transport.createResponsePatch = { statusCode: "GOT_OFFERS", offers: { percentageCompleted: 100, list: [] } };
+  const [job] = geliver.prepareCreateJobs({ shipmentId: shipment.id, recipient, operationId: "complete-empty-offers", actor });
+
+  const provider = await geliver.processCreateJob(job.id);
+
+  assert.equal(provider.offerPollingState, "COMPLETE_EMPTY");
+  assert.equal(provider.offers.length, 0);
+  assert.equal(transport.createCalls, 1);
+  assert.equal(transport.getCalls, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM geliver_provider_shipments").pluck().get(), 1);
   db.close();
 });
 
@@ -734,9 +760,10 @@ test("Geliver offer polling times out without creating a duplicate and refresh c
 });
 
 test("Geliver FAILED status stops polling and exposes the provider error without recreating shipment", async () => {
+  const pollLogs: any[] = [];
   const { db, shipment, transport, geliver } = prepareLiveGeliver(marketplaceRecipient, undefined, {
     offerPolling: { intervalMs: 1_000, timeoutMs: 12_000, sleep: async () => undefined },
-    logOfferPoll: () => undefined,
+    logOfferPoll: (event: unknown) => pollLogs.push(event),
   });
   transport.createResponsePatch = {
     statusCode: "FAILED",
@@ -757,6 +784,18 @@ test("Geliver FAILED status stops polling and exposes the provider error without
   assert.equal(transport.getCalls, 0);
   assert.equal(db.prepare("SELECT COUNT(*) FROM geliver_provider_shipments").pluck().get(), 1);
   assert.equal(db.prepare("SELECT state FROM geliver_create_jobs WHERE id=?").pluck().get(job.id), "CREATED");
+  assert.deepEqual(pollLogs, [{
+    shipmentId: shipment.id,
+    providerShipmentId: `provider-${job.providerOrderNumber}`,
+    statusCode: "FAILED",
+    offerCount: 0,
+    percentageCompleted: 0,
+    hasError: true,
+    lastErrorCode: "ADDRESS_REJECTED",
+    lastErrorMessage: "Recipient district is not serviceable",
+    pollingAttempt: 0,
+    elapsedMs: 0,
+  }]);
   db.close();
 });
 
