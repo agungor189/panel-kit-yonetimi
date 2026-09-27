@@ -119,6 +119,32 @@ const vatBasisPoints = (taxLines: any[]) => {
 const clean = (value: unknown) =>
   String(value ?? "").trim();
 
+export const mapShopifyRecipient = (addressValue: unknown, emailValue: unknown) => {
+  const address = addressValue && typeof addressValue === "object" && !Array.isArray(addressValue)
+    ? addressValue as Record<string, unknown>
+    : {};
+  const countryCode = clean(address.countryCodeV2).toUpperCase() || "TR";
+  const locality = clean(address.city);
+  const province = clean(address.province);
+  const provinceCode = clean(address.provinceCode);
+  const sameArea = locality.localeCompare(province, "tr-TR", { sensitivity: "base" }) === 0;
+  const turkishAddress = countryCode === "TR";
+
+  return {
+    name: clean(address.name),
+    email: clean(emailValue),
+    phone: clean(address.phone),
+    address1: clean(address.address1),
+    address2: clean(address.address2),
+    cityName: turkishAddress ? province || locality : locality || province,
+    cityCode: provinceCode,
+    districtName: turkishAddress && province && !sameArea ? locality : "",
+    districtID: null,
+    zip: clean(address.zip),
+    countryCode,
+  };
+};
+
 const hash = (value: unknown) =>
   createHash("sha256")
     .update(JSON.stringify(value))
@@ -1079,43 +1105,10 @@ export class ShopifyGatewayTransport {
             );
           }
 
-          const address =
-            order.shippingAddress
-            || order.billingAddress
-            || {};
-
-          const countryCode =
-            clean(address.countryCodeV2).toUpperCase()
-            || "TR";
-          const locality = clean(address.city);
-          const province = clean(address.province);
-          const provinceCode = clean(address.provinceCode);
-          const sameArea = locality.localeCompare(
-            province,
-            "tr-TR",
-            { sensitivity: "base" },
-          ) === 0;
-          const turkishAddress = countryCode === "TR";
-
-          const recipient = {
-            name: clean(address.name),
-            email: clean(order.email),
-            phone: clean(address.phone),
-            address1: clean(address.address1),
-            address2: clean(address.address2),
-            cityName:
-              turkishAddress
-                ? province || locality
-                : locality || province,
-            cityCode: provinceCode,
-            districtName:
-              turkishAddress && province && !sameArea
-                ? locality
-                : "",
-            districtID: null,
-            zip: clean(address.zip),
-            countryCode,
-          };
+          const recipient = mapShopifyRecipient(
+            order.shippingAddress || order.billingAddress,
+            order.email,
+          );
 
           // Keep the canonical raw payload stable with the V19 bootstrap
           // ingestion already stored for existing Shopify orders.

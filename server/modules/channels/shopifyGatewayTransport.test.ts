@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ShopifyGatewayTransport } from "./shopifyGatewayTransport.js";
+import { mapShopifyRecipient, ShopifyGatewayTransport } from "./shopifyGatewayTransport.js";
 
 const config = {
   shop: "2b6rcy-br.myshopify.com",
@@ -9,6 +9,34 @@ const config = {
   apiVersion: "2026-07",
   locationId: "gid://shopify/Location/75228315715",
 };
+
+test("Shopify recipient mapping prioritizes structured Turkish locality and leaves same-area district unresolved", () => {
+  const base = {
+    name: "Test Customer",
+    phone: "+905000000000",
+    address1: "Bahçelievler, Adnan Kahveci Blv.",
+    address2: "Daire 4",
+    province: "İstanbul",
+    provinceCode: "34",
+    zip: "34180",
+    countryCodeV2: "TR",
+  };
+
+  assert.equal(mapShopifyRecipient({ ...base, city: "Bahçelievler" }, "customer@example.test").districtName, "Bahçelievler");
+  assert.deepEqual(mapShopifyRecipient({ ...base, city: "İstanbul" }, "customer@example.test"), {
+    name: "Test Customer",
+    email: "customer@example.test",
+    phone: "+905000000000",
+    address1: "Bahçelievler, Adnan Kahveci Blv.",
+    address2: "Daire 4",
+    cityName: "İstanbul",
+    cityCode: "34",
+    districtName: "",
+    districtID: null,
+    zip: "34180",
+    countryCode: "TR",
+  });
+});
 
 test("Shopify transport authenticates, verifies shop/location/scopes and reuses token", async () => {
   const calls: Array<{ url: string; init?: RequestInit }> = [];

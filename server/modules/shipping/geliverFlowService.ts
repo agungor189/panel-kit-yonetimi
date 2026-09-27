@@ -244,6 +244,13 @@ export class GeliverFlowService {
       .replace(/ı/g, "i");
   }
 
+  private geoText(value: unknown) {
+    return this.geoKey(value)
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim()
+      .replace(/\s+/g, " ");
+  }
+
   private recipientSnapshot(shipmentId: string): RecipientInput | null {
     const row = this.db.prepare(`
       SELECT
@@ -279,16 +286,17 @@ export class GeliverFlowService {
     const original = existing ?? this.recipientFromChannelOrder(shipmentId);
     const countryCode = required(original.countryCode, "recipient.countryCode", 3).toUpperCase();
     const address1 = required(original.address1, "recipient.address1", 500);
+    const address2 = optional(original.address2, "recipient.address2", 500);
     const explicitDistrict = String(original.districtName ?? "").trim();
     const source = {
       ...original,
       countryCode,
       address1,
-      districtName: explicitDistrict || (countryCode === "TR" ? String(address1.split(",")[0] ?? "").trim() : ""),
+      address2,
+      districtName: explicitDistrict,
     };
 
     const cityName = required(source.cityName, "recipient.cityName", 100);
-    const districtName = required(source.districtName, "recipient.districtName", 100);
 
     const cities = await this.transport.listCities(countryCode);
 
@@ -309,14 +317,39 @@ export class GeliverFlowService {
       String(city.cityCode),
     );
 
-    const district = districts.find(
-      (candidate) => this.geoKey(candidate.name) === this.geoKey(districtName)
-    );
+    const districtMatches = explicitDistrict
+      ? districts.filter((candidate) => this.geoKey(candidate.name) === this.geoKey(explicitDistrict))
+      : countryCode === "TR"
+        ? (() => {
+            const normalizedAddress = ` ${this.geoText([address1, address2].filter(Boolean).join(" "))} `;
+            return districts.filter((candidate) => {
+              const districtName = this.geoText(candidate.name);
+              return districtName.length > 0 && normalizedAddress.includes(` ${districtName} `);
+            });
+          })()
+        : [];
+
+    if (districtMatches.length > 1) {
+      throw new ShipmentValidationError(
+        "GELIVER_GEO_DISTRICT_AMBIGUOUS",
+        `Sipariş adresi '${cityName}' için birden fazla Geliver ilçesiyle eşleşiyor; canonical sipariş kaydını düzeltin.`,
+        409,
+      );
+    }
+
+    const district = districtMatches[0];
 
     if (!district?.districtID) {
+      if (!explicitDistrict) {
+        throw new ShipmentValidationError(
+          "RECIPIENT_ADDRESS_INCOMPLETE",
+          `Sipariş teslimat bilgileri eksik: ilçe '${cityName}' adresinden Geliver ilçe listesiyle doğrulanamadı.`,
+          409,
+        );
+      }
       throw new ShipmentValidationError(
         "GELIVER_GEO_DISTRICT_NOT_FOUND",
-        `Geliver district could not be resolved for '${districtName}' in '${cityName}'.`,
+        `Geliver district could not be resolved for '${explicitDistrict}' in '${cityName}'.`,
         409,
       );
     }
@@ -329,7 +362,7 @@ export class GeliverFlowService {
         countryCode,
       ),
       address1: required(source.address1, "recipient.address1", 500),
-      address2: optional(source.address2, "recipient.address2", 500),
+      address2,
       countryCode,
       cityName: required(city.name, "geo.city.name", 100),
       cityCode: required(city.cityCode, "geo.city.cityCode", 30),
@@ -824,26 +857,15 @@ export class GeliverFlowService {
       recipient?.districtName ?? "",
     ).trim();
 
-    // Shopify MailingAddress does not provide a dedicated Turkish
-    // district field. For TR orders only, use the first address1
-    // segment as a district candidate when districtName is missing.
-    // resolveRecipient() still verifies this candidate against
-    // Geliver's provider-native district list before shipment creation.
     const address1 = String(
       recipient?.address1 ?? "",
     ).trim();
-
-    const inferredDistrict =
-      !explicitDistrict
-      && countryCode === "TR"
-        ? String(address1.split(",")[0] ?? "").trim()
-        : explicitDistrict;
 
     const normalizedRecipient = {
       ...recipient,
       countryCode,
       address1,
-      districtName: inferredDistrict,
+      districtName: explicitDistrict,
     };
 
     const requiredFields = [
@@ -853,8 +875,9 @@ export class GeliverFlowService {
       "address1",
       "countryCode",
       "cityName",
-      "districtName",
     ];
+
+    if (countryCode !== "TR") requiredFields.push("districtName");
 
     const missing = requiredFields.filter((field) =>
       !String(normalizedRecipient?.[field] ?? "").trim()

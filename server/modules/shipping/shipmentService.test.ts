@@ -608,6 +608,13 @@ class OfficialGeliverFixture implements GeliverTransport {
   async listDistricts(countryCode: string, cityCode: string) {
     return [
       {
+        name: "Bahçelievler",
+        districtID: 108629,
+        cityCode,
+        countryCode,
+        regionCode: "EUROPE",
+      },
+      {
         name: "Ümraniye",
         districtID: 108631,
         cityCode,
@@ -628,12 +635,12 @@ class OfficialGeliverFixture implements GeliverTransport {
   queueGetResponses(...patches: Array<Partial<Shipment>>) { this.getResponsePatches.push(...patches); }
 }
 
-const prepareLiveGeliver = (recipientFixture = marketplaceRecipient, onOperationalException?: (event: { shipmentId: string; jobId: string }) => void | Promise<unknown>, flowConfig: Record<string, unknown> = {}) => {
+const prepareLiveGeliver = (recipientFixture = marketplaceRecipient, onOperationalException?: (event: { shipmentId: string; jobId: string }) => void | Promise<unknown>, flowConfig: Record<string, unknown> = {}, packageWeightGrams = 1200) => {
   const fixture = setup(recipientFixture);
   const shipping = new ShipmentService(fixture.db);
   const shipment = shipping.packAndPrepare({ reservationId: "reservation", operationId: "live-pack", actor }).shipment;
   shipping.definePackages({ shipmentId: shipment.id, operationId: "live-packages", actor, packages: [{ packageNumber: 1,
-    measured: { lengthMm: 300, widthMm: 200, heightMm: 100, weightGrams: 1200 },
+    measured: { lengthMm: 300, widthMm: 200, heightMm: 100, weightGrams: packageWeightGrams },
     contents: [{ productId: "part", quantityBaseInt: 2 }] }] });
   const transport = new OfficialGeliverFixture();
   const geliver = new GeliverFlowService(fixture.db, transport, {
@@ -762,7 +769,7 @@ test("Geliver offer polling times out without creating a duplicate and refresh c
 test("Geliver FAILED status stops polling and exposes the provider error without recreating shipment", async () => {
   const pollLogs: any[] = [];
   const { db, shipment, transport, geliver } = prepareLiveGeliver(marketplaceRecipient, undefined, {
-    offerPolling: { intervalMs: 1_000, timeoutMs: 12_000, sleep: async () => undefined },
+    offerPolling: { intervalMs: 1_000, timeoutMs: 12_000, now: () => 0, sleep: async () => undefined },
     logOfferPoll: (event: unknown) => pollLogs.push(event),
   });
   transport.createResponsePatch = {
@@ -799,10 +806,10 @@ test("Geliver FAILED status stops polling and exposes the provider error without
   db.close();
 });
 
-test("Geliver infers missing Turkish Shopify district from address1 and verifies it against provider geo data", async () => {
+test("Geliver resolves Bahçelievler from a Turkish Shopify address only through provider geo data", async () => {
   const { db, shipment, geliver } = prepareLiveGeliver({
     ...marketplaceRecipient,
-    address1: "Ümraniye, Test Sokak 1",
+    address1: "Bahçelievler, Adnan Kahveci Blv., No: 1",
     phone: "5325401212",
     cityName: "İstanbul",
     countryCode: "TR",
@@ -818,8 +825,106 @@ test("Geliver infers missing Turkish Shopify district from address1 and verifies
   assert.equal(resolvedRecipient.phone, "+905325401212");
   assert.equal(resolvedRecipient.cityName, "İstanbul");
   assert.equal(resolvedRecipient.cityCode, "34");
-  assert.equal(resolvedRecipient.districtName, "Ümraniye");
-  assert.equal(resolvedRecipient.districtID, 108631);
+  assert.equal(resolvedRecipient.districtName, "Bahçelievler");
+  assert.equal(resolvedRecipient.districtID, 108629);
+
+  db.close();
+});
+
+test("Geliver resolves Kadıköy when its exact normalized name occurs in the Shopify address", async () => {
+  const { db, shipment, geliver } = prepareLiveGeliver({
+    ...marketplaceRecipient,
+    address1: "Caferağa Mah., Test Sokak 1",
+    address2: "Kadıköy / İstanbul",
+    cityName: "İstanbul",
+    countryCode: "TR",
+    districtName: "",
+    cityCode: "",
+    districtID: null,
+  });
+
+  const resolvedRecipient = await geliver.resolveRecipient({ shipmentId: shipment.id });
+
+  assert.equal(resolvedRecipient.districtName, "Kadıköy");
+  assert.equal(resolvedRecipient.districtID, 108630);
+
+  db.close();
+});
+
+test("Geliver blocks an unknown district instead of inventing one from Shopify address text", async () => {
+  const { db, shipment, geliver } = prepareLiveGeliver({
+    ...marketplaceRecipient,
+    address1: "Bilinmeyen Yer, Test Sokak 1",
+    cityName: "İstanbul",
+    countryCode: "TR",
+    districtName: "",
+    cityCode: "",
+    districtID: null,
+  });
+
+  await assert.rejects(
+    () => geliver.resolveRecipient({ shipmentId: shipment.id }),
+    (error: any) => error.code === "RECIPIENT_ADDRESS_INCOMPLETE" && /ilçe/i.test(error.message),
+  );
+
+  db.close();
+});
+
+test("Geliver blocks an ambiguous Shopify address containing more than one provider district", async () => {
+  const { db, shipment, geliver } = prepareLiveGeliver({
+    ...marketplaceRecipient,
+    address1: "Kadıköy Ümraniye bağlantı yolu, No: 1",
+    cityName: "İstanbul",
+    countryCode: "TR",
+    districtName: "",
+    cityCode: "",
+    districtID: null,
+  });
+
+  await assert.rejects(
+    () => geliver.resolveRecipient({ shipmentId: shipment.id }),
+    (error: any) => error.code === "GELIVER_GEO_DISTRICT_AMBIGUOUS",
+  );
+
+  db.close();
+});
+
+test("Geliver prioritizes a structured Shopify district over district names in address text", async () => {
+  const { db, shipment, geliver } = prepareLiveGeliver({
+    ...marketplaceRecipient,
+    address1: "Ümraniye bağlantı yolu, No: 1",
+    cityName: "İstanbul",
+    countryCode: "TR",
+    districtName: "Kadıköy",
+    cityCode: "",
+    districtID: null,
+  });
+
+  const resolvedRecipient = await geliver.resolveRecipient({ shipmentId: shipment.id });
+
+  assert.equal(resolvedRecipient.districtName, "Kadıköy");
+  assert.equal(resolvedRecipient.districtID, 108630);
+
+  db.close();
+});
+
+test("Geliver receives 2.03 kg when the canonical package snapshot stores 2030 grams", async () => {
+  const { db, shipment, geliver } = prepareLiveGeliver(marketplaceRecipient, undefined, {}, 2030);
+  const resolvedRecipient = await geliver.resolveRecipient({ shipmentId: shipment.id });
+
+  const [job] = geliver.prepareCreateJobs({
+    shipmentId: shipment.id,
+    recipient: resolvedRecipient,
+    operationId: "weight-kg-boundary",
+    actor,
+  });
+  const request = JSON.parse(String(
+    db.prepare("SELECT request_json FROM geliver_create_jobs WHERE id=?").pluck().get(job.id)
+  ));
+
+  assert.equal(db.prepare("SELECT weight_grams FROM shipment_packages WHERE shipment_id=?").pluck().get(shipment.id), 2030);
+  assert.equal(request.weight, "2.03");
+  assert.equal(request.massUnit, "kg");
 
   db.close();
 });
