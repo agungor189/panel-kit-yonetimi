@@ -1,4 +1,5 @@
 import express from "express";
+import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
 import { WarehousePicker, WarehouseService, WarehouseServiceError } from "../services/warehouseService.js";
 import { WarehouseAdminService, type WarehouseActor } from "../services/warehouseAdminService.js";
@@ -281,8 +282,9 @@ export function createWarehouseRouter({
     commandType: string,
     capability: string,
     payload: Record<string, unknown>,
+    operationIdOverride?: string,
   ) => ({
-    operationId: operationIdFromRequest(req),
+    operationId: operationIdOverride ?? operationIdFromRequest(req),
     commandType,
     payload,
     actor: {
@@ -740,6 +742,58 @@ export function createWarehouseRouter({
           return { statusCode: 200, body: { success: true, contract: "dsdst.shipment.v1", data: data.shipment } };
         });
         return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
+      } catch (error) { return handleServiceError(res, error); }
+    });
+
+  router.post("/shipping/shipments/bulk-handoff", authenticate("write:warehouse_status"), requireWarehouseUser,
+    requireWarehousePermission("shipping:dispatch"), (req, res) => {
+      try {
+        const batchOperationId = operationIdFromRequest(req);
+        const rawIds = req.body?.shipmentIds;
+        if (!batchOperationId || batchOperationId.length > 200) throw new CommandFoundationError(400, "INVALID_COMMAND", "A valid batch idempotency key is required.");
+        if (!Array.isArray(rawIds) || rawIds.length === 0) throw new ShipmentValidationError("BULK_HANDOFF_SHIPMENTS_REQUIRED", "shipmentIds must be a non-empty array.");
+        if (rawIds.length > 50) throw new ShipmentValidationError("BULK_HANDOFF_LIMIT_EXCEEDED", "A bulk handoff may contain at most 50 shipments.");
+        const shipmentIds = rawIds.map((value: unknown) => typeof value === "string" ? value.trim() : "");
+        if (shipmentIds.some((value: string) => !value || value.length > 500) || new Set(shipmentIds).size !== shipmentIds.length) {
+          throw new ShipmentValidationError("BULK_HANDOFF_SHIPMENT_ID_INVALID", "Shipment IDs must be unique non-empty strings.", 409);
+        }
+        const handedOffAt = req.body?.handedOffAt;
+        const handoffEvidence = req.body?.handoffEvidence;
+        if (typeof handedOffAt !== "string" || !Number.isFinite(Date.parse(handedOffAt))) throw new ShipmentValidationError("SHIPMENT_VALIDATION_FAILED", "handedOffAt must be an ISO timestamp.");
+        if (!handoffEvidence) throw new ShipmentValidationError("HANDOFF_EVIDENCE_REQUIRED", "Physical handoff evidence is required.", 409);
+        const manifest = commandExecutor.execute(commandRequest(req, res, "shipping.bulk-handoff.manifest.v1", "shipping:dispatch",
+          { shipmentIds, handedOffAt, handoffEvidence }), () => ({ statusCode: 202,
+          body: { success: true, contract: "dsdst.shipment-bulk-handoff-manifest.v1", data: { shipmentIds } } }));
+        const results = shipmentIds.map((shipmentId: string) => {
+          const childOperationId = `bulk-handoff:${createHash("sha256").update(JSON.stringify({ batchOperationId, shipmentId })).digest("hex")}`;
+          let before: any = null;
+          try { before = shipmentService.getShipment(shipmentId); } catch { /* canonical command reports it */ }
+          try {
+            const payload = { shipmentId, handedOffAt, handoffEvidence, actualCharge: null };
+            const outcome = commandExecutor.execute(commandRequest(req, res, "shipping.handoff.confirm.v1", "shipping:dispatch", payload, childOperationId), (context) => {
+              const data = shipmentService.confirmHandoff({ shipmentId, handedOffAt, handoffEvidence, operationId: childOperationId,
+                actor: { id: actor(res).id, name: actor(res).username } });
+              for (const event of data.outbox) context.addOutbox(event);
+              context.addOutbox({ topic: "shipping", eventType: "shipping.dispatched.v1", aggregateType: "shipment", aggregateId: shipmentId,
+                payload: { shipment_id: shipmentId, reservation_id: data.shipment.reservationId } });
+              return { statusCode: 200, body: { success: true, contract: "dsdst.shipment.v1", data: data.shipment } };
+            });
+            const shipment = (outcome.result.body as any).data;
+            return { shipmentId, orderNumber: shipment.orderNumber ?? before?.orderNumber ?? null, success: true,
+              resultingState: shipment.state, replayed: outcome.replayed };
+          } catch (error) {
+            if (!(error instanceof CommandFoundationError) && !(error instanceof ShipmentValidationError)) throw error;
+            let current = before;
+            try { current = shipmentService.getShipment(shipmentId); } catch { /* may not exist */ }
+            return { shipmentId, orderNumber: current?.orderNumber ?? null, success: false, resultingState: current?.state ?? null,
+              errorCode: error.code, message: error.message };
+          }
+        });
+        const failed = results.filter((result) => !result.success).length;
+        const alreadyProcessed = results.filter((result) => result.success && result.replayed).length;
+        return res.json({ success: true, contract: "dsdst.shipment-bulk-handoff.v1", batchOperationId,
+          batchReplayed: manifest.replayed, data: results, summary: { requested: shipmentIds.length,
+            dispatched: shipmentIds.length - failed - alreadyProcessed, failed, alreadyProcessed } });
       } catch (error) { return handleServiceError(res, error); }
     });
 
