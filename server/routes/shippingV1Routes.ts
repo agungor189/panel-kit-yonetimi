@@ -208,8 +208,8 @@ export function createShippingV1Router(dependencies: Dependencies) {
         return { statusCode: 202, body: { success: true, contract: "dsdst.geliver-live-offers.v2", data: { jobs } } };
       });
       const jobs = (outcome.result.body as any).data.jobs as Array<{ id: string }>;
-      for (const job of jobs) await geliver.processCreateJob(job.id);
-      const data = await geliver.refreshShipment(req.params.id);
+      const data = [];
+      for (const job of jobs) data.push(await geliver.processCreateJob(job.id));
       return res.status(200).json({ success: true, contract: "dsdst.geliver-live-offers.v2", data, idempotent: outcome.replayed });
     } catch (error) { return sendError(error, res); }
   });

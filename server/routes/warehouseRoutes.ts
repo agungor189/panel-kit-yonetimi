@@ -671,8 +671,8 @@ export function createWarehouseRouter({
             aggregateId: req.params.id, payload: { shipment_id: req.params.id, job_ids: jobs.map((job) => job.id) } });
           return { statusCode: 202, body: { success: true, contract: "dsdst.geliver-live-offers.v2", data: { jobs } } };
         });
-        for (const job of (outcome.result.body as any).data.jobs) await geliverService.processCreateJob(job.id);
-        const data = await geliverService.refreshShipment(req.params.id);
+        const data = [];
+        for (const job of (outcome.result.body as any).data.jobs) data.push(await geliverService.processCreateJob(job.id));
         return res.json({ success: true, contract: "dsdst.geliver-live-offers.v2", data, idempotent: outcome.replayed });
       } catch (error) { return handleServiceError(res, error); }
     });

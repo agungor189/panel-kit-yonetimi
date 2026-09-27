@@ -86,6 +86,17 @@ const normalizeRecipientPhone = (
 
 const at = () => new Date().toISOString();
 const money = (minor: number) => `${Math.floor(minor / 100)}.${String(minor % 100).padStart(2, "0")}`;
+const sleep = (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+
+type OfferPollingState = "PENDING" | "READY" | "TIMED_OUT" | "COMPLETE_EMPTY";
+type OfferPollLog = {
+  shipmentId: string;
+  providerShipmentId: string;
+  statusCode: string | null;
+  offerCount: number;
+  pollingAttempt: number;
+  elapsedMs: number;
+};
 
 export const VERIFIED_GELIVER_CONTRACT = {
   contract: "dsdst.carrier-adapter.geliver.v2",
@@ -192,6 +203,13 @@ export class GeliverFlowService {
       senderAddressId: string | null;
       sourceIdentifier: string | null;
       onOperationalException?: (event: { shipmentId: string; jobId: string }) => void | Promise<unknown>;
+      offerPolling?: {
+        intervalMs?: number;
+        timeoutMs?: number;
+        now?: () => number;
+        sleep?: (milliseconds: number) => Promise<void>;
+      };
+      logOfferPoll?: (event: OfferPollLog) => void;
     }) {
     this.reconciliationGuard = new ReconciliationScopeGuard(db);
   }
@@ -379,7 +397,7 @@ export class GeliverFlowService {
     if (!job) throw new ShipmentValidationError("GELIVER_CREATE_JOB_NOT_FOUND", "Geliver create job was not found.", 404);
     this.assertShipmentAllowed(job.shipment_id);
     const bound = this.db.prepare("SELECT provider_shipment_id FROM geliver_provider_shipments WHERE create_job_id=?").get(jobId) as any;
-    if (bound) return this.refreshProviderShipment(bound.provider_shipment_id);
+    if (bound) return this.pollProviderShipment(bound.provider_shipment_id);
     if (job.state === "RECONCILE_REQUIRED" || job.state === "PROCESSING") return this.reconcileCreate(job);
     if (job.state !== "PENDING") throw new ShipmentValidationError("GELIVER_CREATE_STATE_CONFLICT", "Geliver create job cannot run.", 409);
     const startedAt = at();
@@ -389,9 +407,9 @@ export class GeliverFlowService {
       this.db.prepare(`INSERT INTO geliver_create_attempts (id,job_id,attempt_number,state,started_at)
         SELECT ?,?,attempt_count,'STARTED',? FROM geliver_create_jobs WHERE id=?`).run(attemptId, jobId, startedAt, jobId);
     }).immediate();
+    let response: Shipment;
     try {
-      const response = await this.transport.create(JSON.parse(job.request_json));
-      return this.bindCreated(jobId, response, "CREATE_RESPONSE", attemptId);
+      response = await this.transport.create(JSON.parse(job.request_json));
     } catch (error) {
       const info = errorInfo(error);
       this.db.transaction(() => {
@@ -403,13 +421,18 @@ export class GeliverFlowService {
       this.notifyOperationalException(job.shipment_id, jobId);
       throw error;
     }
+    const created = this.bindCreated(jobId, response, "CREATE_RESPONSE", attemptId);
+    return this.pollProviderShipment(created.providerShipmentId, response);
   }
 
   private async reconcileCreate(job: any) {
     const matches = (await this.transport.listByOrderNumber(job.provider_order_number))
       .filter((shipment) => shipment.order?.orderNumber === job.provider_order_number);
     this.db.prepare("UPDATE geliver_create_jobs SET reconciliation_count=reconciliation_count+1,updated_at=? WHERE id=?").run(at(), job.id);
-    if (matches.length === 1) return this.bindCreated(job.id, matches[0], "ORDER_NUMBER_RECONCILIATION", null);
+    if (matches.length === 1) {
+      const created = this.bindCreated(job.id, matches[0], "ORDER_NUMBER_RECONCILIATION", null);
+      return this.pollProviderShipment(created.providerShipmentId, matches[0]);
+    }
     if (matches.length > 1) {
       this.notifyOperationalException(job.shipment_id, job.id);
       throw new ShipmentValidationError("GELIVER_DUPLICATE_PROVIDER_SHIPMENT", "More than one Geliver shipment has the request orderNumber.", 502);
@@ -447,17 +470,71 @@ export class GeliverFlowService {
     const shipmentId = required(shipmentIdValue, "shipmentId", 200);
     const rows = this.db.prepare("SELECT provider_shipment_id FROM geliver_provider_shipments WHERE shipment_id=? ORDER BY package_id").all(shipmentId) as any[];
     if (!rows.length) throw new ShipmentValidationError("GELIVER_SHIPMENT_NOT_CREATED", "Create Geliver shipments before refreshing offers.", 409);
-    for (const row of rows) await this.refreshProviderShipment(row.provider_shipment_id);
-    return this.getLiveState(shipmentId);
+    const live = [];
+    for (const row of rows) live.push(await this.pollProviderShipment(row.provider_shipment_id));
+    return live;
   }
 
-  private async refreshProviderShipment(providerShipmentId: string) {
-    const response = await this.transport.get(providerShipmentId);
-    const artifactHash = await this.labelArtifactHash(response);
+  private async pollProviderShipment(providerShipmentId: string, initialResponse?: Shipment) {
     const parent = this.db.prepare("SELECT shipment_id FROM geliver_provider_shipments WHERE provider_shipment_id=?").get(providerShipmentId) as any;
     if (!parent) throw new ShipmentValidationError("GELIVER_PROVIDER_SHIPMENT_NOT_BOUND", "Geliver shipment is not bound locally.", 409);
-    this.db.transaction(() => { this.observe(parent.shipment_id, providerShipmentId, response, at(), artifactHash); this.reconcileAccepted(response, providerShipmentId, artifactHash); }).immediate();
-    return this.viewProviderShipment(providerShipmentId);
+    const intervalMs = this.config.offerPolling?.intervalMs ?? 1_000;
+    const timeoutMs = this.config.offerPolling?.timeoutMs ?? 12_000;
+    const now = this.config.offerPolling?.now ?? Date.now;
+    const wait = this.config.offerPolling?.sleep ?? sleep;
+    const startedAt = now();
+    let attempt = initialResponse ? 0 : 1;
+    let response = initialResponse ?? await this.transport.get(providerShipmentId);
+
+    while (true) {
+      const artifactHash = await this.labelArtifactHash(response);
+      this.db.transaction(() => {
+        this.observe(parent.shipment_id, providerShipmentId, response, at(), artifactHash);
+        this.reconcileAccepted(response, providerShipmentId, artifactHash);
+      }).immediate();
+
+      const elapsedMs = Math.max(0, now() - startedAt);
+      const offerCount = response.offers?.list?.length || 0;
+      const statusCode = optional(response.statusCode, "statusCode", 100);
+      this.logOfferPoll({ shipmentId: parent.shipment_id, providerShipmentId, statusCode, offerCount,
+        pollingAttempt: attempt, elapsedMs });
+
+      this.throwIfProviderFailed(response);
+      if (offerCount > 0) return this.withOfferPollingState(providerShipmentId, "READY");
+      if (this.offerGenerationCompleted(response)) return this.withOfferPollingState(providerShipmentId, "COMPLETE_EMPTY");
+      if (elapsedMs >= timeoutMs) return this.withOfferPollingState(providerShipmentId, "TIMED_OUT");
+
+      await wait(Math.min(intervalMs, timeoutMs - elapsedMs));
+      response = await this.transport.get(providerShipmentId);
+      attempt += 1;
+    }
+  }
+
+  private logOfferPoll(event: OfferPollLog) {
+    if (this.config.logOfferPoll) return this.config.logOfferPoll(event);
+    console.info(JSON.stringify({ event: "geliver.offer_poll", ...event }));
+  }
+
+  private throwIfProviderFailed(shipment: Shipment) {
+    if (String(shipment.statusCode || "").toUpperCase() !== "FAILED" && shipment.hasError !== true) return;
+    const providerCode = optional(shipment.lastErrorCode, "lastErrorCode", 100) || "UNKNOWN";
+    const providerMessage = optional(shipment.lastErrorMessage, "lastErrorMessage", 500);
+    const detail = [providerCode, providerMessage].filter(Boolean).join(": ");
+    throw new ShipmentValidationError(
+      "GELIVER_PROVIDER_FAILED",
+      `Geliver shipment failed${detail ? ` (${detail})` : ""}.`,
+      502,
+    );
+  }
+
+  private offerGenerationCompleted(shipment: Shipment) {
+    const statusCode = String(shipment.statusCode || "").toUpperCase();
+    const percentageCompleted = Number(shipment.offers?.percentageCompleted);
+    return statusCode === "GOT_OFFERS" || Number.isFinite(percentageCompleted) && percentageCompleted >= 100;
+  }
+
+  private withOfferPollingState(providerShipmentId: string, offerPollingState: OfferPollingState) {
+    return { ...this.viewProviderShipment(providerShipmentId), offerPollingState };
   }
 
   selectOffer(input: { shipmentId: string; offerId: string; operationId: string; actor: Actor; selectedAt?: string }) {
@@ -674,8 +751,12 @@ export class GeliverFlowService {
       ON x.offer_id=o.offer_id AND x.latest=o.observed_at WHERE o.provider_shipment_id=? ORDER BY CAST(o.amount AS REAL),o.offer_id`).all(providerId, providerId) as any[];
     const tracking = this.db.prepare("SELECT * FROM geliver_tracking_observations WHERE provider_shipment_id=? ORDER BY observed_at DESC,rowid DESC LIMIT 1").get(providerId) as any;
     const label = this.db.prepare("SELECT * FROM geliver_label_observations WHERE provider_shipment_id=? ORDER BY observed_at DESC,rowid DESC LIMIT 1").get(providerId) as any;
+    const providerStatusCode = tracking?.provider_state_code || row.provider_state_code || null;
+    const offerPollingState: OfferPollingState = offers.length > 0 ? "READY"
+      : String(providerStatusCode || "").toUpperCase() === "GOT_OFFERS" ? "COMPLETE_EMPTY" : "PENDING";
     return { provider: "GELIVER", providerShipmentId: providerId, packageId: row.package_id, providerOrderNumber: row.provider_order_number,
       createState: row.create_state, bookingState: row.accept_state || null, providerTransactionId: row.provider_transaction_id || null,
+      providerStatusCode, offerPollingState,
       barcode: row.booking_barcode || row.barcode || null,
       selectedOffer: row.selected_offer_id ? { id: row.selected_offer_id, carrier: row.provider_code, service: row.provider_service_code,
         amount: row.quote_amount, currency: row.quote_currency } : null,
