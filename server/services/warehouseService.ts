@@ -165,7 +165,28 @@ export class WarehouseService {
           SELECT SUM(COALESCE(si.quantity, 0))
           FROM sale_items si
           WHERE si.sale_id = s.id
-        ), COALESCE(s.total_quantity, 0)) AS total_quantity
+        ), COALESCE(s.total_quantity, 0)) AS total_quantity,
+        (
+          SELECT COUNT(DISTINCT COALESCE(si.product_id, si.id))
+          FROM sale_items si
+          WHERE si.sale_id = s.id
+        ) AS item_count,
+        EXISTS(
+          SELECT 1
+          FROM sale_items si
+          LEFT JOIN products p ON p.id = si.product_id
+          WHERE si.sale_id = s.id
+            AND (
+              LOWER(TRIM(COALESCE(p.product_type, ''))) = 'assembly'
+              OR EXISTS(SELECT 1 FROM product_bom b WHERE b.parent_product_id = si.product_id)
+            )
+        ) AS has_assembly,
+        EXISTS(
+          SELECT 1
+          FROM sale_items si
+          JOIN published_kits pk ON pk.product_id = si.product_id
+          WHERE si.sale_id = s.id AND pk.current_version_id IS NOT NULL
+        ) AS has_kit
       FROM sales s
       WHERE s.status IN (${placeholders})
       ORDER BY datetime(s.created_at) ASC, s.id ASC
@@ -182,6 +203,9 @@ export class WarehouseService {
         status: row.status,
         created_at: row.created_at,
         total_quantity: asNumber(row.total_quantity),
+        item_count: asNumber(row.item_count),
+        has_assembly: Number(row.has_assembly) === 1,
+        has_kit: Number(row.has_kit) === 1,
         picker: row.warehouse_picker_user_id ? {
           user_id: row.warehouse_picker_user_id,
           name: row.warehouse_picker_name,

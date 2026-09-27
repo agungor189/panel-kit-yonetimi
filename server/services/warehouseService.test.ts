@@ -40,6 +40,9 @@ const createSchema = () => db.exec(`
   CREATE TABLE product_bom (
     parent_product_id TEXT, component_product_id TEXT, quantity_per_unit REAL
   );
+  CREATE TABLE published_kits (
+    id TEXT PRIMARY KEY, product_id TEXT, current_version_id TEXT
+  );
   CREATE TABLE product_images (
     id TEXT PRIMARY KEY, product_id TEXT, path TEXT, sort_order INTEGER
   );
@@ -122,6 +125,35 @@ beforeEach(() => {
 });
 
 describe("WarehouseService güvenli toplama akışı", () => {
+  test("toplanabilir sipariş özeti ürün satırı sayısını ve canonical kit/assembly bilgisini tek listede döndürür", () => {
+    seed();
+    db.prepare("INSERT INTO products (id, sku, name, title, warehouse_location, central_stock, product_type, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run("assembly-1", "ASM-1", "Montaj", "Montaj ürünü", "B1", 10, "assembly", "Active");
+    db.prepare("INSERT INTO sale_items (id, sale_id, product_id, product_name, quantity, weight) VALUES (?, ?, ?, ?, ?, ?)")
+      .run("item-2", "order-1", "assembly-1", "Montaj ürünü", 3, 0);
+    db.prepare("INSERT INTO products (id, sku, name, title, warehouse_location, central_stock, product_type, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run("kit-1", "KIT-1", "Kit", "Yayınlanmış kit", "C1", 10, "kit", "Active");
+    db.prepare("INSERT INTO published_kits (id, product_id, current_version_id) VALUES (?, ?, ?)")
+      .run("published-kit-1", "kit-1", "kit-version-1");
+    db.prepare("INSERT INTO sale_items (id, sale_id, product_id, product_name, quantity, weight) VALUES (?, ?, ?, ?, ?, ?)")
+      .run("item-3", "order-1", "kit-1", "Yayınlanmış kit", 1, 0);
+
+    const summary = service.listPickableOrders({ page: 1, limit: 25 }).orders[0];
+
+    assert.equal(summary.item_count, 3);
+    assert.equal(summary.has_assembly, true);
+    assert.equal(summary.has_kit, true);
+    assert.equal(summary.total_quantity, 16);
+  });
+
+  test("normal sipariş assembly etiketi üretmez", () => {
+    seed();
+    const summary = service.listPickableOrders({ page: 1, limit: 25 }).orders[0];
+    assert.equal(summary.item_count, 1);
+    assert.equal(summary.has_assembly, false);
+    assert.equal(summary.has_kit, false);
+  });
+
   test("başlatma siparişi kullanıcıya kilitler ve başlangıç zamanını yazar", () => {
     seed();
     service.startPicking("order-1", alper);
