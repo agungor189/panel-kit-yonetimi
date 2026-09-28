@@ -589,6 +589,28 @@ export function createWarehouseRouter({
       }
     });
 
+  router.get("/shipping/packaging-types", authenticate("read:warehouse_orders"), requireWarehouseUser,
+    requireWarehousePermission("shipping:manage"), (req, res) => {
+      auditRead(req);
+      return res.json({ success: true, contract: "dsdst.packaging-type-list.v1", data: shipmentService.listPackagingTypes() });
+    });
+
+  router.post("/shipping/packaging-types", authenticate("write:warehouse_status"), requireWarehouseUser,
+    requireWarehousePermission("shipping:manage"), (req, res) => {
+      const payload = { name: req.body?.name, lengthMm: req.body?.lengthMm, widthMm: req.body?.widthMm,
+        heightMm: req.body?.heightMm, emptyWeightGrams: req.body?.emptyWeightGrams };
+      try {
+        const outcome = commandExecutor.execute(commandRequest(req, res, "shipping.packaging-type.create.v1", "shipping:manage", payload), (context) => {
+          const data = shipmentService.createPackagingType({ ...payload, operationId: operationIdFromRequest(req),
+            actor: { id: actor(res).id, name: actor(res).username } });
+          context.addOutbox({ topic: "shipping", eventType: "shipping.packaging-type.created.v1",
+            aggregateType: "packaging_type", aggregateId: data.id, payload: { packaging_type_id: data.id } });
+          return { statusCode: 201, body: { success: true, contract: "dsdst.packaging-type.v1", data } };
+        });
+        return res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
+      } catch (error) { return handleServiceError(res, error); }
+    });
+
   router.get("/shipping/shipments/:id", authenticate("read:warehouse_orders"), requireWarehouseUser,
     requireWarehousePermission("warehouse:pick_orders"), (req, res) => {
       try {

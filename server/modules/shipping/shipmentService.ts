@@ -7,6 +7,17 @@ import { ReconciliationScopeGuard } from "../reconciliation/reconciliationGuard.
 
 type Actor = { id: string; name?: string | null };
 type ShipmentState = "PREPARING" | "CARRIER_SELECTED" | "BOOKED" | "LABEL_READY" | "HANDED_OFF" | "DISPATCHED" | "CANCELLED" | "EXCEPTION";
+export type PackagingType = {
+  id: string;
+  name: string;
+  type: "BOX";
+  lengthMm: number;
+  widthMm: number;
+  heightMm: number;
+  emptyWeightGrams: number;
+  active: boolean;
+  updatedAt: string;
+};
 export type ShipmentDiagnosticStage = "booking" | "provider" | "label" | "tracking_outbound" | "other";
 export type ShipmentActiveDiagnostic = { code: string; stage: ShipmentDiagnosticStage; message: string };
 
@@ -178,6 +189,51 @@ export class ShipmentService {
     this.recipeResolver = options.recipeResolver || ((orderId, packageNumber) => this.resolveRecipe(orderId, packageNumber));
   }
 
+  listPackagingTypes(): PackagingType[] {
+    return (this.db.prepare(`SELECT id,name,type,
+      COALESCE(outer_length_mm,inner_length_mm) AS length_mm,
+      COALESCE(outer_width_mm,inner_width_mm) AS width_mm,
+      COALESCE(outer_height_mm,inner_height_mm) AS height_mm,
+      empty_weight_g,active,updated_at
+      FROM packaging_types WHERE active=1 ORDER BY name COLLATE NOCASE,id`).all() as any[]).map((row) => ({
+        id: String(row.id),
+        name: String(row.name),
+        type: "BOX",
+        lengthMm: Number(row.length_mm),
+        widthMm: Number(row.width_mm),
+        heightMm: Number(row.height_mm),
+        emptyWeightGrams: Number(row.empty_weight_g),
+        active: Boolean(row.active),
+        updatedAt: String(row.updated_at),
+      }));
+  }
+
+  createPackagingType(input: {
+    name: string;
+    lengthMm: number;
+    widthMm: number;
+    heightMm: number;
+    emptyWeightGrams: number;
+    operationId: string;
+    actor: Actor;
+  }): PackagingType {
+    const name = text(input.name, "name", 120);
+    text(input.operationId, "operationId");
+    actorInput(input.actor);
+    const lengthMm = positiveInteger(input.lengthMm, "lengthMm");
+    const widthMm = positiveInteger(input.widthMm, "widthMm");
+    const heightMm = positiveInteger(input.heightMm, "heightMm");
+    const emptyWeightGrams = positiveInteger(input.emptyWeightGrams, "emptyWeightGrams");
+    const duplicate = this.db.prepare("SELECT id FROM packaging_types WHERE active=1 AND lower(trim(name))=lower(?)").get(name) as any;
+    if (duplicate) throw new ShipmentValidationError("PACKAGING_TYPE_NAME_CONFLICT", "An active packaging type already uses this name.", 409);
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db.prepare(`INSERT INTO packaging_types
+      (id,name,type,outer_length_mm,outer_width_mm,outer_height_mm,empty_weight_g,active,created_at,updated_at)
+      VALUES (?,?,'BOX',?,?,?,?,1,?,?)`).run(id, name, lengthMm, widthMm, heightMm, emptyWeightGrams, now, now);
+    return this.listPackagingTypes().find((item) => item.id === id)!;
+  }
+
   private assertShipmentAllowed(shipmentId: string) {
     const error = (message: string) => new ShipmentValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409);
     this.reconciliationGuard.assertOrderForShipment(shipmentId, error);
@@ -312,6 +368,7 @@ export class ShipmentService {
     packages: Array<{
       packageNumber: number;
       measured?: { lengthMm: number; widthMm: number; heightMm: number; weightGrams: number } | null;
+      packagingTypeId?: string | null;
       recipePackageNumber?: number | null;
       contents: Array<{ productId: string; quantityBaseInt: number }>;
     }>;
@@ -356,6 +413,40 @@ export class ShipmentService {
             heightMm: positiveInteger(pack.measured.heightMm, "measured.heightMm"),
             weightGrams: positiveInteger(pack.measured.weightGrams, "measured.weightGrams"),
             recipeVersionRef: null, recipeHash: null, contents };
+        }
+        if (pack.packagingTypeId) {
+          const packagingTypeId = text(pack.packagingTypeId, `packages[${index}].packagingTypeId`, 200);
+          const packagingType = this.db.prepare(`SELECT id,name,type,
+            COALESCE(outer_length_mm,inner_length_mm) AS length_mm,
+            COALESCE(outer_width_mm,inner_width_mm) AS width_mm,
+            COALESCE(outer_height_mm,inner_height_mm) AS height_mm,
+            empty_weight_g,updated_at FROM packaging_types WHERE id=? AND active=1`).get(packagingTypeId) as any;
+          if (!packagingType) throw new ShipmentValidationError("PACKAGING_TYPE_NOT_FOUND", "The selected packaging type is not active.", 409);
+          const weightRows = new Map((this.db.prepare(`SELECT id,COALESCE(weight_grams,weight) AS unit_weight_grams
+            FROM products WHERE id IN (${contents.map(() => "?").join(",")})`).all(...contents.map((item) => item.productId)) as any[])
+            .map((row) => [String(row.id), Number(row.unit_weight_grams)]));
+          let weightGrams = positiveInteger(packagingType.empty_weight_g, "packagingType.emptyWeightGrams");
+          for (const item of contents) {
+            const unitWeightGrams = weightRows.get(item.productId);
+            if (!Number.isSafeInteger(unitWeightGrams) || Number(unitWeightGrams) <= 0) {
+              throw new ShipmentValidationError("PRODUCT_WEIGHT_REQUIRED", `Canonical product weight is required for ${item.productId}.`, 409);
+            }
+            const lineWeight = Number(unitWeightGrams) * item.quantityBaseInt;
+            if (!Number.isSafeInteger(lineWeight) || !Number.isSafeInteger(weightGrams + lineWeight)) {
+              throw new ShipmentValidationError("PACKAGE_WEIGHT_INVALID", "Calculated package weight exceeds the supported range.");
+            }
+            weightGrams += lineWeight;
+          }
+          const snapshot = { id: packagingType.id, name: packagingType.name, type: packagingType.type,
+            lengthMm: Number(packagingType.length_mm), widthMm: Number(packagingType.width_mm),
+            heightMm: Number(packagingType.height_mm), emptyWeightGrams: Number(packagingType.empty_weight_g),
+            updatedAt: packagingType.updated_at };
+          return { packageNumber: numbers[index], source: "RECIPE_ESTIMATE" as const,
+            lengthMm: positiveInteger(snapshot.lengthMm, "packagingType.lengthMm"),
+            widthMm: positiveInteger(snapshot.widthMm, "packagingType.widthMm"),
+            heightMm: positiveInteger(snapshot.heightMm, "packagingType.heightMm"), weightGrams,
+            recipeVersionRef: `packaging-type:${packagingType.id}:${packagingType.updated_at}`,
+            recipeHash: digest(snapshot), contents };
         }
         const recipeNumber = positiveInteger(pack.recipePackageNumber ?? pack.packageNumber, "recipePackageNumber");
         const recipe = this.recipeResolver(shipment.order_id, recipeNumber);
@@ -764,10 +855,11 @@ export class ShipmentService {
       };
     });
     const requiredContents = (this.db.prepare(`SELECT l.product_id,l.quantity_base_int,l.base_uom_code_snapshot,
-      p.sku,COALESCE(p.title,p.name,p.sku) AS title FROM inventory_reservation_lines l
+      p.sku,COALESCE(p.title,p.name,p.sku) AS title,COALESCE(p.weight_grams,p.weight) AS unit_weight_grams FROM inventory_reservation_lines l
       JOIN products p ON p.id=l.product_id WHERE l.reservation_id=? ORDER BY p.sku,l.product_id`).all(row.reservation_id) as any[])
       .map((line) => ({ productId: line.product_id, sku: line.sku, title: line.title,
-        quantityBaseInt: Number(line.quantity_base_int), baseUomCode: line.base_uom_code_snapshot }));
+        quantityBaseInt: Number(line.quantity_base_int), baseUomCode: line.base_uom_code_snapshot,
+        unitWeightGrams: Number(line.unit_weight_grams) }));
     return {
       id: row.id, orderId: row.order_id, orderNumber: row.order_code, sourceChannel: row.platform || "DIRECT",
       reservationId: row.reservation_id, state: row.state as ShipmentState, packageCount: Number(row.package_count), packages, requiredContents,

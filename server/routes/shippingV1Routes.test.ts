@@ -173,6 +173,7 @@ async function fixture(states: Array<"LABEL_READY" | "PREPARING">) {
   });
 
   return {
+    baseUrl,
     db,
     inventory,
     shipping,
@@ -184,6 +185,56 @@ async function fixture(states: Array<"LABEL_READY" | "PREPARING">) {
     })),
   };
 }
+
+test("packaging type commands are idempotent and drive canonical package weight", async () => {
+  const context = await fixture(["PREPARING"]);
+  try {
+    context.db.prepare("UPDATE products SET weight_grams=310 WHERE id='bulk-part'").run();
+    const create = () => fetch(`${context.baseUrl}/packaging-types`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-operation-id": "box-small-create" },
+      body: JSON.stringify({
+        name: "Küçük Koli",
+        lengthMm: 300,
+        widthMm: 200,
+        heightMm: 100,
+        emptyWeightGrams: 190,
+      }),
+    });
+
+    const created = await create();
+    assert.equal(created.status, 201);
+    const createdBody = await created.json() as any;
+    assert.equal(createdBody.idempotent, false);
+    assert.equal(createdBody.data.name, "Küçük Koli");
+
+    const replayed = await create();
+    assert.equal(replayed.status, 201);
+    assert.equal((await replayed.json() as any).idempotent, true);
+
+    const listed = await fetch(`${context.baseUrl}/packaging-types`);
+    assert.equal(listed.status, 200);
+    const listBody = await listed.json() as any;
+    assert.equal(listBody.data.length, 1);
+
+    const packaged = await fetch(`${context.baseUrl}/shipments/${context.shipmentIds[0]}/packages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-operation-id": "package-with-small-box" },
+      body: JSON.stringify({
+        packages: [{
+          packageNumber: 1,
+          packagingTypeId: createdBody.data.id,
+          contents: [{ productId: "bulk-part", quantityBaseInt: 1 }],
+        }],
+      }),
+    });
+    assert.equal(packaged.status, 201);
+    const packagedBody = await packaged.json() as any;
+    assert.deepEqual(packagedBody.data[0].dimensionsMm, { length: 300, width: 200, height: 100 });
+    assert.equal(packagedBody.data[0].weightGrams, 500);
+    assert.equal(context.db.prepare("SELECT COUNT(*) FROM command_outbox WHERE event_type='shipping.packaging-type.created.v1'").pluck().get(), 1);
+  } finally { await context.close(); }
+});
 
 test("three LABEL_READY shipments dispatch through the canonical handoff flow", async () => {
   const context = await fixture(["LABEL_READY", "LABEL_READY", "LABEL_READY"]);

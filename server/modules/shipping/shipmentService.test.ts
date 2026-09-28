@@ -224,6 +224,61 @@ test("carrier choice is explicit, multi-package measurements prefer measured val
   db.close();
 });
 
+test("named packaging types calculate immutable shipment weight from canonical product plus empty box", () => {
+  const { db } = setup();
+  db.prepare("UPDATE products SET weight_grams=45 WHERE id='part'").run();
+  const service = new ShipmentService(db);
+  const packagingType = service.createPackagingType({
+    name: "Orta Koli",
+    lengthMm: 400,
+    widthMm: 300,
+    heightMm: 250,
+    emptyWeightGrams: 190,
+    operationId: "box-create",
+    actor,
+  });
+  assert.equal(service.listPackagingTypes()[0].name, "Orta Koli");
+  const { shipment } = service.packAndPrepare({ reservationId: "reservation", operationId: "box-pack", actor });
+  const [shipmentPackage] = service.definePackages({
+    shipmentId: shipment.id,
+    operationId: "box-package",
+    actor,
+    packages: [{
+      packageNumber: 1,
+      packagingTypeId: packagingType.id,
+      contents: [{ productId: "part", quantityBaseInt: 2 }],
+    }],
+  });
+  assert.equal(shipmentPackage.measurementSource, "RECIPE_ESTIMATE");
+  assert.deepEqual(shipmentPackage.dimensionsMm, { length: 400, width: 300, height: 250 });
+  assert.equal(shipmentPackage.weightGrams, 280);
+  assert.match(shipmentPackage.recipeVersionRef, /^packaging-type:/);
+  assert.equal(service.getShipment(shipment.id).requiredContents[0].unitWeightGrams, 45);
+  db.close();
+});
+
+test("packaging type calculation fails closed when a product weight is missing", () => {
+  const { db } = setup();
+  const service = new ShipmentService(db);
+  const packagingType = service.createPackagingType({
+    name: "Eksik Ağırlık Test Kolisi",
+    lengthMm: 300,
+    widthMm: 200,
+    heightMm: 150,
+    emptyWeightGrams: 100,
+    operationId: "missing-box-create",
+    actor,
+  });
+  const { shipment } = service.packAndPrepare({ reservationId: "reservation", operationId: "missing-box-pack", actor });
+  assert.throws(() => service.definePackages({
+    shipmentId: shipment.id,
+    operationId: "missing-box-package",
+    actor,
+    packages: [{ packageNumber: 1, packagingTypeId: packagingType.id, contents: [{ productId: "part", quantityBaseInt: 2 }] }],
+  }), (error: unknown) => error instanceof ShipmentValidationError && error.code === "PRODUCT_WEIGHT_REQUIRED");
+  db.close();
+});
+
 test("booking replay/retry binds one provider shipment and pre-handoff cancel never dispatches", () => {
   const { db, inventory } = setup();
   const service = new ShipmentService(db);

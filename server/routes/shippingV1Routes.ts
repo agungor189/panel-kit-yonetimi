@@ -101,6 +101,23 @@ export function createShippingV1Router(dependencies: Dependencies) {
   router.get("/provider-contracts/geliver", dependencies.authorizeRead, (_req, res) =>
     res.json({ success: true, contract: "dsdst.carrier-provider-contract.v2", data: geliver.contract() }));
 
+  router.get("/packaging-types", dependencies.authorizeRead, (_req, res) =>
+    res.json({ success: true, contract: "dsdst.packaging-type-list.v1", data: service.listPackagingTypes() }));
+
+  router.post("/packaging-types", dependencies.authorizeManage, (req, res) => {
+    const payload = { name: req.body?.name, lengthMm: req.body?.lengthMm, widthMm: req.body?.widthMm,
+      heightMm: req.body?.heightMm, emptyWeightGrams: req.body?.emptyWeightGrams };
+    try {
+      const outcome = execute(req, "shipping:manage", "shipping.packaging-type.create.v1", payload, (context) => {
+        const data = service.createPackagingType({ ...payload, operationId: operationId(req), actor: actor(req) });
+        context.addOutbox({ topic: "shipping", eventType: "shipping.packaging-type.created.v1",
+          aggregateType: "packaging_type", aggregateId: data.id, payload: { packaging_type_id: data.id } });
+        return { statusCode: 201, body: { success: true, contract: "dsdst.packaging-type.v1", data } };
+      });
+      return send(res, outcome);
+    } catch (error) { return sendError(error, res); }
+  });
+
   router.get("/shipments", dependencies.authorizeRead, (req, res) => {
     try {
       const data = service.listShipments({
