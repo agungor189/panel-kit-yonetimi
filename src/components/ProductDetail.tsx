@@ -69,12 +69,26 @@ interface ProductDetailProps {
   onEdit: () => void;
 }
 
+type PurchaseHistoryEntry = {
+  purchaseNumber: string; orderDate: string; supplierName: string; supplierNo?: string | null; workflowState: string;
+  lotCode?: string | null; orderedTotalQuantity: number; boxCount?: number | null; unitsPerBox?: number | null;
+  boxWeightKg?: number | null; totalWeightKg?: number | null; partWeightG?: number | null;
+  supplierUnitPriceUsd?: number | null; lineTotalPurchaseUsd?: number | null; finalLandedCostTry?: number | null;
+  receivedAt?: string | null; acceptedQuantity?: number | null; acquisitionCostSnapshotId?: string | null;
+};
+
+const purchaseStateLabels: Record<string, string> = {
+  DRAFT: 'Taslak', ORDERED: 'Sipariş Verildi', IN_TRANSIT: 'Yolda', COST_PENDING: 'Maliyet Bekliyor',
+  RECEIPT_PENDING: 'Mal Kabul Bekliyor', COMPLETED: 'Tamamlandı',
+};
+
 export default function ProductDetail({ productId, onBack, onEdit }: ProductDetailProps) {
   const { isReadOnly } = useAuth();
   const { FormatAmount } = useCurrency();
   const [product, setProduct] = useState<Product | null>(null);
   const [activeImage, setActiveImage] = useState<string | null>(null);
   const [stockLogs, setStockLogs] = useState<any[]>([]);
+  const [purchaseHistory, setPurchaseHistory] = useState<PurchaseHistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -86,10 +100,14 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
   const loadData = async () => {
     try {
       setLoading(true);
-      const data = await api.get(`/products/${productId}`);
-      const logs = await api.get(`/stock/movements/${productId}`);
+      const [data, logs, historyResponse] = await Promise.all([
+        api.get(`/products/${productId}`),
+        api.get(`/stock/movements/${productId}`),
+        api.get(`/procurement/v1/products/${productId}/history`).catch(() => ({ data: [] })),
+      ]);
       setProduct(data);
       setStockLogs(logs);
+      setPurchaseHistory(historyResponse.data || []);
       if (data.images?.length > 0) setActiveImage(data.images[0].path);
     } catch (err) {
       console.error(err);
@@ -398,6 +416,34 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
            <Card>
               <div className="p-6 border-b border-border-color flex items-center space-x-2">
                 <History className="w-4 h-4 text-text-muted" />
+                <div><h3 className="font-bold text-text-main text-sm">Satın Alma / Parti Geçmişi</h3><p className="text-xs text-text-muted">Aktif siparişler ve tamamlanan mal kabuller immutable satın alma kayıtlarından gösterilir.</p></div>
+              </div>
+              <div className="divide-y divide-border-color">
+                {purchaseHistory.map((entry) => (
+                  <div key={`${entry.purchaseNumber}-${entry.acquisitionCostSnapshotId || entry.orderDate}`} className="p-5 space-y-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3"><div><strong className="text-text-main">{entry.purchaseNumber}</strong><p className="text-xs text-text-muted">Sipariş: {new Date(entry.orderDate).toLocaleDateString('tr-TR')} · {entry.supplierName}</p></div><Badge>{purchaseStateLabels[entry.workflowState] || entry.workflowState}</Badge></div>
+                    <div className="grid gap-x-6 gap-y-2 text-xs sm:grid-cols-2 xl:grid-cols-3">
+                      <HistoryFact label="Tedarik No" value={entry.supplierNo || '—'} />
+                      <HistoryFact label="Parti" value={entry.lotCode || 'Henüz girilmedi'} />
+                      <HistoryFact label="Sipariş" value={`${entry.orderedTotalQuantity} adet`} />
+                      <HistoryFact label="Paketleme" value={entry.boxCount && entry.unitsPerBox ? `${entry.boxCount} koli × ${entry.unitsPerBox} adet` : '—'} />
+                      <HistoryFact label="Koli / Toplam" value={entry.boxWeightKg != null && entry.totalWeightKg != null ? `${entry.boxWeightKg.toFixed(2)} kg / ${entry.totalWeightKg.toFixed(2)} kg` : '—'} />
+                      <HistoryFact label="Parça" value={entry.partWeightG != null ? `${entry.partWeightG} gr` : '—'} />
+                      <HistoryFact label="Alış" value={entry.supplierUnitPriceUsd != null ? `$${entry.supplierUnitPriceUsd.toFixed(2)} / adet` : '—'} />
+                      <HistoryFact label="Ürün Bedeli" value={entry.lineTotalPurchaseUsd != null ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(entry.lineTotalPurchaseUsd) : '—'} />
+                      <div><span className="text-text-muted">FINAL Landed Cost</span><strong className="ml-2 text-primary">{entry.finalLandedCostTry == null ? 'Maliyet Bekliyor' : <FormatAmount amount={entry.finalLandedCostTry} />}</strong></div>
+                      <HistoryFact label="Mal Kabul" value={entry.receivedAt ? new Date(entry.receivedAt).toLocaleDateString('tr-TR') : 'Bekliyor'} />
+                      <HistoryFact label="Kabul Edilen" value={entry.acceptedQuantity == null ? '—' : `${entry.acceptedQuantity} adet`} />
+                    </div>
+                  </div>
+                ))}
+                {purchaseHistory.length === 0 && <EmptyState title="Bu SKU için satın alma kaydı yok." />}
+              </div>
+           </Card>
+
+           <Card>
+              <div className="p-6 border-b border-border-color flex items-center space-x-2">
+                <History className="w-4 h-4 text-text-muted" />
                 <h3 className="font-bold text-text-main text-sm">Stok Hareket Geçmişi</h3>
               </div>
               <div className="divide-y divide-border-color max-h-[300px] overflow-y-auto">
@@ -465,6 +511,10 @@ function DetailStat({ label, value, subLabel, color }: { label: string, value: R
       {subLabel && <p className="text-xs font-bold text-[#64748B] mt-1">{subLabel}</p>}
     </div>
   );
+}
+
+function HistoryFact({ label, value }: { label: string; value: React.ReactNode }) {
+  return <div><span className="text-text-muted">{label}</span><strong className="ml-2 text-text-main">{value}</strong></div>;
 }
 
 function moneyMinor(value: number, currency = 'TRY') {

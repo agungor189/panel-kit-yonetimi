@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
-import { CatalogService } from "../catalog/catalogService.js";
+import { CatalogService, CatalogValidationError } from "../catalog/catalogService.js";
 import { normalizeBaseQuantity, type UomCode } from "../catalog/uom.js";
 import { ExchangeRateService, type FxSnapshot } from "../finance/exchangeRates.js";
+import { canonicalProductType, normalizeCsvHeader, type ProductType } from "../../../shared/productCsvMapping.js";
+import { generateNormalizedFields } from "../../utils/normalizeProductFields.js";
 import {
   amountForQuantity,
   convertMoney,
@@ -75,7 +77,7 @@ const acquisitionCostVatPolicy = (value: unknown): AcquisitionCostVatPolicy => {
 
 export type PurchaseLineInput = {
   id?: string;
-  productId: string;
+  productId?: string;
   quantity: string;
   quoteBasis: QuoteBasis;
   profileLengthMm?: number;
@@ -84,6 +86,28 @@ export type PurchaseLineInput = {
   vatMode: VatMode;
   vatRateBps: number;
   notes?: string;
+  packing?: PurchaseLinePackingInput;
+  catalogProposal?: PurchaseCatalogProposal;
+};
+
+export type PurchaseCatalogProposal = {
+  sku: string;
+  supplierNo: string;
+  productType: ProductType;
+  size?: string | null;
+  material?: string | null;
+  profileType?: string | null;
+  nameEn?: string | null;
+  nameTr?: string | null;
+  partWeightG: number;
+};
+
+export type PurchaseLinePackingInput = PurchaseCatalogProposal & {
+  totalQuantity: number;
+  boxCount: number;
+  unitsPerBox: number;
+  boxWeightKg: number;
+  totalWeightKg: number;
 };
 
 export type PurchaseCostInput = {
@@ -137,7 +161,59 @@ type NormalizedLine = {
   fx: FxSnapshot;
   normalizedCost: Rational;
   notes: string | null;
+  packing: NormalizedPacking | null;
 };
+
+type NormalizedPacking = {
+  supplierNo: string;
+  productType: ProductType;
+  size: string | null;
+  material: string | null;
+  profileType: string | null;
+  nameEn: string | null;
+  nameTr: string | null;
+  totalQuantity: number;
+  boxCount: number;
+  unitsPerBox: number;
+  boxWeightGrams: number;
+  totalWeightGrams: number;
+  partWeightMilligrams: number;
+};
+
+const csvAliases = {
+  sku: ["sku"],
+  supplierNo: ["supplier_no", "tedarik no", "tedarikci no", "tedarikçi no"],
+  productType: ["type", "tur", "tür", "product type"],
+  size: ["size", "olcu", "ölçü"],
+  material: ["material", "malzeme"],
+  profileType: ["profile_type", "profile type", "profil tipi", "profil turu", "profil türü"],
+  nameEn: ["name_en", "name en", "isim en", "isim - en", "i̇sim - en"],
+  nameTr: ["name_tr", "name tr", "isim tr", "isim - tr", "i̇sim - tr"],
+  totalQuantity: ["total_quantity", "total quantity", "toplam adet"],
+  boxCount: ["box_count", "box count", "kutu sayisi", "kutu sayısı"],
+  unitsPerBox: ["units_per_box", "units per box", "kutu ici adet", "kutu içi adet"],
+  boxWeightKg: ["box_weight_kg", "box weight kg", "kutu agirligi", "kutu ağırlığı"],
+  totalWeightKg: ["total_weight_kg", "total weight kg", "toplam agirlik", "toplam ağırlık"],
+  partWeightG: ["part_weight_g", "part weight g", "parca agirligi", "parça ağırlığı"],
+  purchasePriceUsd: ["purchase_price_usd", "purchase price usd", "alis fiyati", "alış fiyatı"],
+} as const;
+
+const csvRowValue = (row: Record<string, unknown>, aliases: readonly string[]) => {
+  const normalized = new Map(Object.entries(row).map(([key, value]) => [normalizeCsvHeader(key), value]));
+  for (const alias of aliases) {
+    const value = normalized.get(normalizeCsvHeader(alias));
+    if (value !== undefined) return value;
+  }
+  return undefined;
+};
+
+const csvText = (value: unknown) => String(value ?? "").trim();
+const csvNumber = (value: unknown) => {
+  const text = csvText(value).replace(/[$₺\s]/g, "").replace(",", ".");
+  return text === "" ? Number.NaN : Number(text);
+};
+const positiveInteger = (value: unknown) => Number.isSafeInteger(Number(value)) && Number(value) > 0;
+const comparable = (value: unknown) => normalizeCsvHeader(value);
 
 type NormalizedCost = {
   id: string;
@@ -227,6 +303,10 @@ export class ProcurementService {
   }
 
   createPurchase(input: PurchaseInput) {
+    return this.db.transaction(() => this.createPurchaseAtomic(input)).immediate();
+  }
+
+  private createPurchaseAtomic(input: PurchaseInput) {
     if (!input || !Array.isArray(input.lines) || input.lines.length === 0) {
       throw new ProcurementValidationError("PROCUREMENT_VALIDATION_FAILED", "A purchase requires at least one line.");
     }
@@ -239,7 +319,8 @@ export class ProcurementService {
     const orderDate = input.orderDate ? requiredText(input.orderDate, "orderDate", 30) : (input.invoiceDate || createdAt.slice(0, 10));
     if (Number.isNaN(Date.parse(orderDate))) throw new ProcurementValidationError("PROCUREMENT_VALIDATION_FAILED", "orderDate is invalid.");
     const vatPolicy = acquisitionCostVatPolicy(input.acquisitionCostVatPolicy);
-    const lines = input.lines.map((item, index) => this.normalizeLine(item, index, createdAt));
+    const materializedLines = input.lines.map((item, index) => this.materializePurchaseLine(item, index));
+    const lines = materializedLines.map((item, index) => this.normalizeLine(item, index, createdAt));
     const supplierCurrency = lines[0].currency;
     if (lines.some((item) => item.currency !== supplierCurrency)) {
       throw new ProcurementValidationError("MIXED_PURCHASE_CURRENCY", "One purchase cannot mix supplier currencies.");
@@ -293,14 +374,29 @@ export class ProcurementService {
         fx_observation_id,fx_rate_numerator,fx_rate_denominator,fx_source,fx_observed_at,fx_direction,
         normalized_cost_numerator,normalized_cost_denominator,notes,created_at
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-      for (const item of lines) insertLine.run(
-        item.id, purchaseId, item.lineIndex, item.productId, item.productSku, item.productTitle, item.catalogVersionRef,
-        item.baseUomCode, item.baseUomScale, item.originalQuantity, item.quoteBasis, item.profileLengthMm, item.profileLengthKind,
-        item.quantityBaseInt, item.unitPriceMinor, item.currency, item.vatMode, item.vatRateBps,
-        item.supplier.netMinor, item.supplier.vatMinor, item.supplier.grossMinor, item.baseTry.netMinor, item.baseTry.vatMinor, item.baseTry.grossMinor,
-        item.fx.observationId, item.fx.numerator, item.fx.denominator, item.fx.source, item.fx.observedAt, item.fx.direction,
-        item.normalizedCost.numerator, item.normalizedCost.denominator, item.notes, createdAt,
-      );
+      for (const item of lines) {
+        insertLine.run(
+          item.id, purchaseId, item.lineIndex, item.productId, item.productSku, item.productTitle, item.catalogVersionRef,
+          item.baseUomCode, item.baseUomScale, item.originalQuantity, item.quoteBasis, item.profileLengthMm, item.profileLengthKind,
+          item.quantityBaseInt, item.unitPriceMinor, item.currency, item.vatMode, item.vatRateBps,
+          item.supplier.netMinor, item.supplier.vatMinor, item.supplier.grossMinor, item.baseTry.netMinor, item.baseTry.vatMinor, item.baseTry.grossMinor,
+          item.fx.observationId, item.fx.numerator, item.fx.denominator, item.fx.source, item.fx.observedAt, item.fx.direction,
+          item.normalizedCost.numerator, item.normalizedCost.denominator, item.notes, createdAt,
+        );
+        if (item.packing && this.hasTable("purchase_line_packing_snapshots")) {
+          const packing = item.packing;
+          this.db.prepare(`INSERT INTO purchase_line_packing_snapshots (
+            purchase_line_id,purchase_order_id,supplier_no,product_type_snapshot,size_snapshot,material_snapshot,
+            profile_type_snapshot,name_en_snapshot,name_tr_snapshot,total_quantity,box_count,units_per_box,
+            box_weight_grams,total_weight_grams,part_weight_milligrams,created_at
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+            item.id, purchaseId, packing.supplierNo, packing.productType, packing.size, packing.material,
+            packing.profileType, packing.nameEn, packing.nameTr, packing.totalQuantity, packing.boxCount,
+            packing.unitsPerBox, packing.boxWeightGrams, packing.totalWeightGrams,
+            packing.partWeightMilligrams, createdAt,
+          );
+        }
+      }
       const insertCost = this.db.prepare(`INSERT INTO purchase_cost_components (
         id,purchase_order_id,category,source_currency,source_amount_minor,vat_mode,vat_rate_bps,
         source_net_minor,source_vat_minor,source_gross_minor,base_try_net_minor,base_try_vat_minor,base_try_gross_minor,
@@ -502,6 +598,9 @@ export class ProcurementService {
     const lineRows = this.db.prepare("SELECT * FROM purchase_order_lines WHERE purchase_order_id=? ORDER BY line_index").all(purchaseId) as any[];
     const componentRows = this.db.prepare("SELECT * FROM purchase_cost_components WHERE purchase_order_id=? ORDER BY id").all(purchaseId) as any[];
     const allocationRows = this.db.prepare("SELECT * FROM purchase_cost_allocations WHERE purchase_order_id=? ORDER BY component_id,line_id").all(purchaseId) as any[];
+    const packingByLine = new Map((this.hasTable("purchase_line_packing_snapshots")
+      ? this.db.prepare("SELECT * FROM purchase_line_packing_snapshots WHERE purchase_order_id=?").all(purchaseId) as any[]
+      : []).map((row) => [row.purchase_line_id, row]));
     const lots = (this.db.prepare("SELECT * FROM acquisition_lot_cost_snapshots WHERE purchase_order_id=? ORDER BY purchase_line_id").all(purchaseId) as any[]).map((row) => ({
       id: row.id, lineId: row.purchase_line_id, productId: row.product_id, state: row.state,
       quantityBaseInt: row.quantity_base_int, baseUomCode: row.base_uom_code_snapshot,
@@ -543,6 +642,7 @@ export class ProcurementService {
         amounts: { supplier: { netMinor: row.supplier_net_minor, vatMinor: row.supplier_vat_minor, grossMinor: row.supplier_gross_minor }, baseTry: { netMinor: row.base_try_net_minor, vatMinor: row.base_try_vat_minor, grossMinor: row.base_try_gross_minor } },
         fx: { observationId: row.fx_observation_id, numerator: row.fx_rate_numerator, denominator: row.fx_rate_denominator, source: row.fx_source, observedAt: row.fx_observed_at, direction: row.fx_direction },
         normalizedMerchandiseUnitCostTry: { numerator: row.normalized_cost_numerator, denominator: row.normalized_cost_denominator, currency: "TRY", perBaseUom: row.base_uom_code_snapshot },
+        packing: packingByLine.has(row.id) ? this.mapPackingRow(packingByLine.get(row.id)) : null,
       })),
       acquisitionCosts: componentRows.map((row) => ({
         id: row.id, category: row.category, sourceAmountMinor: row.source_amount_minor, currency: row.source_currency,
@@ -681,26 +781,78 @@ export class ProcurementService {
   previewCsv(rows: Array<Record<string, unknown>>) {
     if (!Array.isArray(rows) || rows.length === 0 || rows.length > 1000) throw new ProcurementValidationError("PROCUREMENT_VALIDATION_FAILED", "CSV rows must contain between 1 and 1000 records.");
     return rows.map((row, index) => {
-      const sku = String(row.sku ?? row.SKU ?? "").trim();
-      const quantity = String(row.quantity ?? row.adet ?? "").trim();
-      const unitPrice = String(row.unit_price_usd ?? row.usd_birim_fiyat ?? "").trim();
-      const product = sku ? this.db.prepare("SELECT id,sku,title,base_uom_code,catalog_type FROM products WHERE upper(sku)=upper(?) AND catalog_version>0").get(sku) as any : null;
+      const rowNumber = index + 2;
+      const sku = csvText(csvRowValue(row, csvAliases.sku));
+      const supplierNo = csvText(csvRowValue(row, csvAliases.supplierNo));
+      const productTypeRaw = csvText(csvRowValue(row, csvAliases.productType));
+      const productType = canonicalProductType(productTypeRaw);
+      const size = csvText(csvRowValue(row, csvAliases.size)) || null;
+      const material = csvText(csvRowValue(row, csvAliases.material)) || null;
+      const profileType = csvText(csvRowValue(row, csvAliases.profileType)) || null;
+      const nameEn = csvText(csvRowValue(row, csvAliases.nameEn)) || null;
+      const nameTr = csvText(csvRowValue(row, csvAliases.nameTr)) || null;
+      const totalQuantity = csvNumber(csvRowValue(row, csvAliases.totalQuantity));
+      const boxCount = csvNumber(csvRowValue(row, csvAliases.boxCount));
+      const unitsPerBox = csvNumber(csvRowValue(row, csvAliases.unitsPerBox));
+      const boxWeightKg = csvNumber(csvRowValue(row, csvAliases.boxWeightKg));
+      const totalWeightKg = csvNumber(csvRowValue(row, csvAliases.totalWeightKg));
+      const partWeightG = csvNumber(csvRowValue(row, csvAliases.partWeightG));
+      const purchasePriceUsd = csvNumber(csvRowValue(row, csvAliases.purchasePriceUsd));
+      const product = sku ? this.findProductBySku(sku) : null;
       const errors: string[] = [];
-      if (!sku) errors.push("SKU_REQUIRED"); else if (!product) errors.push("SKU_NOT_FOUND");
-      if (!quantity || !Number.isFinite(Number(quantity)) || Number(quantity) <= 0) errors.push("INVALID_QUANTITY");
-      if (!unitPrice || !Number.isFinite(Number(unitPrice)) || Number(unitPrice) < 0) errors.push("INVALID_UNIT_PRICE");
-      return { row: index + 2, sku, quantity, unitPriceUsd: unitPrice, product: product || null, errors };
+      const addError = (message: string) => errors.push(`Satır ${rowNumber} · SKU ${sku || "—"}: ${message}`);
+      if (!sku) addError("SKU boş olamaz.");
+      if (!supplierNo) addError("Tedarik NO boş olamaz.");
+      if (!productType) addError("TÜR geçersiz. Beklenen değerler: simple, component, assembly veya accessory.");
+      if (!positiveInteger(totalQuantity)) addError("Toplam adet pozitif tam sayı olmalıdır.");
+      if (!positiveInteger(boxCount)) addError("Kutu sayısı pozitif tam sayı olmalıdır.");
+      if (!positiveInteger(unitsPerBox)) addError("Kutu içi adet pozitif tam sayı olmalıdır.");
+      if (!Number.isFinite(boxWeightKg) || boxWeightKg <= 0) addError("Kutu ağırlığı 0'dan büyük olmalıdır.");
+      if (!Number.isFinite(totalWeightKg) || totalWeightKg <= 0) addError("Toplam ağırlık 0'dan büyük olmalıdır.");
+      if (!Number.isFinite(partWeightG) || partWeightG <= 0) addError("Parça ağırlığı 0'dan büyük olmalıdır.");
+      if (!Number.isFinite(purchasePriceUsd) || purchasePriceUsd < 0) addError("Alış fiyatı USD 0 veya daha büyük olmalıdır.");
+      if (positiveInteger(boxCount) && positiveInteger(unitsPerBox) && positiveInteger(totalQuantity)
+        && boxCount * unitsPerBox !== totalQuantity) {
+        addError(`Toplam adet uyuşmuyor. ${boxCount} kutu × ${unitsPerBox} adet = ${boxCount * unitsPerBox} olmalı; CSV'de ${totalQuantity} girilmiş.`);
+      }
+      if (Number.isFinite(boxCount) && Number.isFinite(boxWeightKg) && Number.isFinite(totalWeightKg)
+        && Math.abs(boxCount * boxWeightKg - totalWeightKg) > 0.05 + Number.EPSILON) {
+        addError(`Toplam ağırlık uyuşmuyor. Hesaplanan ${(boxCount * boxWeightKg).toFixed(2)} kg; CSV'de ${totalWeightKg.toFixed(2)} kg.`);
+      }
+      const packing = productType ? {
+        sku, supplierNo, productType, size, material, profileType, nameEn, nameTr,
+        totalQuantity, boxCount, unitsPerBox, boxWeightKg, totalWeightKg, partWeightG,
+      } : null;
+      if (product && packing) {
+        for (const mismatch of this.masterMismatches(packing, product)) addError(mismatch);
+      }
+      if (!product && sku && !nameTr && !nameEn) addError("Yeni SKU için İsim - TR veya İsim - EN zorunludur.");
+      const catalogProposal = !product && sku && productType ? {
+        sku, supplierNo, productType, size, material, profileType, nameEn, nameTr, partWeightG,
+      } : null;
+      return {
+        row: rowNumber, sku,
+        quantity: positiveInteger(totalQuantity) ? String(totalQuantity) : "",
+        unitPriceUsd: Number.isFinite(purchasePriceUsd) && purchasePriceUsd >= 0 ? String(purchasePriceUsd) : "",
+        product: product ? { id: product.id, sku: product.sku, title: product.title, base_uom_code: product.base_uom_code, catalog_type: product.catalog_type, isNew: false } : null,
+        packing, catalogProposal, isNewProduct: !product && errors.length === 0, errors,
+      };
     });
   }
 
   listReceiptReady() {
+    const packingColumns = this.hasTable("purchase_line_packing_snapshots")
+      ? `,pk.supplier_no,pk.total_quantity,pk.box_count,pk.units_per_box,pk.box_weight_grams,pk.total_weight_grams,pk.part_weight_milligrams`
+      : `,NULL AS supplier_no,NULL AS total_quantity,NULL AS box_count,NULL AS units_per_box,NULL AS box_weight_grams,NULL AS total_weight_grams,NULL AS part_weight_milligrams`;
+    const packingJoin = this.hasTable("purchase_line_packing_snapshots") ? "LEFT JOIN purchase_line_packing_snapshots pk ON pk.purchase_line_id=l.id" : "";
     return (this.db.prepare(`SELECT s.id AS cost_snapshot_id,s.purchase_order_id,s.purchase_line_id,s.product_id,
       s.quantity_base_int,s.base_uom_code_snapshot,w.purchase_number,w.order_date,
-      p.supplier_name_snapshot,l.product_sku_snapshot,l.product_title_snapshot
+      p.supplier_name_snapshot,l.product_sku_snapshot,l.product_title_snapshot ${packingColumns}
       FROM acquisition_lot_cost_snapshots s
       JOIN purchase_orders p ON p.id=s.purchase_order_id
       JOIN procurement_workflows w ON w.purchase_order_id=p.id
       JOIN purchase_order_lines l ON l.id=s.purchase_line_id
+      ${packingJoin}
       LEFT JOIN warehouse_goods_receipts r ON r.acquisition_cost_snapshot_id=s.id
       LEFT JOIN inventory_lots il ON il.acquisition_cost_snapshot_id=s.id
       WHERE w.state='RECEIPT_PENDING' AND s.state='COSTED_PENDING_RECEIPT' AND p.status='APPROVED' AND r.id IS NULL AND il.id IS NULL
@@ -709,7 +861,63 @@ export class ProcurementService {
         productId: row.product_id, purchaseNumber: row.purchase_number, orderDate: row.order_date,
         supplierName: row.supplier_name_snapshot, sku: row.product_sku_snapshot, productTitle: row.product_title_snapshot,
         quantityBaseInt: Number(row.quantity_base_int), baseUomCode: row.base_uom_code_snapshot,
+        supplierNo: row.supplier_no,
+        totalQuantity: row.total_quantity == null ? null : Number(row.total_quantity),
+        boxCount: row.box_count == null ? null : Number(row.box_count),
+        unitsPerBox: row.units_per_box == null ? null : Number(row.units_per_box),
+        boxWeightKg: row.box_weight_grams == null ? null : Number(row.box_weight_grams) / 1000,
+        totalWeightKg: row.total_weight_grams == null ? null : Number(row.total_weight_grams) / 1000,
+        partWeightG: row.part_weight_milligrams == null ? null : Number(row.part_weight_milligrams) / 1000,
       }));
+  }
+
+  getProductPurchaseHistory(productIdValue: string) {
+    const productId = requiredText(productIdValue, "productId", 200);
+    if (!this.db.prepare("SELECT 1 FROM products WHERE id=?").get(productId)) {
+      throw new ProcurementValidationError("CATALOG_PRODUCT_NOT_FOUND", "Canonical catalog item was not found.", 404);
+    }
+    const packingColumns = this.hasTable("purchase_line_packing_snapshots")
+      ? `pk.supplier_no,pk.total_quantity,pk.box_count,pk.units_per_box,pk.box_weight_grams,pk.total_weight_grams,pk.part_weight_milligrams,`
+      : `NULL AS supplier_no,NULL AS total_quantity,NULL AS box_count,NULL AS units_per_box,NULL AS box_weight_grams,NULL AS total_weight_grams,NULL AS part_weight_milligrams,`;
+    const packingJoin = this.hasTable("purchase_line_packing_snapshots") ? "LEFT JOIN purchase_line_packing_snapshots pk ON pk.purchase_line_id=l.id" : "";
+    const rows = this.db.prepare(`SELECT l.id AS purchase_line_id,l.purchase_order_id,l.quantity_base_int,
+      l.supplier_unit_price_minor,l.supplier_currency,l.supplier_net_minor,
+      p.supplier_name_snapshot,p.created_at,w.purchase_number,w.order_date,w.state,
+      ${packingColumns}
+      s.id AS cost_snapshot_id,s.normalized_cost_numerator,s.normalized_cost_denominator,
+      r.supplier_lot_code,r.accepted_quantity_base_int,r.received_at,
+      il.received_at AS inventory_received_at
+      FROM purchase_order_lines l
+      JOIN purchase_orders p ON p.id=l.purchase_order_id
+      JOIN procurement_workflows w ON w.purchase_order_id=p.id
+      ${packingJoin}
+      LEFT JOIN acquisition_lot_cost_snapshots s ON s.purchase_line_id=l.id
+      LEFT JOIN warehouse_goods_receipts r ON r.acquisition_cost_snapshot_id=s.id
+      LEFT JOIN inventory_lots il ON il.acquisition_cost_snapshot_id=s.id
+      WHERE l.product_id=?
+      ORDER BY date(w.order_date) DESC,datetime(p.created_at) DESC,l.line_index DESC`).all(productId) as any[];
+    return rows.map((row) => ({
+      purchaseOrderId: row.purchase_order_id,
+      purchaseLineId: row.purchase_line_id,
+      acquisitionCostSnapshotId: row.cost_snapshot_id,
+      purchaseNumber: row.purchase_number,
+      orderDate: row.order_date,
+      supplierName: row.supplier_name_snapshot,
+      supplierNo: row.supplier_no,
+      workflowState: row.state,
+      lotCode: row.supplier_lot_code,
+      orderedTotalQuantity: row.total_quantity == null ? Number(row.quantity_base_int) : Number(row.total_quantity),
+      boxCount: row.box_count == null ? null : Number(row.box_count),
+      unitsPerBox: row.units_per_box == null ? null : Number(row.units_per_box),
+      boxWeightKg: row.box_weight_grams == null ? null : Number(row.box_weight_grams) / 1000,
+      totalWeightKg: row.total_weight_grams == null ? null : Number(row.total_weight_grams) / 1000,
+      partWeightG: row.part_weight_milligrams == null ? null : Number(row.part_weight_milligrams) / 1000,
+      supplierUnitPriceUsd: row.supplier_currency === "USD" ? Number(row.supplier_unit_price_minor) / 100 : null,
+      lineTotalPurchaseUsd: row.supplier_currency === "USD" ? Number(row.supplier_net_minor) / 100 : null,
+      finalLandedCostTry: row.normalized_cost_numerator == null ? null : Number(row.normalized_cost_numerator) / Number(row.normalized_cost_denominator) / 100,
+      receivedAt: row.received_at || row.inventory_received_at || null,
+      acceptedQuantity: row.accepted_quantity_base_int == null ? null : Number(row.accepted_quantity_base_int),
+    }));
   }
 
   markReceiptRecorded(purchaseIdValue: string, completedAt: string) {
@@ -728,9 +936,139 @@ export class ProcurementService {
     return false;
   }
 
+  private findProductBySku(sku: string) {
+    return this.db.prepare(`SELECT p.id,p.sku,p.title,p.base_uom_code,p.catalog_type,p.catalog_version_ref,
+      p.supplier_code,p.product_type,p.size,p.pipe_size,p.material,p.tube_type_code,
+      p.normalized_size,p.normalized_pipe_size,p.normalized_material,p.normalized_tube_type,
+      p.name_en,p.name_tr,p.weight_grams,p.mass_grams_int
+      FROM products p WHERE upper(p.sku)=upper(?) AND p.catalog_version>0`).get(sku) as any;
+  }
+
+  private masterMismatches(input: PurchaseLinePackingInput | PurchaseCatalogProposal, product: any) {
+    const mismatches: string[] = [];
+    const compare = (label: string, systemValue: unknown, csvValue: unknown) => {
+      if (!csvValue || systemValue == null || String(systemValue).trim() === "" || comparable(systemValue) === "bilinmiyor") return;
+      if (comparable(systemValue) !== comparable(csvValue)) {
+        mismatches.push(`${label} uyuşmuyor. Sistemde ${systemValue}, CSV'de ${csvValue}.`);
+      }
+    };
+    compare("SKU", product.sku, input.sku);
+    compare("Tedarik NO", product.supplier_code, input.supplierNo);
+    compare("TÜR", product.product_type, input.productType);
+    compare("İsim - EN", product.name_en, input.nameEn);
+    compare("İsim - TR", product.name_tr, input.nameTr);
+    const csvNormalized = generateNormalizedFields({
+      material: input.material, size: input.size, pipe_size: input.size, category: input.profileType,
+      name: [input.nameTr, input.nameEn].filter(Boolean).join(" "), title: product.title,
+    });
+    if (input.material) compare("Malzeme", product.normalized_material || product.material, csvNormalized.normalized_material);
+    if (input.size) compare("Ölçü", product.normalized_pipe_size || product.normalized_size || product.pipe_size || product.size, csvNormalized.normalized_pipe_size || csvNormalized.normalized_size);
+    if (input.profileType) compare("Profil tipi", product.normalized_tube_type || product.tube_type_code, input.profileType);
+    const systemWeight = Number(product.mass_grams_int ?? product.weight_grams);
+    if (Number.isFinite(systemWeight) && systemWeight > 0 && Number.isFinite(input.partWeightG)
+      && Math.abs(systemWeight - input.partWeightG) > 0.51) {
+      mismatches.push(`Parça ağırlığı uyuşmuyor. Sistemde ${systemWeight} g, CSV'de ${input.partWeightG} g.`);
+    }
+    return mismatches;
+  }
+
+  private materializePurchaseLine(input: PurchaseLineInput, lineIndex: number): PurchaseLineInput {
+    if (input.productId) return input;
+    if (!input.catalogProposal) {
+      throw new ProcurementValidationError("CATALOG_PRODUCT_NOT_FOUND", `Satın alma satırı ${lineIndex + 1} için canonical ürün veya güvenli katalog önerisi gereklidir.`);
+    }
+    const proposal = input.catalogProposal;
+    const existing = this.findProductBySku(requiredText(proposal.sku, "catalogProposal.sku", 120));
+    if (existing) return { ...input, productId: existing.id };
+    try {
+      const created = this.catalog.createProduct({
+        sku: proposal.sku,
+        title: proposal.nameTr || proposal.nameEn || proposal.sku,
+        catalog_type: "product",
+        base_uom_code: "piece",
+        mass_grams: Math.round(Number(proposal.partWeightG)),
+        status: "Passive",
+        name_tr: proposal.nameTr,
+        name_en: proposal.nameEn,
+        supplier_code: proposal.supplierNo,
+        product_type: proposal.productType,
+        material: proposal.material,
+        size: proposal.size,
+        profile_type: proposal.profileType,
+        is_sellable: false,
+      });
+      return { ...input, productId: created.id };
+    } catch (error) {
+      if (error instanceof CatalogValidationError) {
+        throw new ProcurementValidationError("CATALOG_PROPOSAL_INVALID", error.message, error.statusCode);
+      }
+      throw error;
+    }
+  }
+
+  private normalizePacking(input: PurchaseLinePackingInput, product: any, originalQuantity: string): NormalizedPacking {
+    const supplierNo = requiredText(input.supplierNo, "packing.supplierNo", 200);
+    if (!canonicalProductType(input.productType)) throw new ProcurementValidationError("INVALID_PRODUCT_TYPE", "packing.productType is not canonical.");
+    if (!positiveInteger(input.totalQuantity) || !positiveInteger(input.boxCount) || !positiveInteger(input.unitsPerBox)) {
+      throw new ProcurementValidationError("INVALID_PACKING_QUANTITY", "Packing quantities must be positive integers.");
+    }
+    if (input.boxCount * input.unitsPerBox !== input.totalQuantity) {
+      throw new ProcurementValidationError("PACKING_QUANTITY_MISMATCH", `${input.boxCount} boxes × ${input.unitsPerBox} units does not equal ${input.totalQuantity}.`);
+    }
+    if (Number(originalQuantity) !== input.totalQuantity) {
+      throw new ProcurementValidationError("PACKING_LINE_QUANTITY_MISMATCH", "Purchase line quantity must equal packing total quantity.");
+    }
+    const boxWeightGrams = Math.round(Number(input.boxWeightKg) * 1000);
+    const totalWeightGrams = Math.round(Number(input.totalWeightKg) * 1000);
+    const partWeightMilligrams = Math.round(Number(input.partWeightG) * 1000);
+    if (![boxWeightGrams, totalWeightGrams, partWeightMilligrams].every((value) => Number.isSafeInteger(value) && value > 0)) {
+      throw new ProcurementValidationError("INVALID_PACKING_WEIGHT", "Packing weights must be positive fixed-precision values.");
+    }
+    if (Math.abs(input.boxCount * boxWeightGrams - totalWeightGrams) > 50) {
+      throw new ProcurementValidationError("PACKING_WEIGHT_MISMATCH", "Calculated box weight total differs from total weight by more than 0.05 kg.");
+    }
+    const mismatches = this.masterMismatches(input, product);
+    if (mismatches.length) throw new ProcurementValidationError("PRODUCT_MASTER_MISMATCH", mismatches.join(" "), 409);
+    return {
+      supplierNo,
+      productType: input.productType,
+      size: optionalText(input.size, "packing.size", 150),
+      material: optionalText(input.material, "packing.material", 150),
+      profileType: optionalText(input.profileType, "packing.profileType", 100),
+      nameEn: optionalText(input.nameEn, "packing.nameEn", 300),
+      nameTr: optionalText(input.nameTr, "packing.nameTr", 300),
+      totalQuantity: input.totalQuantity,
+      boxCount: input.boxCount,
+      unitsPerBox: input.unitsPerBox,
+      boxWeightGrams,
+      totalWeightGrams,
+      partWeightMilligrams,
+    };
+  }
+
+  private mapPackingRow(row: any) {
+    return {
+      supplierNo: row.supplier_no,
+      productType: row.product_type_snapshot,
+      size: row.size_snapshot,
+      material: row.material_snapshot,
+      profileType: row.profile_type_snapshot,
+      nameEn: row.name_en_snapshot,
+      nameTr: row.name_tr_snapshot,
+      totalQuantity: Number(row.total_quantity),
+      boxCount: Number(row.box_count),
+      unitsPerBox: Number(row.units_per_box),
+      boxWeightKg: Number(row.box_weight_grams) / 1000,
+      totalWeightKg: Number(row.total_weight_grams) / 1000,
+      partWeightG: Number(row.part_weight_milligrams) / 1000,
+    };
+  }
+
   private normalizeLine(input: PurchaseLineInput, lineIndex: number, createdAt: string): NormalizedLine {
     const productId = requiredText(input.productId, "productId", 200);
-    const product = this.db.prepare(`SELECT p.id,p.sku,p.title,p.catalog_type,p.catalog_class,p.catalog_version_ref,p.base_uom_code,u.quantity_scale
+    const product = this.db.prepare(`SELECT p.id,p.sku,p.title,p.catalog_type,p.catalog_class,p.catalog_version_ref,p.base_uom_code,u.quantity_scale,
+      p.supplier_code,p.product_type,p.size,p.pipe_size,p.material,p.tube_type_code,p.normalized_size,p.normalized_pipe_size,
+      p.normalized_material,p.normalized_tube_type,p.name_en,p.name_tr,p.weight_grams,p.mass_grams_int
       FROM products p JOIN uom_definitions u ON u.code=p.base_uom_code WHERE p.id=? AND p.catalog_version>0`).get(productId) as any;
     if (!product) throw new ProcurementValidationError("CATALOG_PRODUCT_NOT_FOUND", "Canonical catalog item was not found.", 404);
     if (!quoteBases.has(input.quoteBasis)) throw new ProcurementValidationError("INVALID_QUOTE_BASIS", "quoteBasis is unsupported.");
@@ -768,13 +1106,14 @@ export class ProcurementService {
     const fx = this.fx.snapshotFor(currency, createdAt);
     const baseTry = convertMoney(supplierAmounts, fx);
     const normalizedCost = reduceRational(BigInt(baseTry.netMinor) * BigInt(product.quantity_scale), BigInt(quantityBaseInt), "normalized merchandise unit cost");
+    const packing = input.packing ? this.normalizePacking(input.packing, product, originalQuantity) : null;
     return {
       id: input.id ? requiredText(input.id, "line.id", 200) : randomUUID(), lineIndex, productId,
       productSku: requiredText(product.sku, "product.sku", 200), productTitle: requiredText(product.title, "product.title"),
       catalogVersionRef: requiredText(product.catalog_version_ref, "product.catalogVersionRef", 250),
       baseUomCode: product.base_uom_code, baseUomScale: Number(product.quantity_scale), originalQuantity, quoteBasis,
       profileLengthMm, profileLengthKind, quantityBaseInt, unitPriceMinor, currency, vatMode: mode, vatRateBps: rateBps,
-      supplier: supplierAmounts, baseTry, fx, normalizedCost, notes: optionalText(input.notes, "line.notes", 1000),
+      supplier: supplierAmounts, baseTry, fx, normalizedCost, notes: optionalText(input.notes, "line.notes", 1000), packing,
     };
   }
 

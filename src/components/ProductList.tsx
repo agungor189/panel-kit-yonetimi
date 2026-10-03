@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  Plus,
   Search,
   Filter,
   LayoutGrid,
@@ -11,19 +10,17 @@ import {
   Download,
   Upload,
   Images,
-  Trash2,
-  FileText,
   ScanLine,
   SlidersHorizontal,
   X
 } from 'lucide-react';
-import { api, createRetryOperation } from '../lib/api';
+import { api } from '../lib/api';
 import { useCurrency } from '../CurrencyContext';
 import { Product } from '../types';
 import Papa from 'papaparse';
 import BarcodeScannerModal from './BarcodeScannerModal';
 import PricingSettingsModal from './PricingSettingsModal';
-import { Calculator, Loader2, CheckCircle, AlertTriangle } from 'lucide-react';
+import { Calculator, Loader2 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useAuth } from '../App';
 import { chunkItems, PRODUCT_IMAGE_CLIENT_BATCH_SIZE } from '../../shared/productImageBatch';
@@ -116,24 +113,6 @@ interface ProductListProps {
   onProductClick: (id: string) => void;
 }
 
-type ProductCsvImportReport = {
-  mode: 'dry-run' | 'apply';
-  applied: boolean;
-  rows: number;
-  products_created: number;
-  products_updated: number;
-  bom_parents: number;
-  bom_lines_created: number;
-  bom_lines_updated: number;
-  bom_lines_removed: number;
-  lot_lines_created: number;
-  lot_lines_updated: number;
-  matched_columns: Array<{ csv_header: string; product_field: string; label: string }>;
-  unknown_columns: string[];
-  validation_errors: Array<{ row?: number; field?: string; code: string; message: string }>;
-  warnings: string[];
-};
-
 type BulkImagePreviewItem = {
   file: File;
   sku: string;
@@ -158,10 +137,9 @@ type BulkImageUploadReport = {
   }>;
 };
 
-export default function ProductList({ onAddProduct, onProductClick }: ProductListProps) {
+export default function ProductList({ onProductClick }: ProductListProps) {
   const { isReadOnly } = useAuth();
   const { FormatAmount, activeRate, viewCurrency } = useCurrency();
-  const csvImportOperation = useRef(createRetryOperation('product-csv-import')).current;
   const [products, setProducts] = useState<Product[]>([]);
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('table');
   const [search, setSearch] = useState('');
@@ -255,16 +233,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
     setFilterStatus('Hepsi');
     setSortKey('name_asc');
   };
-  const csvInputRef = useRef<HTMLInputElement>(null);
   const bulkImageInputRef = useRef<HTMLInputElement>(null);
-
-  // CSV import preview/report state. Mapping itself lives in shared/productCsvMapping.ts.
-  const [showMappingModal, setShowMappingModal] = useState(false);
-  const [csvData, setCsvData] = useState<any[]>([]);
-  const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
-  const [csvFileName, setCsvFileName] = useState('products.csv');
-  const [importReport, setImportReport] = useState<ProductCsvImportReport | null>(null);
-  const [importProgress, setImportProgress] = useState<{current: number, total: number} | null>(null);
   const [showBulkImageModal, setShowBulkImageModal] = useState(false);
   const [bulkImagePreview, setBulkImagePreview] = useState<BulkImagePreviewItem[]>([]);
   const [bulkImageReport, setBulkImageReport] = useState<BulkImageUploadReport | null>(null);
@@ -406,108 +375,10 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
     document.body.removeChild(link);
   };
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (isReadOnly) return;
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
-      complete: async (results) => {
-        const { data, meta } = results;
-        if (data.length === 0) return;
-        if (results.errors.length > 0) {
-          toast.error(`CSV okunamadı: ${results.errors[0].message}`);
-          return;
-        }
-        const headers = meta.fields || [];
-        setCsvData(data);
-        setCsvHeaders(headers);
-        setCsvFileName(file.name);
-        setImportProgress({ current: 0, total: data.length });
-        try {
-          const report = await api.post('/products/import', { rows: data, headers, dry_run: true, source_name: file.name });
-          setImportReport(report);
-          setShowMappingModal(true);
-        } catch (error: any) {
-          toast.error(error.message || 'CSV önizlemesi oluşturulamadı');
-        } finally {
-          setImportProgress(null);
-        }
-      }
-    });
-  };
-
-  const executeImport = async () => {
-    if (!importReport || importReport.validation_errors.length > 0) return;
-    setDeletingAll(true);
-    setImportProgress({ current: 0, total: csvData.length });
-    const payload = { rows: csvData, headers: csvHeaders, dry_run: false, source_name: csvFileName };
-    const operationId = csvImportOperation.idFor(payload);
-    try {
-      const report = await api.post('/products/import', payload, { operationId });
-      csvImportOperation.complete(operationId);
-      setImportReport(report);
-      toast.success(`${report.products_created} ürün oluşturuldu, ${report.products_updated} ürün güncellendi${report.lot_lines_created || report.lot_lines_updated ? ` · ${report.lot_lines_created + report.lot_lines_updated} lot satırı hazır` : ''}`);
-      await loadProducts();
-    } catch (error: any) {
-      toast.error(error.message || 'İçe aktarma başarısız');
-    } finally {
-      setDeletingAll(false);
-      setImportProgress(null);
-      if (csvInputRef.current) csvInputRef.current.value = '';
-    }
-  };
-
-  const [deletingAll, setDeletingAll] = useState(false);
-  const [showDeleteAllConfirm, setShowDeleteAllConfirm] = useState(false);
-  const [deleteAllInput, setDeleteAllInput] = useState("");
   const [showPricingModal, setShowPricingModal] = useState(false);
-
-  const deleteAllProducts = async () => {
-    if (isReadOnly) return;
-    if (deleteAllInput !== "SİL") return;
-    try {
-      setDeletingAll(true);
-      const res = await api.delete('/products');
-      console.log("Delete all result:", res);
-      await loadProducts();
-      setShowDeleteAllConfirm(false);
-    } catch (err) {
-      console.error("Hepsini silme hatası:", err);
-      alert("Silme işlemi sırasında bir hata oluştu.");
-    } finally {
-      setDeletingAll(false);
-    }
-  };
 
   return (
     <div className="space-y-6 animate-in slide-in-from-bottom-4 duration-500">
-      {importProgress && (
-         <div className="fixed inset-0 bg-[#0F172A]/40 backdrop-blur-sm z-[150] flex items-center justify-center p-4">
-            <div className="bg-white rounded-3xl p-8 flex flex-col items-center shadow-2xl max-w-sm w-full mx-auto">
-               <Loader2 className="w-10 h-10 animate-spin text-blue-600 mb-6" />
-               <h3 className="text-xl font-black text-gray-900 tracking-tight mb-2">İçe Aktarılıyor</h3>
-               <p className="text-gray-500 text-sm font-medium mb-6 text-center">
-                 Lütfen bekleyin, ürünler sisteme aktarılıyor...
-               </p>
-               <div className="w-full bg-gray-100 rounded-full h-3 overflow-hidden mb-3 text-center relative">
-                  <div
-                    className="h-full bg-blue-600 rounded-full transition-all duration-300 relative overflow-hidden"
-                    style={{ width: `${Math.round((importProgress.current / importProgress.total) * 100)}%` }}
-                  >
-                     <div className="absolute inset-0 bg-white/20 w-full h-full animate-[shimmer_1s_infinite] -skew-x-12" />
-                  </div>
-               </div>
-               <div className="flex w-full justify-between items-center px-1">
-                 <span className="text-xs text-blue-700 font-bold bg-blue-50 px-2 py-1 rounded-full border border-blue-100 shadow-sm">{importProgress.current} / {importProgress.total} satır</span>
-                 <span className="text-sm font-black text-gray-900 tracking-tight">{Math.round((importProgress.current / importProgress.total) * 100)}%</span>
-               </div>
-            </div>
-         </div>
-      )}
-
       {!isReadOnly && showPricingModal && (
         <PricingSettingsModal
           onClose={() => setShowPricingModal(false)}
@@ -519,13 +390,6 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
         title="Ürün Yönetimi"
         description={`${products.length} toplam ürün listeleniyor.`}
         actions={<>
-          <input
-            type="file"
-            ref={csvInputRef}
-            onChange={handleFileSelect}
-            accept=".csv"
-            className="hidden"
-          />
           <input
             type="file"
             ref={bulkImageInputRef}
@@ -544,13 +408,6 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                 Toplu Fiyat Yönetimi
               </Button>
               <Button variant="secondary"
-                onClick={() => csvInputRef.current?.click()}
-                className="px-4 h-11 border border-border-color bg-white rounded-xl text-xs font-bold text-text-muted hover:text-primary hover:border-primary transition-all flex items-center shadow-sm"
-              >
-                <Upload className="w-4 h-4 mr-2" />
-                Gelişmiş İçe Aktar
-              </Button>
-              <Button variant="secondary"
                 onClick={() => bulkImageInputRef.current?.click()}
                 className="px-4 h-11 border border-border-color bg-white rounded-xl text-xs font-bold text-text-muted hover:text-primary hover:border-primary transition-all flex items-center shadow-sm"
               >
@@ -566,110 +423,8 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
             <Download className="w-4 h-4 mr-2" />
             CSV Dışa Aktar
           </Button>
-          <Button variant="secondary"
-            onClick={() => {
-              const data = [{
-                'SKU': 'URUN-001',
-                'Tedarik NO': 'TED-001',
-                'Isim - TR': 'Örnek Ürün',
-                'İsim - EN': 'Sample Product',
-                'Malzeme': 'Aliminyum',
-                'Profil Tipi': 'Yuvarlak',
-                'Ölçü': '25 mm',
-                'Toplam Adet': '100',
-                'Parça Ağırlığı': '500',
-                'Alış Fiyatı': '$2.50',
-                'TÜR': 'simple',
-                'BOM': '',
-                'Açıklama': 'Siyah kaliteli kaplama',
-                'Toplama Lokasyonu': 'A-12-3',
-                'Rezerv Lokasyon': 'R-01; R-02',
-                'Kutu sayısı': '2',
-                'Kutu içi adet': '50',
-                'Kutu Ağırlığı': '25',
-                'Toplam Ağırlık': '50'
-              }];
-              const csv = Papa.unparse(data);
-              const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-              const link = document.createElement('a');
-              const url = URL.createObjectURL(blob);
-              link.setAttribute('href', url);
-              link.setAttribute('download', `sablon.csv`);
-              link.style.visibility = 'hidden';
-              document.body.appendChild(link);
-              link.click();
-              document.body.removeChild(link);
-            }}
-            className="px-4 h-11 border border-dashed border-border-color bg-gray-50 rounded-xl text-[10px] font-bold text-text-muted hover:text-primary hover:border-primary transition-all flex items-center"
-            title="Örnek CSV Formatını İndir"
-          >
-            <FileText className="w-4 h-4 mr-2" />
-            Şablon İndir
-          </Button>
-          {!isReadOnly && products.length > 0 && (
-            <Button variant="secondary"
-              onClick={() => {
-                setDeleteAllInput("");
-                setShowDeleteAllConfirm(true);
-              }}
-              className="px-4 h-11 border border-border-color bg-white rounded-xl text-xs font-bold text-rose-500 hover:bg-rose-50 hover:border-rose-200 transition-all flex items-center shadow-sm"
-            >
-              <Trash2 className="w-4 h-4 mr-2" />
-              Tümünü Sil
-            </Button>
-          )}
-          {!isReadOnly && (
-            <Button
-              onClick={onAddProduct}
-              className="btn-primary px-6 py-2 leading-none flex items-center justify-center h-11 w-full sm:w-auto"
-            >
-              <Plus className="w-4 h-4 mr-2" />
-              <span>Yeni Ürün Ekle</span>
-            </Button>
-          )}
         </>}
       />
-
-      {showDeleteAllConfirm && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200" onClick={() => setShowDeleteAllConfirm(false)}>
-          <div className="bg-white rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl" onClick={e => e.stopPropagation()}>
-            <div className="p-6 text-center">
-              <div className="w-16 h-16 bg-rose-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                <Trash2 className="w-8 h-8 text-rose-500" />
-              </div>
-              <h3 className="text-xl font-bold text-gray-900 mb-2">Tüm Ürünleri Sil</h3>
-              <p className="text-gray-500 text-sm mb-6">
-                Bu işlem geri alınamaz. Onaylamak için lütfen kutuya büyük harflerle <strong>SİL</strong> yazın.
-              </p>
-              <div className="mb-6">
-                <Input
-                  type="text"
-                  value={deleteAllInput}
-                  onChange={(e) => setDeleteAllInput(e.target.value)}
-                  placeholder="SİL yazın"
-                  className="w-full text-center tracking-widest font-bold h-11 bg-gray-50 border border-gray-200 rounded-xl focus:border-rose-500 focus:ring-1 focus:ring-rose-500 outline-none"
-                />
-              </div>
-              <div className="flex flex-col gap-3">
-                <Button variant="danger"
-                  onClick={deleteAllProducts}
-                  disabled={deletingAll || deleteAllInput !== "SİL"}
-                  className="w-full py-3 bg-rose-500 hover:bg-rose-600 text-white rounded-xl font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {deletingAll ? "Siliniyor..." : "Evet, Tümünü Seçili Sil"}
-                </Button>
-                <Button variant="secondary"
-                  onClick={() => setShowDeleteAllConfirm(false)}
-                  disabled={deletingAll}
-                  className="w-full py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-bold transition-colors disabled:opacity-50"
-                >
-                  İptal
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Filters Bar */}
       <Card padding="sm" className="bg-white shadow-sm">
@@ -1033,101 +788,6 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
           icon={<Package className="h-16 w-16 text-border-color" />}
           className="rounded-3xl border-2 border-dashed border-border-color bg-white py-24"
         />
-      )}
-
-      {/* CSV mapping and validation report */}
-      {showMappingModal && importReport && (
-        <div className="fixed inset-0 bg-[#0F172A]/40 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl w-full max-w-3xl shadow-2xl overflow-hidden animate-in zoom-in duration-300">
-             <div className="p-8 border-b border-border-color bg-gray-50 flex items-center justify-between">
-                <div>
-                   <h3 className="text-xl font-black text-[#0F172A] tracking-tight">CSV İçe Aktarma Raporu</h3>
-                   <p className="text-sm text-text-muted mt-1">{csvFileName} · {importReport.rows} satır · {importReport.mode === 'dry-run' ? 'önizleme' : 'uygulandı'}</p>
-                </div>
-                <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center border border-border-color shadow-sm">
-                   <Upload className="w-6 h-6 text-primary" />
-                </div>
-             </div>
-
-             <div className="p-8 space-y-6 max-h-[65vh] overflow-y-auto">
-                <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                  {[
-                    ['Oluşturulacak', importReport.products_created],
-                    ['Güncellenecek', importReport.products_updated],
-                    ['BOM üst ürünü', importReport.bom_parents],
-                    ['Yeni BOM satırı', importReport.bom_lines_created],
-                    ['Yeni lot satırı', importReport.lot_lines_created],
-                    ['Güncel lot satırı', importReport.lot_lines_updated],
-                  ].map(([label, value]) => (
-                    <div key={String(label)} className="rounded-2xl border border-border-color bg-bg-main p-4">
-                      <p className="text-[10px] font-black uppercase tracking-widest text-text-muted">{label}</p>
-                      <p className="mt-1 text-2xl font-black text-text-main">{value}</p>
-                    </div>
-                  ))}
-                </div>
-
-                <section>
-                  <h4 className="mb-2 text-xs font-black uppercase tracking-widest text-text-muted">Eşleşen kolonlar</h4>
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    {importReport.matched_columns.map((column) => (
-                      <div key={`${column.csv_header}-${column.product_field}`} className="flex items-center justify-between gap-3 rounded-xl border border-border-color px-3 py-2 text-xs">
-                        <span className="font-bold text-text-main">{column.csv_header}</span>
-                        <span className="text-right font-mono text-primary">{column.product_field}</span>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-
-                {importReport.unknown_columns.length > 0 && (
-                  <section className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
-                    <h4 className="text-xs font-black uppercase tracking-widest text-amber-800">Tanınmayan kolonlar</h4>
-                    <p className="mt-2 text-sm text-amber-900">{importReport.unknown_columns.join(', ')}</p>
-                  </section>
-                )}
-
-                {importReport.validation_errors.length > 0 ? (
-                  <section className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
-                    <h4 className="flex items-center gap-2 text-xs font-black uppercase tracking-widest text-rose-800">
-                      <AlertTriangle className="h-4 w-4" /> Validation hataları ({importReport.validation_errors.length})
-                    </h4>
-                    <ul className="mt-3 space-y-2 text-sm text-rose-900">
-                      {importReport.validation_errors.slice(0, 50).map((error, index) => (
-                        <li key={`${error.code}-${error.row || 0}-${index}`}>• {error.row ? `Satır ${error.row}: ` : ''}{error.message}</li>
-                      ))}
-                    </ul>
-                  </section>
-                ) : (
-                  <div className="flex items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-bold text-emerald-800">
-                    <CheckCircle className="h-5 w-5" /> Doğrulama tamamlandı. İçe aktarma uygulanabilir.
-                  </div>
-                )}
-
-                {importReport.applied && (
-                  <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">
-                    {importReport.products_created} ürün oluşturuldu, {importReport.products_updated} ürün güncellendi; {importReport.bom_lines_created} BOM satırı oluşturuldu ve {importReport.bom_lines_updated} BOM satırı güncellendi.
-                  </div>
-                )}
-             </div>
-
-             <div className="p-8 bg-gray-50 border-t border-border-color flex items-center justify-between">
-                <button
-                  onClick={() => setShowMappingModal(false)}
-                  className="px-6 h-12 text-sm font-bold text-text-muted hover:text-[#0F172A] transition-colors"
-                >
-                  {importReport.applied ? 'Kapat' : 'Vazgeç'}
-                </button>
-                {!importReport.applied && (
-                  <button
-                    onClick={executeImport}
-                    disabled={deletingAll || importReport.validation_errors.length > 0}
-                    className="px-8 h-12 bg-[#0F172A] text-white rounded-xl font-bold text-sm shadow-xl hover:scale-105 transition-all disabled:opacity-50 disabled:hover:scale-100"
-                  >
-                    {deletingAll ? 'İçe Aktarılıyor...' : 'İçe Aktarımı Uygula'}
-                  </button>
-                )}
-             </div>
-          </div>
-        </div>
       )}
 
       {showBulkImageModal && (

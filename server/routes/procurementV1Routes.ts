@@ -99,6 +99,16 @@ export function createProcurementV1Router({ db, authorizeProcurement, authorizeC
     } catch (error) { return sendError(error, res); }
   });
 
+  router.get("/products/:productId/history", authorizeProcurement, (req, res) => {
+    try {
+      return res.json({
+        success: true,
+        contract: "dsdst.procurement-product-history.v1",
+        data: procurement.getProductPurchaseHistory(req.params.productId),
+      });
+    } catch (error) { return sendError(error, res); }
+  });
+
   router.get("/purchases/:id", authorizeProcurement, (req, res) => {
     try {
       const data = procurement.getPurchase(req.params.id);

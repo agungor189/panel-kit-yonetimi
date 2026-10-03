@@ -71,6 +71,7 @@ const businessTablesThatMustStartEmpty = [
   "procurement_documents",
   "purchase_cost_component_details",
   "current_product_landed_costs",
+  "purchase_line_packing_snapshots",
   "inventory_lots",
   "inventory_ledger_events",
   "inventory_lot_location_balances",
@@ -185,7 +186,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 93);
+  assert.equal(manifest.length, 94);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -219,6 +220,7 @@ test("fresh production schema is exact, versioned and has zero business history"
     procurement_suppliers: ["default_currency", "id", "name"],
     purchase_orders: ["acquisition_cost_vat_policy", "direct_cost_base_try_net_minor", "merchandise_net_minor", "paid_minor", "payment_status", "status", "supplier_currency", "supplier_id", "total_base_try_gross_minor", "total_gross_minor"],
     purchase_order_lines: ["base_try_net_minor", "fx_rate_denominator", "fx_rate_numerator", "normalized_cost_denominator", "normalized_cost_numerator", "product_id", "purchase_order_id", "quantity_base_int", "quote_basis", "supplier_net_minor", "supplier_vat_minor", "supplier_gross_minor", "vat_mode"],
+    purchase_line_packing_snapshots: ["box_count", "box_weight_grams", "part_weight_milligrams", "purchase_line_id", "purchase_order_id", "supplier_no", "total_quantity", "total_weight_grams", "units_per_box"],
     purchase_cost_components: ["allocation_method", "base_try_net_minor", "category", "purchase_order_id", "rounding_residual_minor", "source_currency", "source_net_minor", "source_vat_minor", "source_gross_minor", "suggestion_json"],
     purchase_cost_allocations: ["amount_try_minor", "component_id", "line_id", "provenance", "purchase_order_id"],
     acquisition_lot_cost_snapshots: ["allocation_snapshot_json", "landed_cost_try_minor", "merchandise_cost_try_minor", "normalized_cost_denominator", "normalized_cost_numerator", "purchase_line_id", "state", "vat_policy_snapshot", "vat_try_minor"],

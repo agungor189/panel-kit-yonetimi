@@ -88,7 +88,9 @@ test("Panel workflow requires FINAL landed cost before exposing a Warehouse rece
   assert.equal(approved.workflowState, "RECEIPT_PENDING");
   assert.deepEqual(procurement.listReceiptReady().map((item) => item.sku), ["PART-A", "PART-B"]);
   assert.equal(db.prepare("SELECT COUNT(*) FROM current_product_landed_costs").pluck().get(), 2);
-  assert.deepEqual(procurement.previewCsv([{ sku: "UNKNOWN", quantity: "1", unit_price_usd: "2" }])[0].errors, ["SKU_NOT_FOUND"]);
+  const invalidPreview = procurement.previewCsv([{ sku: "UNKNOWN" }])[0];
+  assert.equal(invalidPreview.errors.length > 1, true);
+  assert.match(invalidPreview.errors[0], /Satır 2 · SKU UNKNOWN/);
   db.close();
 });
 
@@ -269,5 +271,72 @@ test("purchase VAT policy is explicit, immutable, and controls whether VAT enter
   assert.equal(includedLot.lots[0].vatTryMinor, 2_200);
   assert.throws(() => db.prepare("UPDATE purchase_orders SET acquisition_cost_vat_policy='VAT_INCLUDED_IN_INVENTORY_COST' WHERE id='po-vat-policy-ex'").run(), /immutable/i);
   assert.equal(procurement.getPurchase("po-vat-policy-ex")!.lots[0].landedCostTryMinor, 11_000);
+  db.close();
+});
+
+const csvRow = (overrides: Record<string, unknown> = {}) => ({
+  sku: "CSV-NEW", supplier_no: "H101", type: "simple", size: "20 mm", material: "Aluminum",
+  profile_type: "Yuvarlak", name_en: "CSV Product", name_tr: "CSV Ürün", total_quantity: 500,
+  box_count: 10, units_per_box: 50, box_weight_kg: 18.4, total_weight_kg: 184,
+  part_weight_g: 355, purchase_price_usd: 1.72,
+  ...overrides,
+});
+
+test("purchase CSV preview validates packing totals and returns every row error", () => {
+  const { db, procurement } = setup();
+  const valid = procurement.previewCsv([csvRow()])[0];
+  assert.deepEqual(valid.errors, []);
+  assert.equal(valid.isNewProduct, true);
+  assert.equal(valid.packing.boxCount, 10);
+
+  const invalid = procurement.previewCsv([
+    csvRow({ sku: "BAD-QTY", total_quantity: 480 }),
+    csvRow({ sku: "BAD-WEIGHT", total_weight_kg: 181 }),
+  ]);
+  assert.match(invalid[0].errors.join(" "), /Toplam adet uyuşmuyor/);
+  assert.match(invalid[1].errors.join(" "), /Toplam ağırlık uyuşmuyor/);
+  assert.match(invalid[0].errors[0], /Satır 2 · SKU BAD-QTY/);
+  assert.match(invalid[1].errors[0], /Satır 3 · SKU BAD-WEIGHT/);
+  db.close();
+});
+
+test("CSV-backed purchase is atomic and persists immutable packing history", () => {
+  const { db, procurement, fx } = setup();
+  fx.recordCurrentUsdTry({ rate: "40", source: "MANUAL", changedAt: "2026-09-20T09:00:00.000Z", actorId: "finance-owner" });
+  const previews = procurement.previewCsv([csvRow({ sku: "CSV-ATOMIC-A" }), csvRow({ sku: "CSV-ATOMIC-B" })]);
+  const toLine = (preview: any, id: string): PurchaseLineInput => ({
+    id, quantity: preview.quantity, quoteBasis: "piece", supplierUnitPriceMinor: Math.round(Number(preview.unitPriceUsd) * 100),
+    currency: "USD", vatMode: "EXCLUDED", vatRateBps: 0, packing: preview.packing, catalogProposal: preview.catalogProposal,
+  });
+  const broken = toLine(previews[1], "atomic-b");
+  broken.packing = { ...broken.packing!, totalQuantity: 499 };
+  assert.throws(() => procurement.createPurchase(purchase("po-atomic-csv", [toLine(previews[0], "atomic-a"), broken])), (error: any) => error.code === "PACKING_QUANTITY_MISMATCH");
+  assert.equal(db.prepare("SELECT COUNT(*) FROM products WHERE sku IN ('CSV-ATOMIC-A','CSV-ATOMIC-B')").pluck().get(), 0);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM purchase_orders WHERE id='po-atomic-csv'").pluck().get(), 0);
+
+  const preview = procurement.previewCsv([csvRow()])[0];
+  const first = procurement.createPurchase(purchase("po-csv-history-a", [toLine(preview, "csv-line-a")]));
+  assert.equal(first.lines[0].packing.boxCount, 10);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM purchase_line_packing_snapshots WHERE purchase_order_id='po-csv-history-a'").pluck().get(), 1);
+  assert.throws(() => db.prepare("UPDATE purchase_line_packing_snapshots SET box_count=11 WHERE purchase_line_id='csv-line-a'").run(), /immutable/i);
+  const finalizedA = procurement.finalizeAcquisitionCosts("po-csv-history-a", { allocations: [] });
+  procurement.approveForReceipt("po-csv-history-a", "buyer");
+  const intent = procurement.listReceiptReady().find((item) => item.purchaseOrderId === "po-csv-history-a")!;
+  assert.deepEqual({ boxCount: intent.boxCount, unitsPerBox: intent.unitsPerBox, totalWeightKg: intent.totalWeightKg }, { boxCount: 10, unitsPerBox: 50, totalWeightKg: 184 });
+
+  fx.recordCurrentUsdTry({ rate: "45", source: "MANUAL", changedAt: "2026-09-20T10:00:00.000Z", actorId: "finance-owner" });
+  const productId = db.prepare("SELECT id FROM products WHERE sku='CSV-NEW'").pluck().get() as string;
+  const second = procurement.createPurchase(purchase("po-csv-history-b", [line({
+    id: "csv-line-b", productId, quantity: "500", supplierUnitPriceMinor: 172, vatRateBps: 0,
+    packing: { ...preview.packing },
+  })]));
+  const finalizedB = procurement.finalizeAcquisitionCosts("po-csv-history-b", { allocations: [] });
+  assert.equal(second.lines[0].packing.supplierNo, "H101");
+  const history = procurement.getProductPurchaseHistory(productId);
+  assert.deepEqual(new Set(history.map((item) => item.purchaseNumber)), new Set(["PO-po-csv-history-a", "PO-po-csv-history-b"]));
+  const historyByPurchase = new Map(history.map((item) => [item.purchaseNumber, item]));
+  assert.equal(historyByPurchase.get("PO-po-csv-history-b")!.finalLandedCostTry, finalizedB.lots[0].normalizedAcquisitionUnitCostTry.numerator / finalizedB.lots[0].normalizedAcquisitionUnitCostTry.denominator / 100);
+  assert.equal(historyByPurchase.get("PO-po-csv-history-a")!.finalLandedCostTry, finalizedA.lots[0].normalizedAcquisitionUnitCostTry.numerator / finalizedA.lots[0].normalizedAcquisitionUnitCostTry.denominator / 100);
+  assert.notEqual(historyByPurchase.get("PO-po-csv-history-a")!.finalLandedCostTry, historyByPurchase.get("PO-po-csv-history-b")!.finalLandedCostTry);
   db.close();
 });

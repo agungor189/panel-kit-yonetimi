@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { getUomDefinition, UOM_REGISTRY_VERSION, type UomCode } from "./uom.js";
+import { generateNormalizedFields } from "../../utils/normalizeProductFields.js";
 
 export type CatalogType = "product" | "profile" | "connector" | "cap" | "wheel" | "complementary" | "KIT";
 export type ProfileForm = "square" | "rectangular" | "round" | "channel" | "angle" | "flat" | "other";
@@ -33,6 +34,14 @@ export type CatalogProductInput = {
   material_behavior?: MaterialBehavior | null;
   profile?: ProfileAttributesInput | null;
   status?: string;
+  name_tr?: string | null;
+  name_en?: string | null;
+  supplier_code?: string | null;
+  product_type?: "simple" | "component" | "assembly" | "accessory" | null;
+  material?: string | null;
+  size?: string | null;
+  profile_type?: string | null;
+  is_sellable?: boolean;
 };
 
 export type CatalogProduct = {
@@ -64,6 +73,7 @@ export type CatalogProduct = {
   normalized_size?: string | null;
   normalized_tube_type?: string | null;
   normalized_pipe_size?: string | null;
+  product_type?: "simple" | "component" | "assembly" | "accessory" | null;
 };
 
 export class CatalogValidationError extends Error {
@@ -82,6 +92,11 @@ const requiredText = (value: unknown, field: string, max = 250): string => {
   const text = value.trim();
   if (!text || text.length > max || /[\u0000-\u001f\u007f]/.test(text)) throw new CatalogValidationError(`${field} is invalid.`);
   return text;
+};
+
+const optionalText = (value: unknown, field: string, max = 250): string | null => {
+  if (value === undefined || value === null || value === "") return null;
+  return requiredText(value, field, max);
 };
 
 const integerOrNull = (value: unknown, field: string, positive = false): number | null => {
@@ -166,6 +181,27 @@ const normalizedInput = (input: CatalogProductInput) => {
   const profile = normalizeProfile(input.profile);
   if (input.catalog_type === "profile" && !profile) throw new CatalogValidationError("Profile attributes are required.");
   if (input.catalog_type !== "profile" && profile) throw new CatalogValidationError("Profile attributes apply only to profile catalog items.");
+  const productType = input.product_type ?? null;
+  if (productType !== null && !["simple", "component", "assembly", "accessory"].includes(productType)) {
+    throw new CatalogValidationError("product_type is unsupported.");
+  }
+  const master = {
+    nameTr: optionalText(input.name_tr, "name_tr", 300),
+    nameEn: optionalText(input.name_en, "name_en", 300),
+    supplierCode: optionalText(input.supplier_code, "supplier_code", 200),
+    productType,
+    material: optionalText(input.material, "material", 150) || profile?.material || null,
+    size: optionalText(input.size, "size", 150),
+    profileType: optionalText(input.profile_type, "profile_type", 100),
+  };
+  const legacyNormalized = generateNormalizedFields({
+    material: master.material,
+    size: master.size,
+    pipe_size: master.size,
+    category: master.profileType,
+    name: [master.nameTr, master.nameEn].filter(Boolean).join(" "),
+    title,
+  });
   return {
     sku,
     title,
@@ -181,11 +217,17 @@ const normalizedInput = (input: CatalogProductInput) => {
     materialBehavior,
     profile,
     status: input.status ? requiredText(input.status, "status", 30) : "Active",
+    isSellable: input.is_sellable === undefined ? 1 : input.is_sellable ? 1 : 0,
+    master,
+    legacyNormalized: {
+      ...legacyNormalized,
+      normalized_tube_type: master.profileType || legacyNormalized.normalized_tube_type,
+    },
   };
 };
 
 const productSelect = `
-  SELECT p.id, p.sku, p.title, p.name_tr, p.name_en, p.supplier_code, p.material,
+  SELECT p.id, p.sku, p.title, p.name_tr, p.name_en, p.supplier_code, p.material, p.product_type,
     p.form_code, p.tube_type_code, p.size_code, p.size, p.pipe_size, p.model,
     p.normalized_material, p.normalized_size, p.normalized_tube_type, p.normalized_pipe_size,
     CASE
@@ -245,13 +287,21 @@ export class CatalogService {
     const id = input.id ? requiredText(input.id, "id", 200) : randomUUID();
     return this.db.transaction(() => {
       this.db.prepare(`INSERT INTO products (
-        id, name, title, sku, status, material, weight_grams, product_type, catalog_type, catalog_class, base_uom_code,
+        id, name, name_tr, name_en, title, sku, supplier_code, status, material, size, pipe_size, tube_type_code,
+        normalized_material, normalized_size, normalized_tube_type, normalized_pipe_size,
+        weight_grams, product_type, is_sellable, visible_in_catalog, catalog_type, catalog_class, base_uom_code,
         catalog_version, uom_registry_version, length_mm_int, width_mm_int, height_mm_int,
         diameter_mm_int, mass_grams_int, material_behavior
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(id, normalized.title, normalized.title, normalized.sku, normalized.status,
-          normalized.profile?.material || null, normalized.massGrams ?? 0,
-          normalized.catalogType === "KIT" ? "kit" : null,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, normalized.master.nameTr || normalized.master.nameEn || normalized.title,
+          normalized.master.nameTr, normalized.master.nameEn, normalized.title, normalized.sku,
+          normalized.master.supplierCode, normalized.status, normalized.master.material,
+          normalized.master.size, normalized.master.size, normalized.master.profileType,
+          normalized.legacyNormalized.normalized_material, normalized.legacyNormalized.normalized_size,
+          normalized.legacyNormalized.normalized_tube_type, normalized.legacyNormalized.normalized_pipe_size,
+          normalized.massGrams ?? 0,
+          normalized.catalogType === "KIT" ? "kit" : normalized.master.productType,
+          normalized.isSellable,
           normalized.catalogType === "complementary" || normalized.catalogType === "KIT" ? "product" : normalized.catalogType,
           normalized.catalogType === "complementary" ? "complementary" : null,
           normalized.baseUomCode, UOM_REGISTRY_VERSION, normalized.dimensions.length_mm,
@@ -400,6 +450,7 @@ export class CatalogService {
       normalized_size: row.normalized_size || null,
       normalized_tube_type: row.normalized_tube_type || null,
       normalized_pipe_size: row.normalized_pipe_size || null,
+      product_type: (row.product_type || null) as CatalogProduct["product_type"],
     };
   }
 }

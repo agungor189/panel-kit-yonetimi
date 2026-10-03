@@ -28,7 +28,7 @@ test('product and sales screens render through their shared shells', () => {
   const salesMarkup = renderWithRole(<Sales />);
 
   assert.match(productMarkup, /Ürün Yönetimi/);
-  assert.match(productMarkup, /Yeni Ürün Ekle/);
+  assert.doesNotMatch(productMarkup, /Yeni Ürün Ekle|Gelişmiş İçe Aktar|Tümünü Sil/);
   assert.match(salesMarkup, /Sipariş Yönetimi/);
   assert.match(salesMarkup, /Yeni Satış Ekle/);
 });
