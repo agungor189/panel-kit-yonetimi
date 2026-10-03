@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { X, Check, Calculator, AlertTriangle, RefreshCw } from 'lucide-react';
 import { api } from '../lib/api';
 import { useCurrency } from '../CurrencyContext';
+import { calculateFinalLandedSalePrice, finalLandedPricingDecision } from '../../shared/finalLandedPricing';
 
 export default function PricingSettingsModal({ 
   onClose, 
@@ -12,17 +13,10 @@ export default function PricingSettingsModal({
   onRefresh: () => void,
   products: any[] 
 }) {
-  const { FormatAmount, activeRate } = useCurrency();
-  const [exchangeRate, setExchangeRate] = useState<number>(activeRate || 0);
+  const { FormatAmount } = useCurrency();
   const [bufferPercentage, setBufferPercentage] = useState<number>(20);
   const [profitPercentage, setProfitPercentage] = useState<number>(50);
   const [includeLocked, setIncludeLocked] = useState<boolean>(false);
-
-  useEffect(() => {
-    if (activeRate > 0 && exchangeRate === 0) {
-      setExchangeRate(activeRate);
-    }
-  }, [activeRate]);
 
   const [previewData, setPreviewData] = useState<any[]>([]);
   const [showPreview, setShowPreview] = useState(false);
@@ -30,45 +24,26 @@ export default function PricingSettingsModal({
   const [errorMessage, setErrorMessage] = useState("");
   const [confirmUpdate, setConfirmUpdate] = useState<{ updates: any[], missingOnly: boolean } | null>(null);
 
-  // Initial calculation logic
   const calculatePricing = (product: any) => {
-    let purchaseUSD = parseFloat(product.purchase_price_usd);
-    let purchaseTRY = 0;
-    const rate = exchangeRate || 0;
-
-    if (!isNaN(purchaseUSD) && purchaseUSD > 0) {
-       purchaseTRY = purchaseUSD * rate;
-    } else if (parseFloat(product.purchase_cost) > 0) {
-       purchaseTRY = parseFloat(product.purchase_cost);
-    }
-
-    if (purchaseTRY === 0 && parseFloat(product.sale_price) > 0) {
-       return parseFloat(product.sale_price); // Fallback to existing logic if cost is unknown
-    }
-
-    const buffer = bufferPercentage || 0;
-    const profit = profitPercentage || 0;
-    const bufferedCostTRY = purchaseTRY * (1 + buffer / 100);
-    const calculatedSalePriceTRY = bufferedCostTRY * (1 + profit / 100);
-    return Math.ceil(calculatedSalePriceTRY);
+    return calculateFinalLandedSalePrice(product.landed_cost_try, bufferPercentage, profitPercentage);
   };
 
   const handlePreview = () => {
     let hasFailures = false;
     const data = products.map(p => {
       if (p.price_locked && !includeLocked) {
-        return { ...p, newSalePrice: p.sale_price, willUpdate: false };
+        return { ...p, newSalePrice: null, willUpdate: false, skipReason: 'LOCKED' };
       }
-      const newPrice = calculatePricing(p);
-      if (newPrice === 0 && (!p.price_locked)) {
-         hasFailures = true;
+      const decision = finalLandedPricingDecision(p.landed_cost_try, bufferPercentage, profitPercentage);
+      if (!decision.willUpdate) {
+        hasFailures = true;
       }
-      return { ...p, newSalePrice: newPrice, willUpdate: true };
+      return { ...p, ...decision };
     });
     setPreviewData(data);
     setShowPreview(true);
     if (hasFailures) {
-       setErrorMessage("Bazı ürünlerin alış fiyatı bilinmediği veya 0 olduğu için fiyat hesaplanamadı. Eksik verili ürünleri Bakım menüsünden onarabilirsiniz.");
+       setErrorMessage("FINAL Landed Cost bulunmayan ürünler fiyatlandırmaya dahil edilmedi.");
     } else {
        setErrorMessage("");
     }
@@ -79,9 +54,9 @@ export default function PricingSettingsModal({
     const dataToUpdate = products.filter(p => {
       if (p.price_locked && !includeLocked) return false;
       if (onlyMissing && p.sale_price > 0) return false;
-      return true;
+      return calculatePricing(p) !== null;
     }).map(p => {
-      return { id: p.id, newSalePrice: calculatePricing(p) };
+      return { id: p.id, newSalePrice: calculatePricing(p)! };
     });
 
     if (dataToUpdate.length === 0) {
@@ -100,7 +75,6 @@ export default function PricingSettingsModal({
       await api.post('/products/bulk-pricing', {
         updates: confirmUpdate.updates,
         settings: {
-          exchangeRate,
           bufferPercentage,
           profitPercentage
         }
@@ -126,7 +100,7 @@ export default function PricingSettingsModal({
             </div>
             <div>
               <h2 className="text-xl font-bold text-gray-900">Toplu Fiyat Yönetimi</h2>
-              <p className="text-xs text-gray-500">Merkezi fiyatlandırma (Kur + Buffer + Kâr)</p>
+              <p className="text-xs text-gray-500">FINAL Landed Cost + Buffer + Kâr</p>
             </div>
           </div>
           <button onClick={onClose} className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-xl transition-colors">
@@ -135,21 +109,7 @@ export default function PricingSettingsModal({
         </div>
 
         <div className="p-6 flex-1 overflow-y-auto space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <div>
-              <label className="block text-sm font-bold text-gray-700 mb-2">Güncel Kur (USD → TRY)</label>
-              <div className="relative">
-                <div className="absolute left-4 top-2.5 text-gray-500 font-bold">₺</div>
-                <input 
-                  type="number" 
-                  step="0.01"
-                  min="0.01"
-                  value={exchangeRate}
-                  onChange={e => setExchangeRate(parseFloat(e.target.value) || 0)}
-                  className="w-full pl-8 pr-4 py-2 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all font-bold"
-                />
-              </div>
-            </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div>
               <label className="block text-sm font-bold text-gray-700 mb-2">Buffer Marjı (%)</label>
               <div className="relative">
@@ -261,7 +221,7 @@ export default function PricingSettingsModal({
                   <thead className="bg-gray-100 text-gray-600 font-semibold">
                     <tr>
                       <th className="px-4 py-3">Ürün</th>
-                      <th className="px-4 py-3">Alış (USD)</th>
+                      <th className="px-4 py-3">FINAL Landed Cost</th>
                       <th className="px-4 py-3">Eski Satış (TRY)</th>
                       <th className="px-4 py-3">Yeni Satış (TRY)</th>
                       <th className="px-4 py-3">Fark</th>
@@ -270,22 +230,22 @@ export default function PricingSettingsModal({
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {previewData.slice(0, 50).map(p => {
-                      const diff = p.newSalePrice - (p.sale_price || 0);
+                      const diff = p.newSalePrice === null ? null : p.newSalePrice - (p.sale_price || 0);
                       return (
                         <tr key={p.id} className={p.willUpdate ? 'bg-white' : 'bg-gray-50 opacity-60'}>
                           <td className="px-4 py-3 font-medium">{p.name || p.title}</td>
-                          <td className="px-4 py-3">${(p.purchase_price_usd || 0).toFixed(2)}</td>
+                          <td className="px-4 py-3">{p.landed_cost_try == null ? <span className="font-bold text-amber-700">Landed Cost bekleniyor</span> : <FormatAmount amount={p.landed_cost_try} />}</td>
                           <td className="px-4 py-3"><FormatAmount amount={p.sale_price || 0} /></td>
-                          <td className="px-4 py-3 font-bold text-blue-600"><FormatAmount amount={p.newSalePrice} /></td>
+                          <td className="px-4 py-3 font-bold text-blue-600">{p.newSalePrice === null ? '—' : <FormatAmount amount={p.newSalePrice} />}</td>
                           <td className="px-4 py-3">
-                            {diff !== 0 ? (
+                            {diff !== null && diff !== 0 ? (
                               <span className={diff > 0 ? 'text-green-600 font-semibold' : 'text-red-600 font-semibold'}>
                                 {diff > 0 ? '+' : ''}<FormatAmount amount={diff} />
                               </span>
                             ) : '-'}
                           </td>
                           <td className="px-4 py-3 text-center">
-                            {!p.willUpdate && <span className="text-xs bg-gray-200 text-gray-600 px-2 py-1 rounded-md font-bold">Kilitli / Atlandı</span>}
+                            {!p.willUpdate && <span className="text-xs bg-gray-200 text-gray-600 px-2 py-1 rounded-md font-bold">{p.skipReason === 'MISSING_LANDED_COST' ? 'Fiyatlandırmaya dahil edilmedi' : 'Kilitli / Atlandı'}</span>}
                             {p.willUpdate && <span className="text-xs bg-blue-100 text-blue-600 px-2 py-1 rounded-md font-bold">Güncellenecek</span>}
                           </td>
                         </tr>

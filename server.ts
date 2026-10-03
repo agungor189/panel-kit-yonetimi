@@ -81,6 +81,7 @@ import {
 } from "./server/services/productImageImport.js";
 import { ensureOwnedUploadRoot, persistUpload, removeStoredUpload, removeStoredUploadReference } from "./server/services/uploadSecurity.js";
 import { PRODUCT_TYPES, canonicalProductType, parseReserveLocations } from "./shared/productCsvMapping.js";
+import { calculateFinalLandedSalePrice } from "./shared/finalLandedPricing.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2561,7 +2562,7 @@ async function startServer() {
       const kitMutation = updates.find((update: any) => db.prepare(`SELECT 1 FROM products p
         LEFT JOIN published_kits k ON k.product_id=p.id WHERE p.id=? AND (p.product_type='kit' OR k.id IS NOT NULL)`).get(update?.id));
       if (kitMutation) return res.status(409).json({ success: false, error: { code: 'KIT_PUBLICATION_REQUIRED', message: 'KIT price changes require a new canonical published kit version.' } });
-      const { exchangeRate, bufferPercentage, profitPercentage } = settings;
+      const { bufferPercentage, profitPercentage } = settings ?? {};
       let updatedCount = 0;
       let skippedLockedCount = 0;
       let skippedMissingCount = 0;
@@ -2586,7 +2587,6 @@ async function startServer() {
         const stmt = db.prepare(`
           UPDATE products
           SET sale_price = ?,
-              exchange_rate_used = ?,
               buffer_percentage = ?,
               profit_percentage = ?,
               updated_at = CURRENT_TIMESTAMP
@@ -2629,8 +2629,12 @@ async function startServer() {
           );
 
           const landedCostTry = Number(currentProduct.cost_try_numerator) / Number(currentProduct.cost_try_denominator) / 100;
-          const newSalePrice = Math.ceil(landedCostTry * (1 + Number(bufferPercentage || 0) / 100) * (1 + Number(profitPercentage || 0) / 100));
-          const result = stmt.run(newSalePrice, exchangeRate, bufferPercentage, profitPercentage, update.id);
+          const newSalePrice = calculateFinalLandedSalePrice(landedCostTry, bufferPercentage, profitPercentage);
+          if (newSalePrice === null) {
+            skippedMissingLandedCostCount += 1;
+            continue;
+          }
+          const result = stmt.run(newSalePrice, bufferPercentage, profitPercentage, update.id);
           if (result.changes > 0) {
             updatedCount += result.changes;
             platformStmt.run(newSalePrice, update.id);
@@ -2644,7 +2648,6 @@ async function startServer() {
         skippedLockedCount,
         skippedMissingCount,
         skippedMissingLandedCostCount,
-        exchangeRate,
         bufferPercentage,
         profitPercentage,
       }, req.user?.id);

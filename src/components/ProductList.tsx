@@ -905,8 +905,6 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                     ? ((p.sale_price - (p.landed_cost_try * (1 + (p.buffer_percentage || 0) / 100))) / p.sale_price) * 100
                     : null;
                   const stockValue = (p.total_stock || 0) * (p.sale_price || 0);
-                  const bufferedCostTRY = p.landed_cost_try == null ? null : p.landed_cost_try * (1 + (p.buffer_percentage || 0) / 100);
-
                   return (
                   <tr key={p.id} onClick={() => onProductClick(p.id)} className="hover:bg-bg-main cursor-pointer group transition-colors">
                     <td className="px-4 py-4 text-center text-xs font-bold text-text-muted/60">
@@ -961,7 +959,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                       ${(p.purchase_price_usd || 0).toFixed(2)}
                     </td>
                     <td className="px-4 py-4 hidden lg:table-cell text-sm font-medium text-gray-500 text-right">
-                      {bufferedCostTRY == null ? <span className="text-xs font-bold text-amber-700">Landed Cost bekliyor</span> : <div><FormatAmount align="right" amount={bufferedCostTRY} /><span className="block text-[9px] text-text-muted">FINAL: <FormatAmount amount={p.landed_cost_try!}/></span></div>}
+                      {p.landed_cost_try == null ? <span className="text-xs font-bold text-amber-700">Landed Cost bekliyor</span> : <FormatAmount align="right" amount={p.landed_cost_try} />}
                     </td>
                     <td className="px-4 py-4 text-sm font-extrabold text-blue-600 text-right">
                       <FormatAmount align="right" amount={p.sale_price || 0} />
