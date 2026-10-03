@@ -159,6 +159,14 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
       base_uom_code: baseUomCode,
       mass_grams: Math.max(0, Math.round(Number(formData.weight_grams) || 0)),
       status: formData.status || 'Active',
+      name_tr: formData.name_tr || null,
+      name_en: formData.name_en || null,
+      supplier_code: formData.supplier_code || null,
+      product_type: formData.product_type || 'simple',
+      material: formData.material || formData.category || null,
+      size: formData.size || formData.pipe_size || null,
+      profile_type: formData.tube_type_code || formData.form_code || null,
+      is_sellable: (formData.status || 'Active') === 'Active',
     };
 
     const operational = {
@@ -168,7 +176,7 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
       supplier_code: formData.supplier_code || null,
       barcode: formData.barcode || null,
       category: formData.category || null,
-      material: formData.category || null,
+      material: formData.material || formData.category || null,
       model: formData.model || null,
       product_series: formData.product_series || null,
       tube_type_code: formData.tube_type_code || null,

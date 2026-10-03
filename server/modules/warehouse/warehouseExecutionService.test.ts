@@ -5,7 +5,7 @@ import { initializeDatabase } from "../../db/initialize.js";
 import { CatalogService } from "../catalog/catalogService.js";
 import { CommandExecutor } from "../commands/commandFoundation.js";
 import { InventoryService } from "../inventory/inventoryService.js";
-import { ProcurementService } from "../procurement/procurementService.js";
+import { ProcurementService, type PurchaseLineInput } from "../procurement/procurementService.js";
 import { WarehouseExecutionError, WarehouseExecutionService, type WarehouseTopologyInput } from "./warehouseExecutionService.js";
 
 const actor = { human: { id: "warehouse-owner", name: "Warehouse Owner" } };
@@ -119,6 +119,71 @@ test("Warehouse rejects a finalized purchase until Panel explicitly approves rec
   assert.throws(() => receive(db, warehouse, lot.id, "not-approved", [{ id: "package-not-approved", code: "PKG-NOT-APPROVED", quantityBaseInt: 1 }], 1),
     (error: any) => error instanceof WarehouseExecutionError && error.code === "PANEL_RECEIPT_APPROVAL_REQUIRED");
   assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_ledger_events").pluck().get(), 0);
+  db.close();
+});
+
+test("first authoritative receipt activates only a new procurement CSV product", () => {
+  const { db, procurement, warehouse } = setup();
+  const preview = procurement.previewCsv([{
+    sku: "CSV-FIRST-RECEIPT", supplier_no: "SUP-CSV-1", type: "simple", size: "25 mm",
+    material: "Aluminum", profile_type: "Round", name_en: "CSV first receipt",
+    name_tr: "CSV ilk kabul", total_quantity: 500, box_count: 10, units_per_box: 50,
+    box_weight_kg: 18.4, total_weight_kg: 184, part_weight_g: 355, purchase_price_usd: 1.72,
+  }])[0];
+  assert.deepEqual(preview.errors, []);
+  const csvLine: PurchaseLineInput = {
+    id: "line-csv-first-receipt",
+    quantity: preview.quantity,
+    quoteBasis: "piece",
+    supplierUnitPriceMinor: 172,
+    currency: "TRY",
+    vatMode: "EXCLUDED",
+    vatRateBps: 0,
+    packing: preview.packing,
+    catalogProposal: preview.catalogProposal,
+  };
+  procurement.createPurchase({
+    id: "purchase-csv-first-receipt",
+    supplierId: "supplier",
+    acquisitionCostVatPolicy: "VAT_EXCLUDED_FROM_INVENTORY_COST",
+    lines: [csvLine],
+  });
+  const product = db.prepare(`SELECT id,status,is_sellable,central_stock,procurement_activation_pending
+    FROM products WHERE sku='CSV-FIRST-RECEIPT'`).get() as any;
+  assert.deepEqual({ status: product.status, sellable: product.is_sellable, stock: product.central_stock, pending: product.procurement_activation_pending },
+    { status: "Passive", sellable: 0, stock: 0, pending: 1 });
+  assert.throws(() => db.prepare("UPDATE products SET status='Active',is_sellable=1 WHERE id=?").run(product.id), /remain passive/i);
+  assert.throws(() => db.prepare("UPDATE products SET procurement_activation_pending=0 WHERE id=?").run(product.id), /requires physical stock/i);
+
+  const lot = procurement.finalizeAcquisitionCosts("purchase-csv-first-receipt", { allocations: [] }).lots[0];
+  assert.deepEqual(db.prepare("SELECT status,is_sellable,central_stock,procurement_activation_pending FROM products WHERE id=?").get(product.id),
+    { status: "Passive", is_sellable: 0, central_stock: 0, procurement_activation_pending: 1 });
+  procurement.approveForReceipt("purchase-csv-first-receipt", "buyer");
+  assert.deepEqual(db.prepare("SELECT status,is_sellable,central_stock,procurement_activation_pending FROM products WHERE id=?").get(product.id),
+    { status: "Passive", is_sellable: 0, central_stock: 0, procurement_activation_pending: 1 });
+
+  receive(db, warehouse, lot.id, "csv-first-receipt", [
+    { id: "csv-first-receipt-package", code: "CSV-FIRST-RECEIPT-PACKAGE", quantityBaseInt: 500 },
+  ], 500);
+  assert.deepEqual(db.prepare("SELECT status,is_sellable,central_stock,procurement_activation_pending FROM products WHERE id=?").get(product.id),
+    { status: "Active", is_sellable: 1, central_stock: 500, procurement_activation_pending: 0 });
+  assert.equal(db.prepare("SELECT SUM(quantity_delta_base_int) FROM inventory_ledger_events WHERE product_id=? AND event_type='RECEIPT'").pluck().get(product.id), 500);
+  db.close();
+});
+
+test("authoritative receipt does not activate an intentionally passive existing product", () => {
+  const { db, procurement, warehouse } = setup();
+  new CatalogService(db).createProduct({
+    id: "manual-passive", sku: "MANUAL-PASSIVE", title: "Manually passive",
+    catalog_type: "product", base_uom_code: "piece", status: "Passive", is_sellable: false,
+  });
+  assert.throws(() => db.prepare("UPDATE products SET procurement_activation_pending=1 WHERE id='manual-passive'").run(), /insert-only/i);
+  const lot = costed(procurement, "manual-passive", "manual-passive", 4);
+  receive(db, warehouse, lot.id, "manual-passive", [
+    { id: "manual-passive-package", code: "MANUAL-PASSIVE-PACKAGE", quantityBaseInt: 4 },
+  ], 4);
+  assert.deepEqual(db.prepare("SELECT status,is_sellable,central_stock,procurement_activation_pending FROM products WHERE id='manual-passive'").get(),
+    { status: "Passive", is_sellable: 0, central_stock: 4, procurement_activation_pending: 0 });
   db.close();
 });
 

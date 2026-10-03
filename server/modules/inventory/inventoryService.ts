@@ -5,6 +5,7 @@ import { ProfileCutInventoryService, type ProfileCutPlanInput } from "./profileC
 import { ReconciliationScopeGuard } from "../reconciliation/reconciliationGuard.js";
 import { enqueueCanonicalChannelChanges } from "../channels/channelOutboundProjection.js";
 import { ProcurementService } from "../procurement/procurementService.js";
+import { CatalogService } from "../catalog/catalogService.js";
 
 type LocationKind = "PICKING" | "RESERVE";
 type ReservationStatus = "ACTIVE" | "PICKED" | "PACKED" | "RELEASED" | "DISPATCHED" | "STOCK_DISCREPANCY";
@@ -109,7 +110,13 @@ export class InventoryService {
       );
       new ProfileCutInventoryService(this.db).createReceiptPieces(lotId, operationId);
       this.syncProjection(snapshot.product_id);
-      enqueueCanonicalChannelChanges(this.db, { productId: snapshot.product_id, kinds: ["STOCK"], operationId, occurredAt: receivedAt });
+      const activated = new CatalogService(this.db).activateAfterFirstProcurementReceipt(snapshot.product_id);
+      enqueueCanonicalChannelChanges(this.db, {
+        productId: snapshot.product_id,
+        kinds: activated ? ["STOCK", "VISIBILITY"] : ["STOCK"],
+        operationId,
+        occurredAt: receivedAt,
+      });
       new ProcurementService(this.db).markReceiptRecorded(snapshot.purchase_order_id, receivedAt);
       return {
         lot: {

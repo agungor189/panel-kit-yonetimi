@@ -28,6 +28,7 @@ import { PUSH_NOTIFICATION_DISPATCH_CATEGORIES_SCHEMA_V92 } from "../db/pushNoti
 import { PUSH_NOTIFICATION_DISPATCH_ALL_CATEGORIES_SCHEMA_V93 } from "../db/pushNotificationDispatchAllCategoriesSchema.js";
 import { PROCUREMENT_WORKFLOW_SCHEMA_V94 } from "../db/procurementWorkflowSchema.js";
 import { PROCUREMENT_PACKING_SCHEMA_V95 } from "../db/procurementPackingSchema.js";
+import { CATALOG_PROCUREMENT_ACTIVATION_SCHEMA_V96 } from "../db/catalogProcurementActivationSchema.js";
 import { WAREHOUSE_EXECUTION_SCHEMA_V71, WAREHOUSE_REPLENISHMENT_RUNTIME_SCHEMA_V73 } from "../db/warehouseExecutionSchema.js";
 import { canonicalPayloadHash } from "../modules/commands/commandFoundation.js";
 
@@ -3102,9 +3103,16 @@ const migrations: Migration[] = [
       db.exec(PROCUREMENT_PACKING_SCHEMA_V95);
     },
   },
+  {
+    version: 96,
+    name: "add_procurement_product_activation_provenance",
+    up(db) {
+      db.exec(CATALOG_PROCUREMENT_ACTIVATION_SCHEMA_V96);
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 95;
+export const CURRENT_SCHEMA_VERSION = 96;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),
@@ -3119,7 +3127,7 @@ export type MigrationManifestEntry = {
 };
 
 const checksumFor = (migration: Migration): string => createHash("sha256")
-  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}${migration.version === 69 ? `\0${INVENTORY_SCHEMA_V69}` : ""}${migration.version === 71 ? `\0${WAREHOUSE_EXECUTION_SCHEMA_V71}` : ""}${migration.version === 74 ? `\0${SALES_FINANCIAL_SCHEMA_V74}` : ""}${migration.version === 75 ? `\0${RETURNS_SCHEMA_V75}` : ""}${migration.version === 76 ? `\0${WAREHOUSE_PACKAGE_ORIGIN_SCHEMA_V76}` : ""}${migration.version === 77 ? `\0${PUBLISHED_KIT_SCHEMA_V77}` : ""}${migration.version === 78 ? `\0${PROFILE_CUT_REMEDIATION_SCHEMA_V78}` : ""}${migration.version === 79 ? `\0${CHANNEL_GATEWAY_SCHEMA_V79}` : ""}${migration.version === 80 ? `\0${CHANNEL_GATEWAY_REMEDIATION_SCHEMA_V80}` : ""}${migration.version === 81 ? `\0${CHANNEL_GATEWAY_CORRECTNESS_SCHEMA_V81}` : ""}${migration.version === 82 ? `\0${SHIPMENT_CARRIER_SCHEMA_V82}` : ""}${migration.version === 83 ? `\0${GELIVER_REMEDIATION_SCHEMA_V83}` : ""}${migration.version === 84 ? `\0${CHANNEL_SHIPMENT_OUTBOUND_SCHEMA_V84}` : ""}${migration.version === 85 ? `\0${PRINT_STATE_SCHEMA_V85}` : ""}${migration.version === 86 ? `\0${PRINT_DEDUP_COLUMNS_SCHEMA_V86}\0${PRINT_DEDUP_GUARDS_SCHEMA_V86}` : ""}${migration.version === 87 ? `\0${RECONCILIATION_SCHEMA_V87}` : ""}${migration.version === 88 ? `\0${PUSH_SUBSCRIPTIONS_SCHEMA_V88}` : ""}${migration.version === 89 ? `\0${NOTIFICATION_PREFERENCES_SCHEMA_V89}` : ""}${migration.version === 90 ? `\0${NOTIFICATION_TEMPLATES_SCHEMA_V90}` : ""}${migration.version === 91 ? `\0${PUSH_NOTIFICATION_DISPATCH_SCHEMA_V91}` : ""}${migration.version === 92 ? `\0${PUSH_NOTIFICATION_DISPATCH_CATEGORIES_SCHEMA_V92}` : ""}${migration.version === 94 ? `\0${PROCUREMENT_WORKFLOW_SCHEMA_V94}` : ""}${migration.version === 95 ? `\0${PROCUREMENT_PACKING_SCHEMA_V95}` : ""}`)
+  .update(`${migration.version}\0${migration.name}\0${migration.up.toString()}${migration.version === 67 ? `\0${PROCUREMENT_SCHEMA_V67}` : ""}${migration.version === 68 ? `\0${PROCUREMENT_REMEDIATION_SCHEMA_V68}` : ""}${migration.version === 69 ? `\0${INVENTORY_SCHEMA_V69}` : ""}${migration.version === 71 ? `\0${WAREHOUSE_EXECUTION_SCHEMA_V71}` : ""}${migration.version === 74 ? `\0${SALES_FINANCIAL_SCHEMA_V74}` : ""}${migration.version === 75 ? `\0${RETURNS_SCHEMA_V75}` : ""}${migration.version === 76 ? `\0${WAREHOUSE_PACKAGE_ORIGIN_SCHEMA_V76}` : ""}${migration.version === 77 ? `\0${PUBLISHED_KIT_SCHEMA_V77}` : ""}${migration.version === 78 ? `\0${PROFILE_CUT_REMEDIATION_SCHEMA_V78}` : ""}${migration.version === 79 ? `\0${CHANNEL_GATEWAY_SCHEMA_V79}` : ""}${migration.version === 80 ? `\0${CHANNEL_GATEWAY_REMEDIATION_SCHEMA_V80}` : ""}${migration.version === 81 ? `\0${CHANNEL_GATEWAY_CORRECTNESS_SCHEMA_V81}` : ""}${migration.version === 82 ? `\0${SHIPMENT_CARRIER_SCHEMA_V82}` : ""}${migration.version === 83 ? `\0${GELIVER_REMEDIATION_SCHEMA_V83}` : ""}${migration.version === 84 ? `\0${CHANNEL_SHIPMENT_OUTBOUND_SCHEMA_V84}` : ""}${migration.version === 85 ? `\0${PRINT_STATE_SCHEMA_V85}` : ""}${migration.version === 86 ? `\0${PRINT_DEDUP_COLUMNS_SCHEMA_V86}\0${PRINT_DEDUP_GUARDS_SCHEMA_V86}` : ""}${migration.version === 87 ? `\0${RECONCILIATION_SCHEMA_V87}` : ""}${migration.version === 88 ? `\0${PUSH_SUBSCRIPTIONS_SCHEMA_V88}` : ""}${migration.version === 89 ? `\0${NOTIFICATION_PREFERENCES_SCHEMA_V89}` : ""}${migration.version === 90 ? `\0${NOTIFICATION_TEMPLATES_SCHEMA_V90}` : ""}${migration.version === 91 ? `\0${PUSH_NOTIFICATION_DISPATCH_SCHEMA_V91}` : ""}${migration.version === 92 ? `\0${PUSH_NOTIFICATION_DISPATCH_CATEGORIES_SCHEMA_V92}` : ""}${migration.version === 94 ? `\0${PROCUREMENT_WORKFLOW_SCHEMA_V94}` : ""}${migration.version === 95 ? `\0${PROCUREMENT_PACKING_SCHEMA_V95}` : ""}${migration.version === 96 ? `\0${CATALOG_PROCUREMENT_ACTIVATION_SCHEMA_V96}` : ""}`)
   .digest("hex");
 
 export function getMigrationManifest(): MigrationManifestEntry[] {

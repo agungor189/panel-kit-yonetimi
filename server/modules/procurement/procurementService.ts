@@ -996,7 +996,7 @@ export class ProcurementService {
         size: proposal.size,
         profile_type: proposal.profileType,
         is_sellable: false,
-      });
+      }, { activationProvenance: "PROCUREMENT_CSV_FIRST_RECEIPT" });
       return { ...input, productId: created.id };
     } catch (error) {
       if (error instanceof CatalogValidationError) {

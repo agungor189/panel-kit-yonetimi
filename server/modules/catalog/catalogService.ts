@@ -55,6 +55,7 @@ export type CatalogProduct = {
   uom_registry_version: typeof UOM_REGISTRY_VERSION;
   dimensions: { length_mm: number | null; width_mm: number | null; height_mm: number | null; diameter_mm: number | null };
   mass_grams: number | null;
+  weight_grams: number | null;
   material_behavior: MaterialBehavior | null;
   profile: ProfileAttributesInput | null;
   status: string;
@@ -74,6 +75,12 @@ export type CatalogProduct = {
   normalized_tube_type?: string | null;
   normalized_pipe_size?: string | null;
   product_type?: "simple" | "component" | "assembly" | "accessory" | null;
+  is_sellable: boolean;
+};
+
+type CatalogMutationOptions = {
+  allowPublishedKitMutation?: boolean;
+  activationProvenance?: "PROCUREMENT_CSV_FIRST_RECEIPT";
 };
 
 export class CatalogValidationError extends Error {
@@ -237,7 +244,8 @@ const productSelect = `
     END AS catalog_type,
     p.catalog_class, p.base_uom_code, p.catalog_version,
     p.catalog_version_ref, p.uom_registry_version, p.length_mm_int, p.width_mm_int,
-    p.height_mm_int, p.diameter_mm_int, p.mass_grams_int, p.material_behavior, p.status,
+    p.height_mm_int, p.diameter_mm_int, p.mass_grams_int, p.weight_grams, p.material_behavior, p.status,
+    p.is_sellable,
     u.base_quantum, u.quantity_scale,
     a.material AS profile_material, a.form AS profile_form,
     a.width_micrometers AS profile_width_micrometers,
@@ -279,20 +287,26 @@ export class CatalogService {
     }).immediate();
   }
 
-  createProduct(input: CatalogProductInput, options: { allowPublishedKitMutation?: boolean } = {}): CatalogProduct {
+  createProduct(input: CatalogProductInput, options: CatalogMutationOptions = {}): CatalogProduct {
     const normalized = normalizedInput(input);
     if (normalized.catalogType === "KIT" && !options.allowPublishedKitMutation) {
       throw new CatalogValidationError("KIT products must be created by canonical kit publication.", "KIT_PUBLICATION_REQUIRED", 409);
     }
     const id = input.id ? requiredText(input.id, "id", 200) : randomUUID();
     return this.db.transaction(() => {
+      const hasActivationProvenance = Boolean(this.db.prepare(`SELECT 1 FROM pragma_table_info('products')
+        WHERE name='procurement_activation_pending'`).get());
+      const activationPending = options.activationProvenance === "PROCUREMENT_CSV_FIRST_RECEIPT";
+      if (activationPending && !hasActivationProvenance) {
+        throw new CatalogValidationError("Procurement activation provenance schema is unavailable.", "CATALOG_SCHEMA_OUTDATED", 409);
+      }
       this.db.prepare(`INSERT INTO products (
         id, name, name_tr, name_en, title, sku, supplier_code, status, material, size, pipe_size, tube_type_code,
         normalized_material, normalized_size, normalized_tube_type, normalized_pipe_size,
         weight_grams, product_type, is_sellable, visible_in_catalog, catalog_type, catalog_class, base_uom_code,
         catalog_version, uom_registry_version, length_mm_int, width_mm_int, height_mm_int,
-        diameter_mm_int, mass_grams_int, material_behavior
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`)
+        diameter_mm_int, mass_grams_int, material_behavior${hasActivationProvenance ? ", procurement_activation_pending" : ""}
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?${hasActivationProvenance ? ", ?" : ""})`)
         .run(id, normalized.master.nameTr || normalized.master.nameEn || normalized.title,
           normalized.master.nameTr, normalized.master.nameEn, normalized.title, normalized.sku,
           normalized.master.supplierCode, normalized.status, normalized.master.material,
@@ -306,30 +320,54 @@ export class CatalogService {
           normalized.catalogType === "complementary" ? "complementary" : null,
           normalized.baseUomCode, UOM_REGISTRY_VERSION, normalized.dimensions.length_mm,
           normalized.dimensions.width_mm, normalized.dimensions.height_mm, normalized.dimensions.diameter_mm,
-          normalized.massGrams, normalized.materialBehavior);
+          normalized.massGrams, normalized.materialBehavior,
+          ...(hasActivationProvenance ? [activationPending ? 1 : 0] : []));
       this.writeProfile(id, normalized.profile);
       return this.captureVersion(id, 1);
     }).immediate();
   }
 
-  updateProduct(id: string, expectedVersion: number, input: CatalogProductInput, options: { allowPublishedKitMutation?: boolean } = {}): CatalogProduct {
+  updateProduct(id: string, expectedVersion: number, input: CatalogProductInput, options: CatalogMutationOptions = {}): CatalogProduct {
     if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) throw new CatalogValidationError("expected catalog version is invalid.");
-    const normalized = normalizedInput(input);
     return this.db.transaction(() => {
-      const current = this.db.prepare("SELECT catalog_version,base_uom_code,product_type FROM products WHERE id=?").get(id) as { catalog_version: number; base_uom_code: UomCode; product_type: string | null } | undefined;
+      const current = this.getProduct(id);
       if (!current) throw new CatalogValidationError("Catalog product was not found.");
-      if ((current.product_type === "kit" || normalized.catalogType === "KIT") && !options.allowPublishedKitMutation) {
+      const normalized = normalizedInput({
+        ...input,
+        dimensions: { ...current.dimensions, ...(input.dimensions || {}) },
+        mass_grams: input.mass_grams === undefined ? current.mass_grams ?? current.weight_grams : input.mass_grams,
+        material_behavior: input.material_behavior === undefined ? current.material_behavior : input.material_behavior,
+        profile: input.profile === undefined ? current.profile : input.profile,
+        status: input.status === undefined ? current.status : input.status,
+        name_tr: input.name_tr === undefined ? current.name_tr : input.name_tr,
+        name_en: input.name_en === undefined ? current.name_en : input.name_en,
+        supplier_code: input.supplier_code === undefined ? current.supplier_code : input.supplier_code,
+        product_type: input.catalog_type === "KIT"
+          ? null
+          : input.product_type === undefined ? current.product_type : input.product_type,
+        material: input.material === undefined ? current.material : input.material,
+        size: input.size === undefined ? current.size ?? current.pipe_size : input.size,
+        profile_type: input.profile_type === undefined ? current.tube_type_code : input.profile_type,
+        is_sellable: input.is_sellable === undefined ? current.is_sellable : input.is_sellable,
+      });
+      if ((current.catalog_type === "KIT" || normalized.catalogType === "KIT") && !options.allowPublishedKitMutation) {
         throw new CatalogValidationError("KIT products may only change through canonical kit publication.", "KIT_PUBLICATION_REQUIRED", 409);
       }
       if (current.catalog_version !== expectedVersion) throw new CatalogValidationError("Catalog version conflict.");
-      if (current.base_uom_code !== normalized.baseUomCode) {
+      if (current.base_uom.code !== normalized.baseUomCode) {
         throw new CatalogValidationError("Base UOM identity is immutable after product creation; create a new SKU/product identity.");
       }
-      this.db.prepare(`UPDATE products SET title=?, name=?, sku=?, status=?, material=?, weight_grams=?, product_type=?, catalog_type=?, catalog_class=?,
+      this.db.prepare(`UPDATE products SET title=?, name=?, name_tr=?, name_en=?, sku=?, supplier_code=?, status=?, material=?, size=?, pipe_size=?, tube_type_code=?,
+        normalized_material=?, normalized_size=?, normalized_tube_type=?, normalized_pipe_size=?, weight_grams=?, product_type=?, is_sellable=?, catalog_type=?, catalog_class=?,
         base_uom_code=?, uom_registry_version=?, length_mm_int=?, width_mm_int=?, height_mm_int=?, diameter_mm_int=?,
         mass_grams_int=?, material_behavior=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND catalog_version=?`)
-        .run(normalized.title, normalized.title, normalized.sku, normalized.status, normalized.profile?.material || null,
-          normalized.massGrams ?? 0, normalized.catalogType === "KIT" ? "kit" : null,
+        .run(normalized.title, normalized.master.nameTr || normalized.master.nameEn || normalized.title,
+          normalized.master.nameTr, normalized.master.nameEn, normalized.sku, normalized.master.supplierCode,
+          normalized.status, normalized.master.material, normalized.master.size, normalized.master.size, normalized.master.profileType,
+          normalized.legacyNormalized.normalized_material, normalized.legacyNormalized.normalized_size,
+          normalized.legacyNormalized.normalized_tube_type, normalized.legacyNormalized.normalized_pipe_size,
+          normalized.massGrams ?? 0, normalized.catalogType === "KIT" ? "kit" : normalized.master.productType,
+          normalized.isSellable,
           normalized.catalogType === "complementary" || normalized.catalogType === "KIT" ? "product" : normalized.catalogType,
           normalized.catalogType === "complementary" ? "complementary" : null,
           normalized.baseUomCode, UOM_REGISTRY_VERSION,
@@ -337,6 +375,30 @@ export class CatalogService {
           normalized.dimensions.diameter_mm, normalized.massGrams, normalized.materialBehavior, id, expectedVersion);
       this.writeProfile(id, normalized.profile);
       return this.captureVersion(id, expectedVersion + 1);
+    }).immediate();
+  }
+
+  activateAfterFirstProcurementReceipt(productId: string): boolean {
+    return this.db.transaction(() => {
+      const current = this.db.prepare(`SELECT catalog_version,status,is_sellable,central_stock,product_type,
+        procurement_activation_pending FROM products WHERE id=?`).get(productId) as any;
+      if (!current) throw new CatalogValidationError("Catalog product was not found.");
+      if (Number(current.procurement_activation_pending) !== 1) return false;
+      if (current.status !== "Passive" || Number(current.is_sellable) !== 0 || Number(current.central_stock) <= 0) {
+        throw new CatalogValidationError("Procurement-created product cannot activate before its first physical receipt.", "PROCUREMENT_ACTIVATION_NOT_READY", 409);
+      }
+      if (current.product_type === "kit") {
+        throw new CatalogValidationError("Published KIT products cannot use procurement activation.", "KIT_PUBLICATION_REQUIRED", 409);
+      }
+      const changed = this.db.prepare(`UPDATE products
+        SET status='Active',is_sellable=1,procurement_activation_pending=0,updated_at=CURRENT_TIMESTAMP
+        WHERE id=? AND procurement_activation_pending=1 AND status='Passive' AND is_sellable=0 AND central_stock>0`)
+        .run(productId);
+      if (changed.changes !== 1) {
+        throw new CatalogValidationError("Procurement-created product activation conflicted.", "PROCUREMENT_ACTIVATION_CONFLICT", 409);
+      }
+      this.captureVersion(productId, Number(current.catalog_version) + 1);
+      return true;
     }).immediate();
   }
 
@@ -432,6 +494,7 @@ export class CatalogService {
         diameter_mm: row.diameter_mm_int ?? null,
       },
       mass_grams: row.mass_grams_int ?? null,
+      weight_grams: row.weight_grams ?? null,
       material_behavior: row.material_behavior ?? null,
       profile,
       status: row.status || "Active",
@@ -451,6 +514,7 @@ export class CatalogService {
       normalized_tube_type: row.normalized_tube_type || null,
       normalized_pipe_size: row.normalized_pipe_size || null,
       product_type: (row.product_type || null) as CatalogProduct["product_type"],
+      is_sellable: Number(row.is_sellable) === 1,
     };
   }
 }

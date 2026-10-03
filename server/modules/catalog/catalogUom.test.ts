@@ -75,6 +75,52 @@ test("profile catalog versions typed attributes and validates standard/custom le
   db.close();
 });
 
+test("catalog update preserves and updates canonical master fields without nulling non-kit product type", () => {
+  const db = new Database(":memory:");
+  initializeDatabase(db);
+  const catalog = new CatalogService(db);
+  const created = catalog.createProduct({
+    id: "csv-master", sku: "CSV-MASTER", title: "CSV master", catalog_type: "product", base_uom_code: "piece",
+    name_tr: "İlk ad", name_en: "Initial name", supplier_code: "SUP-1", material: "Aluminum",
+    size: "20 mm", profile_type: "Round", product_type: "component", mass_grams: 355,
+    status: "Active", is_sellable: true,
+  });
+
+  const preserved = catalog.updateProduct(created.id, created.catalog_version, {
+    sku: created.sku, title: "Başlık değişti", catalog_type: "product", base_uom_code: "piece",
+  });
+  assert.deepEqual({
+    nameTr: preserved.name_tr, nameEn: preserved.name_en, supplier: preserved.supplier_code,
+    material: preserved.material, size: preserved.size, profileType: preserved.tube_type_code,
+    productType: preserved.product_type, mass: preserved.mass_grams, status: preserved.status,
+    sellable: preserved.is_sellable,
+  }, {
+    nameTr: "İlk ad", nameEn: "Initial name", supplier: "SUP-1", material: "Aluminum",
+    size: "20 mm", profileType: "Round", productType: "component", mass: 355,
+    status: "Active", sellable: true,
+  });
+
+  const updated = catalog.updateProduct(created.id, preserved.catalog_version, {
+    sku: created.sku, title: "Updated master", catalog_type: "product", base_uom_code: "piece",
+    name_tr: "Yeni ad", name_en: "Updated name", supplier_code: "SUP-2", material: "Stainless Steel",
+    size: "25 mm", profile_type: "Square", product_type: "assembly", mass_grams: 420,
+    status: "Passive", is_sellable: false,
+  });
+  const row = db.prepare(`SELECT name_tr,name_en,supplier_code,material,size,pipe_size,tube_type_code,product_type,
+    weight_grams,mass_grams_int,status,is_sellable,normalized_material,normalized_size,normalized_tube_type,normalized_pipe_size
+    FROM products WHERE id=?`).get(created.id) as any;
+  assert.deepEqual(row, {
+    name_tr: "Yeni ad", name_en: "Updated name", supplier_code: "SUP-2", material: "Stainless Steel",
+    size: "25 mm", pipe_size: "25 mm", tube_type_code: "Square", product_type: "assembly",
+    weight_grams: 420, mass_grams_int: 420, status: "Passive", is_sellable: 0,
+    normalized_material: "Karbon Çelik", normalized_size: "25 mm", normalized_tube_type: "Square",
+    normalized_pipe_size: "25 mm",
+  });
+  assert.equal(updated.product_type, "assembly");
+  assert.equal(updated.is_sellable, false);
+  db.close();
+});
+
 test("profile cross-sections use fixed micrometer precision while lengths remain integer mm", () => {
   const db = new Database(":memory:");
   initializeDatabase(db);
