@@ -19,6 +19,7 @@ import { GeliverFlowService, GeliverSdkTransport } from "../modules/shipping/gel
 import { WarehouseExecutionError, WarehouseExecutionService, type WarehouseTopologyInput } from "../modules/warehouse/warehouseExecutionService.js";
 import { PrintingError, PrintingService, type TemplateSnapshot, type ReprintReason } from "../modules/printing/printingService.js";
 import { ReconciliationService } from "../modules/reconciliation/reconciliationService.js";
+import { ProcurementService } from "../modules/procurement/procurementService.js";
 
 type WarehouseUser = WarehousePicker & {
   role: string;
@@ -101,6 +102,7 @@ export function createWarehouseRouter({
   const executionService = new WarehouseExecutionService(db, { onGoodsReceiptException: notifyGoodsReceiptException });
   const printingService = new PrintingService(db);
   const reconciliationService = new ReconciliationService(db);
+  const procurementService = new ProcurementService(db);
 
   const authenticate = (requiredPermissions: string | string[]) => (
     req: express.Request,
@@ -358,6 +360,10 @@ export function createWarehouseRouter({
         return data;
       });
     } catch (error) { return handleServiceError(res, error); }
+  });
+  router.get("/execution/receipt-intents", authenticate("read:products"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (req, res) => {
+    try { auditRead(req); return res.json({ success: true, contract: "dsdst.procurement-receipt-intents.v1", data: procurementService.listReceiptReady() }); }
+    catch (error) { return handleServiceError(res, error); }
   });
   router.post("/execution/receipts", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:receive"), (req, res) => {
     try {

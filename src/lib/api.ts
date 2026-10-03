@@ -42,18 +42,19 @@ export const createRetryOperation = (prefix: string) => {
   };
 };
 
-const requiresSalesOperationId = (method: "POST" | "PUT" | "PATCH", endpoint: string) => (
+const requiresOperationId = (method: "POST" | "PUT" | "PATCH", endpoint: string) => (
   (method === "POST" && endpoint === "/sales")
   || (method === "POST" && endpoint === "/catalog-admin/v1/products")
   || (method === "POST" && /^\/sales\/[^/]+\/financial-expenses$/.test(endpoint))
   || (method === "POST" && /^\/returns\/v1\/(?:sales\/[^/]+|[^/]+\/refunds)$/.test(endpoint))
   || (method === "PUT" && /^\/catalog-admin\/v1\/products\/[^/]+$/.test(endpoint))
   || ((method === "PUT" || method === "PATCH") && /^\/sales\/[^/]+(?:\/status)?$/.test(endpoint))
+  || (method === "POST" && endpoint.startsWith("/procurement/v1/"))
 );
 
 const mutationHeaders = (method: "POST" | "PUT" | "PATCH", endpoint: string, options: MutationOptions = {}) => {
   const operationId = String(options.operationId || "").trim();
-  if (requiresSalesOperationId(method, endpoint) && !operationId) {
+  if (requiresOperationId(method, endpoint) && !operationId) {
     throw new Error(`X-Operation-ID is required for ${method} ${endpoint}.`);
   }
   return {
@@ -135,10 +136,15 @@ export const api = {
     });
     return handleResponse(res);
   },
-  upload: async (endpoint: string, formData: FormData) => {
+  upload: async (endpoint: string, formData: FormData, options: MutationOptions = {}) => {
+    const operationId = String(options.operationId || "").trim();
+    if (endpoint.startsWith("/procurement/v1/") && !operationId) {
+      throw new Error(`X-Operation-ID is required for POST ${endpoint}.`);
+    }
     const res = await fetch(`${API_URL}/api${endpoint}`, {
       method: "POST",
       credentials: 'same-origin',
+      headers: operationId ? { "X-Operation-ID": operationId } : undefined,
       body: formData,
     });
     return handleResponse(res);

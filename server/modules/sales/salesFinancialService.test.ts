@@ -30,6 +30,7 @@ const receive = (fixture: ReturnType<typeof setup>, id: string, quantity: number
     lines: [{ id: `po-line-${id}`, productId: "part", quantity: String(quantity), quoteBasis: "piece", supplierUnitPriceMinor: unitCostMinor, currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 0 }],
   });
   const cost = fixture.procurement.finalizeAcquisitionCosts(`po-${id}`, { allocations: [] }).lots[0];
+  fixture.procurement.approveForReceipt(`po-${id}`, "buyer");
   return fixture.inventory.receiveCostedLot({
     receiptId: `receipt-${id}`, costSnapshotId: cost.id, receivedAt,
     location: { id: "pick", kind: "PICKING" }, operationId: `receive-${id}`,

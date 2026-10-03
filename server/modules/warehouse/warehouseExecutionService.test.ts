@@ -79,7 +79,9 @@ const costed = (procurement: ProcurementService, productId: string, id: string, 
       vatRateBps: 0,
     }],
   });
-  return procurement.finalizeAcquisitionCosts(`purchase-${id}`, { allocations: [] }).lots[0];
+  const lot = procurement.finalizeAcquisitionCosts(`purchase-${id}`, { allocations: [] }).lots[0];
+  procurement.approveForReceipt(`purchase-${id}`, "buyer");
+  return lot;
 };
 
 const receive = (
@@ -106,6 +108,19 @@ const receive = (
     operationId: `receive-${id}`,
     ...extra,
   } as any));
+
+test("Warehouse rejects a finalized purchase until Panel explicitly approves receipt", () => {
+  const { db, procurement, warehouse } = setup();
+  procurement.createPurchase({
+    id: "purchase-not-approved", supplierId: "supplier", acquisitionCostVatPolicy: "VAT_EXCLUDED_FROM_INVENTORY_COST",
+    lines: [{ id: "line-not-approved", productId: "p1", quantity: "1", quoteBasis: "piece", supplierUnitPriceMinor: 100, currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 0 }],
+  });
+  const lot = procurement.finalizeAcquisitionCosts("purchase-not-approved", { allocations: [] }).lots[0];
+  assert.throws(() => receive(db, warehouse, lot.id, "not-approved", [{ id: "package-not-approved", code: "PKG-NOT-APPROVED", quantityBaseInt: 1 }], 1),
+    (error: any) => error instanceof WarehouseExecutionError && error.code === "PANEL_RECEIPT_APPROVAL_REQUIRED");
+  assert.equal(db.prepare("SELECT COUNT(*) FROM inventory_ledger_events").pluck().get(), 0);
+  db.close();
+});
 
 const dispatch = (
   db: Database.Database,

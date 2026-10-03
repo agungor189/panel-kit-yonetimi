@@ -25,6 +25,7 @@ const setup = (stock = 5, onOrderAccepted?: ConstructorParameters<typeof Channel
     invoiceNumber: "INV-CHANNEL", invoiceDate: "2026-09-23", lines: [{ id: "purchase-line", productId: "part", quantity: String(stock),
       quoteBasis: "piece", supplierUnitPriceMinor: 100, currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 0 }] });
   const cost = procurement.finalizeAcquisitionCosts("purchase", { allocations: [] }).lots[0];
+  procurement.approveForReceipt("purchase", "buyer");
   new InventoryService(db).receiveCostedLot({ receiptId: "receipt", costSnapshotId: cost.id, receivedAt: "2026-09-23T08:00:00.000Z",
     location: { id: "pick", kind: "PICKING" }, operationId: "receive-channel-stock" });
   const gateway = new ChannelGatewayService(db, { onOrderAccepted });

@@ -25,6 +25,7 @@ const setup = (cutLengthMm = 1800) => {
     { id: "line", productId: "profile", quantity: "1", quoteBasis: "profile_bar", profileLengthMm: 3000, supplierUnitPriceMinor: 3000, currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 0 },
   ] });
   const cost = procurement.finalizeAcquisitionCosts("purchase", { allocations: [] }).lots[0];
+  procurement.approveForReceipt("purchase", "buyer");
   const inventory = new InventoryService(db);
   const receipt = inventory.receiveCostedLot({ receiptId: "receipt", costSnapshotId: cost.id, receivedAt: "2026-09-23T09:00:00.000Z", location: { id: "pick", kind: "PICKING" }, operationId: "receive" });
   const proposalBase = {

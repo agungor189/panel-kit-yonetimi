@@ -85,15 +85,17 @@ export function createKitRouter(db: Database.Database) {
       WHERE k.id=?`).get(id) as any;
     if (!kit) return null;
     kit.items = db.prepare(`SELECT ki.*, p.title, p.name, p.sku, p.purchase_cost, p.central_stock, COALESCE(p.weight_grams, p.weight, 0) AS weight_grams,
+      CASE WHEN lc.cost_try_numerator IS NULL THEN NULL ELSE CAST(lc.cost_try_numerator AS REAL) / lc.cost_try_denominator / 100 END AS landed_cost_try,
       p.sale_price, CAST(CASE WHEN ki.quantity > 0 THEN FLOOR(COALESCE(p.central_stock,0)/ki.quantity) ELSE 0 END AS INTEGER) available_units
-      FROM kit_items ki JOIN products p ON p.id=ki.product_id WHERE ki.kit_id=? ORDER BY p.title`).all(id);
+      FROM kit_items ki JOIN products p ON p.id=ki.product_id LEFT JOIN current_product_landed_costs lc ON lc.product_id=p.id WHERE ki.kit_id=? ORDER BY p.title`).all(id);
     kit.cuts = db.prepare('SELECT * FROM kit_cuts WHERE kit_id=? ORDER BY length_mm DESC').all(id);
     kit.complementary_items = db.prepare(`SELECT * FROM kit_complementary_items WHERE kit_id=? ORDER BY product_name_snapshot`).all(id) as any[];
     kit.items = kit.items.map((item: any) => ({ ...item, available_units: Math.floor(productAvailability(item.product_id) / Math.max(0.0001, num(item.quantity))) }));
     const availability = (kit.items as any[]).length ? Math.min(...kit.items.map((i: any) => num(i.available_units))) : 0;
     // Connection pieces always use the live product card prices. Kit pricing never
     // marks these up; the configurable margin belongs only to the profile work.
-    const partsCost = kit.items.reduce((s: number, i: any) => s + num(i.quantity) * num(i.purchase_cost), 0);
+    const landedCostPending = kit.items.some((item: any) => item.landed_cost_try == null);
+    const partsCost = landedCostPending ? null : kit.items.reduce((s: number, i: any) => s + num(i.quantity) * num(i.landed_cost_try), 0);
     const partsSale = kit.items.reduce((s: number, i: any) => s + num(i.quantity) * num(i.sale_price), 0);
     const stockLengthMm = num(kit.stock_length_mm) || 6000;
     const cutting = optimizeCutPlan(expandCuts(kit.cuts), stockLengthMm, 3);
@@ -122,16 +124,16 @@ export function createKitRouter(db: Database.Database) {
     const complementarySale = complementaryCost;
     const salePrice = partsSale + complementarySale + profileSale;
     const commission = salePrice * commissionRate;
-    const baseCost = partsCost + complementaryCost + profileBaseCost + commission + commercialFixed;
+    const baseCost = partsCost == null ? null : partsCost + complementaryCost + profileBaseCost + commission + commercialFixed;
     const vatRate = num(kit.vat_rate) / 100;
     const vat = vatRate ? salePrice - (salePrice / (1 + vatRate)) : 0;
     const netRevenue = salePrice - vat;
-    const netProfit = netRevenue - baseCost;
-    kit.analysis = { availability, partsCost, partsSale, profileMeters, purchasedProfileMeters, profileBars: cutting.bars.length, profileCost, profileBaseCost, profileSale, baseCost, suggestedPrice: suggestedProfileSale, suggestedProfileSale, salePrice, commission, vat, netProfit, margin: salePrice ? (netProfit / salePrice) * 100 : 0,
+    const netProfit = baseCost == null ? null : netRevenue - baseCost;
+    kit.analysis = { availability, landedCostPending, pricingBlockedReason: landedCostPending ? 'FINAL_LANDED_COST_REQUIRED' : null, partsCost, partsSale, profileMeters, purchasedProfileMeters, profileBars: cutting.bars.length, profileCost, profileBaseCost, profileSale, baseCost, suggestedPrice: suggestedProfileSale, suggestedProfileSale, salePrice, commission, vat, netProfit, margin: netProfit == null ? null : salePrice ? (netProfit / salePrice) * 100 : 0,
       netRevenue,
       complementaryCost, weightBreakdown: { connectionWeightKg, profileWeightKg, purchasedProfileWeightKg, complementaryWeightKg, totalWeightKg: connectionWeightKg + profileWeightKg + complementaryWeightKg, totalPurchasedWeightKg: connectionWeightKg + purchasedProfileWeightKg + complementaryWeightKg },
       cuttingPlan: { stockLengthMm, bars: cutting.bars.map((bar, index) => ({ number: index + 1, cuts: bar.cuts, remaining_mm: bar.remaining })), usedMm: cutting.usedMm, purchasedMm: cutting.purchasedMm, kerfLossMm: cutting.kerfLossMm, remnantMm: cutting.remnantMm, efficiency: cutting.purchasedMm ? (cutting.usedMm / cutting.purchasedMm) * 100 : 0 },
-      markup: baseCost ? (netProfit / baseCost) * 100 : 0,
+      markup: baseCost && netProfit != null ? (netProfit / baseCost) * 100 : null,
       breakdown: { partsCost, partsSale, profileMaterial: profileCost, profileUsedMeters: profileMeters, profilePurchasedMeters: purchasedProfileMeters, profileBars: cutting.bars.length, kerfLoss: cutting.kerfLossMm, remnant: cutting.remnantMm, complementaryCost, complementarySale, cutting: num(kit.cutting_cost), labour: num(kit.labour_cost), packaging: num(kit.packaging_cost), other: num(kit.other_cost), commission, payment: num(kit.payment_cost), shipping: num(kit.shipping_cost), commercialFixed, vat, netRevenue, profileBaseCost, profileSale, baseCost, salePrice, netProfit } };
     return kit;
   };

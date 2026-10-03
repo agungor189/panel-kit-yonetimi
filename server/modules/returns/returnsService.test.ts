@@ -80,6 +80,7 @@ const setup = (sourceChannel = "Direct", saleId = "sale") => {
       lines: [{ id: `po-line-${saleId}-${suffix}`, productId: `part-${saleId}`, quantity: String(quantity), quoteBasis: "piece", supplierUnitPriceMinor: unitCost, currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 0 }],
     });
     const cost = procurement.finalizeAcquisitionCosts(`po-${saleId}-${suffix}`, { allocations: [] }).lots[0];
+    procurement.approveForReceipt(`po-${saleId}-${suffix}`, "buyer");
     inventory.receiveCostedLot({ receiptId: `receipt-${saleId}-${suffix}`, costSnapshotId: cost.id, receivedAt,
       location: { id: `dispatch-${saleId}`, kind: "PICKING" }, operationId: `receive-${saleId}-${suffix}` });
   };

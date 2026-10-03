@@ -15,6 +15,7 @@ import {
   TerminalSquare,
   Landmark,
   ShieldAlert,
+  ClipboardList,
 } from 'lucide-react';
 import Dashboard from './components/Dashboard';
 import ProductList from './components/ProductList';
@@ -44,6 +45,7 @@ import PanelApiKeys from './components/integrations/PanelApiKeys';
 import TrendyolIntegration from './components/integrations/TrendyolIntegration';
 import ChannelsIntegration from './components/integrations/ChannelsIntegration';
 import ReconciliationCenter from './components/ReconciliationCenter';
+import Procurement from './components/procurement/Procurement';
 import { AppShell, type NavItemDefinition } from './components/layout';
 import {
   listenToBrowserNavigation,
@@ -206,6 +208,7 @@ export default function App() {
   const mainNavItems: NavItemDefinition[] = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'products', label: 'Ürünler', icon: Package },
+    { id: 'purchasing', label: 'Satın Alma', icon: ClipboardList },
     { id: 'sales', label: 'Satışlar', icon: ShoppingCart },
     { id: 'b2b', label: 'B2B', icon: Briefcase },
     { id: 'cash', label: 'Finans Merkezi', icon: Landmark },
@@ -220,8 +223,8 @@ export default function App() {
   ];
   const navItems = [...mainNavItems, ...analyticsNavItems];
   const isReadOnly = userRole === 'readonly';
-  const restrictedReadonlyViews: View[] = ['api-keys', 'panel-api', 'trendyol', 'channels', 'product-wizard', 'b2b'];
-  const primaryNavItems = mainNavItems.filter(item => ['dashboard', 'products', 'sales', 'b2b', 'cash'].includes(item.id));
+  const restrictedReadonlyViews: View[] = ['api-keys', 'panel-api', 'trendyol', 'channels', 'product-wizard', 'b2b', 'purchasing'];
+  const primaryNavItems = mainNavItems.filter(item => ['dashboard', 'products', 'purchasing', 'sales', 'b2b', 'cash'].includes(item.id));
   const financeNavItems = mainNavItems.filter(item => ['income', 'expense', 'recurring'].includes(item.id));
   const integrationNavItems: NavItemDefinition[] = [
     { id: 'api-keys', label: 'API Anahtarları', icon: Key },
@@ -351,6 +354,7 @@ export default function App() {
             }} />
           )}
           {currentView === 'sales' && <Sales />}
+          {!isReadOnly && currentView === 'purchasing' && <Procurement />}
           {currentView === 'cash' && <FinanceModule settings={settings} />}
           {currentView === 'income' && <Transactions initialType="Income" settings={settings} />}
           {currentView === 'expense' && <Expenses settings={settings} />}

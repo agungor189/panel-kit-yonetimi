@@ -67,6 +67,7 @@ test("real /api/sales reserves aggregated BOM inventory, releases cancellation, 
     lines: [{ id: "line", productId: "component", quantity: "10", quoteBasis: "piece", supplierUnitPriceMinor: 100, currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 0 }],
   });
   const snapshot = procurement.finalizeAcquisitionCosts("purchase", { allocations: [] }).lots[0];
+  procurement.approveForReceipt("purchase", "buyer");
   new InventoryService(db).receiveCostedLot({
     receiptId: "receipt", costSnapshotId: snapshot.id, receivedAt: "2026-09-20T08:00:00.000Z",
     location: { id: "pick", kind: "PICKING" }, operationId: "setup-receipt",

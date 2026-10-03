@@ -2333,6 +2333,14 @@ async function startServer() {
   }));
   app.use("/api/products", rejectLegacyCatalogMutation);
 
+  const decorateProductProcurement = (product: any) => ({
+    ...product,
+    landed_cost_try: product.landed_cost_numerator == null ? null : Number(product.landed_cost_numerator) / Number(product.landed_cost_denominator) / 100,
+    landed_cost_snapshot_id: product.landed_cost_snapshot_id || null,
+    landed_cost_purchase_id: product.landed_cost_purchase_id || null,
+    procurement_status: product.procurement_status || null,
+  });
+
   app.post("/api/products/bulk-import", (req, res) => {
     const items = req.body;
     if (!Array.isArray(items)) {
@@ -2387,19 +2395,28 @@ async function startServer() {
     const includeBom = req.query.include_bom === '1' || req.query.include_bom === 'true';
     const products = (db.prepare(`
       SELECT p.*,
-        (SELECT path FROM product_images WHERE product_id = p.id ORDER BY sort_order ASC LIMIT 1) as cover_image
+        (SELECT path FROM product_images WHERE product_id = p.id ORDER BY sort_order ASC LIMIT 1) as cover_image,
+        lc.cost_try_numerator AS landed_cost_numerator,lc.cost_try_denominator AS landed_cost_denominator,
+        lc.acquisition_cost_snapshot_id AS landed_cost_snapshot_id,lc.purchase_order_id AS landed_cost_purchase_id,
+        (SELECT w.state FROM purchase_order_lines pol JOIN procurement_workflows w ON w.purchase_order_id=pol.purchase_order_id
+          WHERE pol.product_id=p.id AND w.state<>'COMPLETED' ORDER BY datetime(w.updated_at) DESC LIMIT 1) AS procurement_status
       FROM products p
+      LEFT JOIN current_product_landed_costs lc ON lc.product_id=p.id
       WHERE ${catalogVisibilityWhere(includeComponents)}
       ORDER BY p.created_at DESC
     `).all() as any[]).map((product) => ({
-      ...hydrateProductStock(product, includeBom),
+      ...decorateProductProcurement(hydrateProductStock(product, includeBom)),
       catalog_type: product.product_type === "kit" ? "KIT" : product.catalog_type,
     }));
     res.json(products);
   });
 
   app.get("/api/products/:id", (req, res) => {
-    const product = db.prepare("SELECT * FROM products WHERE id = ?").get(req.params.id) as any;
+    const product = db.prepare(`SELECT p.*,lc.cost_try_numerator AS landed_cost_numerator,lc.cost_try_denominator AS landed_cost_denominator,
+      lc.acquisition_cost_snapshot_id AS landed_cost_snapshot_id,lc.purchase_order_id AS landed_cost_purchase_id,
+      (SELECT w.state FROM purchase_order_lines pol JOIN procurement_workflows w ON w.purchase_order_id=pol.purchase_order_id
+        WHERE pol.product_id=p.id AND w.state<>'COMPLETED' ORDER BY datetime(w.updated_at) DESC LIMIT 1) AS procurement_status
+      FROM products p LEFT JOIN current_product_landed_costs lc ON lc.product_id=p.id WHERE p.id=?`).get(req.params.id) as any;
     if (!product) return res.status(404).json({ error: "Product not found" });
 
     const images = db.prepare("SELECT * FROM product_images WHERE product_id = ? ORDER BY sort_order ASC").all(req.params.id);
@@ -2408,7 +2425,7 @@ async function startServer() {
     const reserveLocations = (db.prepare("SELECT location FROM product_reserve_locations WHERE product_id = ? ORDER BY sort_order, created_at").all(req.params.id) as Array<{ location: string }>).map((row) => row.location);
 
     res.json({
-      ...hydrateProductStock(product, true),
+      ...decorateProductProcurement(hydrateProductStock(product, true)),
       catalog_type: product.product_type === "kit" ? "KIT" : product.catalog_type,
       images, platforms, logistics, reserve_locations: reserveLocations,
       bom_usage: getProductBomUsage(req.params.id),
@@ -2548,13 +2565,15 @@ async function startServer() {
       let updatedCount = 0;
       let skippedLockedCount = 0;
       let skippedMissingCount = 0;
+      let skippedMissingLandedCostCount = 0;
 
       db.transaction(() => {
         const currentProductStmt = db.prepare(`
-          SELECT id, purchase_price_usd, purchase_cost, sale_price, buffer_percentage,
-                 profit_percentage, exchange_rate_used, price_locked
-          FROM products
-          WHERE id = ?
+          SELECT p.id,p.purchase_price_usd,p.purchase_cost,p.sale_price,p.buffer_percentage,
+                 p.profit_percentage,p.exchange_rate_used,p.price_locked,
+                 lc.cost_try_numerator,lc.cost_try_denominator
+          FROM products p LEFT JOIN current_product_landed_costs lc ON lc.product_id=p.id
+          WHERE p.id = ?
         `);
         const historyStmt = db.prepare(`
           INSERT INTO pricing_history (
@@ -2590,6 +2609,10 @@ async function startServer() {
             skippedLockedCount += 1;
             continue;
           }
+          if (currentProduct.cost_try_numerator == null || !Number(currentProduct.cost_try_denominator)) {
+            skippedMissingLandedCostCount += 1;
+            continue;
+          }
 
           historyStmt.run(
             uuidv4(),
@@ -2605,10 +2628,12 @@ async function startServer() {
             'bulk-pricing'
           );
 
-          const result = stmt.run(update.newSalePrice, exchangeRate, bufferPercentage, profitPercentage, update.id);
+          const landedCostTry = Number(currentProduct.cost_try_numerator) / Number(currentProduct.cost_try_denominator) / 100;
+          const newSalePrice = Math.ceil(landedCostTry * (1 + Number(bufferPercentage || 0) / 100) * (1 + Number(profitPercentage || 0) / 100));
+          const result = stmt.run(newSalePrice, exchangeRate, bufferPercentage, profitPercentage, update.id);
           if (result.changes > 0) {
             updatedCount += result.changes;
-            platformStmt.run(update.newSalePrice, update.id);
+            platformStmt.run(newSalePrice, update.id);
             enqueueCanonicalChannelChanges(db, { productId: update.id, kinds: ["PRICE"], operationId });
           }
         }
@@ -2618,11 +2643,12 @@ async function startServer() {
         updatedCount,
         skippedLockedCount,
         skippedMissingCount,
+        skippedMissingLandedCostCount,
         exchangeRate,
         bufferPercentage,
         profitPercentage,
       }, req.user?.id);
-      res.json({ success: true, updatedCount, skippedLockedCount, skippedMissingCount });
+      res.json({ success: true, updatedCount, skippedLockedCount, skippedMissingCount, skippedMissingLandedCostCount });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -5885,6 +5911,7 @@ async function startServer() {
       authorizeCostApproval: auth.requireCapability("acquisition-cost:approve"),
       authorizePayment: auth.requireCapability("finance:write"),
       authorizeFx: auth.requireCapability("fx:write"),
+      uploadsDir,
     }),
   );
   app.use(

@@ -68,6 +68,7 @@ async function fixture(states: Array<"LABEL_READY" | "PREPARING">) {
     }],
   });
   const costSnapshot = procurement.finalizeAcquisitionCosts("bulk-purchase", { allocations: [] }).lots[0];
+  procurement.approveForReceipt("bulk-purchase", "buyer");
   const inventory = new InventoryService(db);
   inventory.receiveCostedLot({
     receiptId: "bulk-receipt",

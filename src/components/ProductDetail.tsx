@@ -130,8 +130,8 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
     <LoadingState label="Ürün yükleniyor..." className="py-24" />
   );
 
-  const bufferedCostTRY = product.purchase_cost * (1 + (product.buffer_percentage || 0) / 100);
-  const profit = product.sale_price - bufferedCostTRY;
+  const bufferedCostTRY = product.landed_cost_try == null ? null : product.landed_cost_try * (1 + (product.buffer_percentage || 0) / 100);
+  const profit = bufferedCostTRY == null ? null : product.sale_price - bufferedCostTRY;
   const centralStock = product.total_stock ?? product.central_stock ?? 0;
   const seriesLabel = product.product_series?.trim();
   const bottleneckComponent = getBottleneckComponent(product);
@@ -246,16 +246,17 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
                 <DetailStat label="Boru Ölçüsü" value={product.pipe_size || 'Bilinmiyor'} color="text-text-muted font-mono text-sm" />
                 <DetailStat label="Alış ($)" value={`$${product.purchase_price_usd.toFixed(2)}`} color="text-text-muted" subLabel={`₺${product.exchange_rate_used} kur ile`} />
                 <DetailStat label="Maliyet (₺)" value={<FormatAmount amount={product.purchase_cost} />} color="text-text-muted" />
+                <DetailStat label="FINAL Landed Cost" value={product.landed_cost_try == null ? 'Maliyet Bekliyor' : <FormatAmount amount={product.landed_cost_try} />} color={product.landed_cost_try == null ? 'text-amber-700' : 'text-primary'} subLabel={product.landed_cost_purchase_id ? `Satın alma: ${product.landed_cost_purchase_id}` : undefined} />
                 <DetailStat
                   label="Buffer Maliyet"
-                  value={<FormatAmount amount={product.purchase_cost * (1 + (product.buffer_percentage || 0) / 100)} />}
+                  value={bufferedCostTRY == null ? 'Maliyet Bekliyor' : <FormatAmount amount={bufferedCostTRY} />}
                   subLabel={`%${product.buffer_percentage} Buffer`}
                   color="text-orange-600"
                 />
                 <DetailStat
                   label="Kar Payı"
-                  value={<FormatAmount amount={profit} />}
-                  subLabel={`%${product.sale_price ? ((profit / product.sale_price) * 100).toFixed(1) : 0} Marj`}
+                  value={profit == null ? 'Maliyet Bekliyor' : <FormatAmount amount={profit} />}
+                  subLabel={profit == null ? 'FINAL Landed Cost gerekli' : `%${product.sale_price ? ((profit / product.sale_price) * 100).toFixed(1) : 0} Marj`}
                   color="text-success"
                 />
               </div>

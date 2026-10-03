@@ -502,13 +502,10 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                       onChange={(e) => {
                         const usd = parseFloat(e.target.value) || 0;
                         const costTl = usd * formData.exchange_rate_used;
-                        const bufferedCostTl = costTl * (1 + formData.buffer_percentage / 100);
-                        const saleTl = bufferedCostTl * (1 + formData.profit_percentage / 100);
                         setFormData((prev: any) => ({ 
                           ...prev, 
                           purchase_price_usd: usd, 
-                          purchase_cost: costTl,
-                          sale_price: prev.price_locked ? prev.sale_price : (saleTl > 0 ? Math.ceil(saleTl) : prev.sale_price)
+                          purchase_cost: costTl
                         }));
                       }}
                       className="form-input pl-10 font-black text-lg" 
@@ -526,13 +523,10 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                       onChange={(e) => {
                         const rate = parseFloat(e.target.value) || 0;
                         const costTl = formData.purchase_price_usd * rate;
-                        const bufferedCostTl = costTl * (1 + formData.buffer_percentage / 100);
-                        const saleTl = bufferedCostTl * (1 + formData.profit_percentage / 100);
                         setFormData((prev: any) => ({ 
                           ...prev, 
                           exchange_rate_used: rate, 
-                          purchase_cost: costTl,
-                          sale_price: prev.price_locked ? prev.sale_price : (saleTl > 0 ? Math.ceil(saleTl) : prev.sale_price)
+                          purchase_cost: costTl
                         }));
                       }}
                       className="form-input pl-10 font-bold" 
@@ -548,12 +542,12 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                       value={formData.buffer_percentage} 
                       onChange={(e) => {
                         const buff = parseFloat(e.target.value) || 0;
-                        const bufferedCostTl = formData.purchase_cost * (1 + buff / 100);
-                        const saleTl = bufferedCostTl * (1 + formData.profit_percentage / 100);
+                        const landed = formData.landed_cost_try;
+                        const saleTl = landed == null ? null : landed * (1 + buff / 100) * (1 + formData.profit_percentage / 100);
                         setFormData((prev: any) => ({ 
                           ...prev, 
                           buffer_percentage: buff, 
-                          sale_price: prev.price_locked ? prev.sale_price : (saleTl > 0 ? Math.ceil(saleTl) : prev.sale_price)
+                          sale_price: prev.price_locked || saleTl == null ? prev.sale_price : (saleTl > 0 ? Math.ceil(saleTl) : prev.sale_price)
                         }));
                       }}
                       className="form-input pr-10 font-bold text-orange-600" 
@@ -569,12 +563,12 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                       value={formData.profit_percentage} 
                       onChange={(e) => {
                         const profit = parseFloat(e.target.value) || 0;
-                        const bufferedCostTl = formData.purchase_cost * (1 + formData.buffer_percentage / 100);
-                        const saleTl = bufferedCostTl * (1 + profit / 100);
+                        const landed = formData.landed_cost_try;
+                        const saleTl = landed == null ? null : landed * (1 + formData.buffer_percentage / 100) * (1 + profit / 100);
                         setFormData((prev: any) => ({ 
                           ...prev, 
                           profit_percentage: profit, 
-                          sale_price: prev.price_locked ? prev.sale_price : (saleTl > 0 ? Math.ceil(saleTl) : prev.sale_price)
+                          sale_price: prev.price_locked || saleTl == null ? prev.sale_price : (saleTl > 0 ? Math.ceil(saleTl) : prev.sale_price)
                         }));
                       }}
                       className="form-input pr-10 font-bold text-green-600" 
@@ -584,12 +578,13 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 border-t border-primary/10 pt-8">
-                <Field label="Net Alış Maliyeti (₺)">
+                <Field label="FINAL Landed Cost (₺)">
                   <div className="relative">
                     <div className="absolute left-4 top-3.5 text-text-muted font-bold text-sm">₺</div>
                     <input 
                       type="number" 
-                      value={formData.purchase_cost.toFixed(2)} 
+                      value={formData.landed_cost_try == null ? '' : Number(formData.landed_cost_try).toFixed(2)}
+                      placeholder="Landed Cost Bekleniyor"
                       readOnly
                       className="form-input pl-10 font-bold bg-bg-main/50" 
                     />
@@ -600,7 +595,8 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                     <div className="absolute left-4 top-3.5 text-text-muted font-bold text-sm">₺</div>
                     <input 
                       type="number" 
-                      value={(formData.purchase_cost * (1 + formData.buffer_percentage / 100)).toFixed(2)} 
+                      value={formData.landed_cost_try == null ? '' : (Number(formData.landed_cost_try) * (1 + formData.buffer_percentage / 100)).toFixed(2)}
+                      placeholder="Landed Cost Bekleniyor"
                       readOnly
                       className="form-input pl-10 font-bold bg-bg-main/50 text-orange-700" 
                     />

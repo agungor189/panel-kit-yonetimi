@@ -24,6 +24,7 @@ before(async () => {
     lines: [{ id: "route-warehouse-line", productId: "route-warehouse-part", quantity: "2", quoteBasis: "piece", supplierUnitPriceMinor: 100, currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 0 }],
   });
   costSnapshotId = procurement.finalizeAcquisitionCosts("route-warehouse-purchase", { allocations: [] }).lots[0].id;
+  procurement.approveForReceipt("route-warehouse-purchase", "buyer");
   db.prepare(`INSERT INTO panel_api_keys (id,name,key_prefix,key_hash,last4,permissions,status)
     VALUES ('warehouse-v2-service','Warehouse V2','test','warehouse-v2-key','-key',?,'active')`)
     .run(JSON.stringify(["read:products", "write:warehouse_status"]));

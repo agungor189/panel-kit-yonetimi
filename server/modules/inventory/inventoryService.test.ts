@@ -68,7 +68,9 @@ const costedLot = (procurement: ProcurementService, id: string, quantity: number
       vatRateBps: 0,
     }],
   });
-  return procurement.finalizeAcquisitionCosts(`purchase-${id}`, { allocations: [] }).lots[0];
+  const lot = procurement.finalizeAcquisitionCosts(`purchase-${id}`, { allocations: [] }).lots[0];
+  procurement.approveForReceipt(`purchase-${id}`, "buyer");
+  return lot;
 };
 
 const receive = (
@@ -148,6 +150,7 @@ test("SKU reconciliation block gates only that SKU while an unrelated SKU still 
     procurement.createPurchase({ id: `purchase-${id}`, supplierId: "supplier", acquisitionCostVatPolicy: "VAT_EXCLUDED_FROM_INVENTORY_COST",
       lines: [{ id: `line-${id}`, productId, quantity: "2", quoteBasis: "piece", supplierUnitPriceMinor: 100, currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 0 }] });
     const lot = procurement.finalizeAcquisitionCosts(`purchase-${id}`, { allocations: [] }).lots[0];
+    procurement.approveForReceipt(`purchase-${id}`, "buyer");
     inventory.receiveCostedLot({ receiptId: `receipt-${id}`, costSnapshotId: lot.id, receivedAt: "2026-09-23T08:00:00Z",
       location: { id: `pick-${id}`, kind: "PICKING" }, operationId: `receive-${id}` });
   }

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { canonicalPayloadHash } from "../commands/commandFoundation.js";
 import { InventoryService } from "../inventory/inventoryService.js";
+import { ProcurementService } from "../procurement/procurementService.js";
 import { WarehousePackageBalanceError, WarehousePackageBalanceService } from "./warehousePackageBalanceService.js";
 
 type StorageRole = "PICKING" | "RESERVE" | "MIXED" | "QUARANTINE";
@@ -394,11 +395,15 @@ export class WarehouseExecutionService {
 
     const result = this.db.transaction(() => {
       const snapshot = this.db.prepare(`SELECT l.id,l.purchase_order_id,l.purchase_line_id,l.product_id,l.state,
-        l.quantity_base_int,l.base_uom_code_snapshot,p.status AS purchase_status
-        FROM acquisition_lot_cost_snapshots l JOIN purchase_orders p ON p.id=l.purchase_order_id WHERE l.id=?`).get(snapshotId) as any;
+        l.quantity_base_int,l.base_uom_code_snapshot,p.status AS purchase_status,w.state AS workflow_state
+        FROM acquisition_lot_cost_snapshots l JOIN purchase_orders p ON p.id=l.purchase_order_id
+        LEFT JOIN procurement_workflows w ON w.purchase_order_id=p.id WHERE l.id=?`).get(snapshotId) as any;
       if (!snapshot) throw new WarehouseExecutionError("COST_SNAPSHOT_NOT_FOUND", "The acquisition-cost snapshot was not found.", 404);
       if (snapshot.state !== "COSTED_PENDING_RECEIPT" || snapshot.purchase_status !== "APPROVED") {
         throw new WarehouseExecutionError("COST_SNAPSHOT_NOT_RECEIVABLE", "Only an approved costed purchase snapshot may be received.", 409);
+      }
+      if (snapshot.workflow_state !== "RECEIPT_PENDING") {
+        throw new WarehouseExecutionError("PANEL_RECEIPT_APPROVAL_REQUIRED", "Panel receipt approval is required before Warehouse can start goods receipt.", 409);
       }
       if (this.db.prepare("SELECT 1 FROM warehouse_goods_receipts WHERE acquisition_cost_snapshot_id=?").get(snapshotId)) {
         throw new WarehouseExecutionError("RECEIPT_ALREADY_FINALIZED", "This cost snapshot already has a final goods receipt.", 409);
@@ -457,6 +462,7 @@ export class WarehouseExecutionService {
           snapshot.base_uom_code_snapshot, item.quantityBaseInt, item.quantityBaseInt, item.targetQuantityBaseInt,
           item.weightGrams, item.disposition, item.disposition === "DAMAGED" ? "QUARANTINE" : "RECEIVED", receivedAt);
       }
+      new ProcurementService(this.db).markReceiptRecorded(snapshot.purchase_order_id, receivedAt);
       return {
         id: receiptId, receiptSeriesId: seriesId, stageIndex: 1, isFinal: true, partialPolicy: "DISABLED" as const,
         costSnapshotId: snapshotId, purchaseOrderId: snapshot.purchase_order_id, purchaseLineId: snapshot.purchase_line_id,

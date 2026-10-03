@@ -25,6 +25,12 @@ snapshots, purchase payments, and their integer cash postings.
   values, or leaves the component unallocated.
 - Finalization creates immutable `COSTED_PENDING_RECEIPT` snapshots. These are cost
   contracts for future receipt lots; they are not inventory lots and never post stock.
+- There is no provisional valuation path. Panel may move an order through draft,
+  ordered, in-transit, and cost-pending states, but explicit receipt approval is
+  rejected until every line has its immutable final landed-cost snapshot.
+- Only the explicit `RECEIPT_PENDING` approval exposes an intent to Warehouse.
+  Warehouse receipt remains the physical stock posting; completion is projected only
+  after all purchase snapshots have a final authoritative receipt.
 - Purchase payments must use the purchase and cash-account currency. Each payment and
   exact minor-unit procurement posting is immutable. The same atomic transaction adds
   one protected `procurement_purchase_payment` compatibility row to the existing
@@ -53,6 +59,12 @@ Application rollback before any V2-06 business use may leave the additive tables
 place. After V2-06 records exist, rollback requires preserving those tables and using a
 compatible application; dropping or rewriting them is not an approved rollback or data
 repair. No production migration or repair is performed by this change.
+
+Migration v94 is forward-only. It adds the Panel workflow, immutable procurement
+documents and cost-component details, plus the traceable current finalized landed-cost
+projection. It deliberately does not infer workflow state or synthesize approvals for
+legacy purchases. Existing records that need participation require a separate approved
+manifest, backup, dry run and reconciliation; the migration itself performs no repair.
 
 V2-07 goods receipt references these immutable cost snapshots; it does not update
 or recalculate them.

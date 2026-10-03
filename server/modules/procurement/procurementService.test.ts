@@ -63,6 +63,35 @@ test("USD purchase snapshots FX while a later purchase uses the changed current 
   db.close();
 });
 
+test("Panel workflow requires FINAL landed cost before exposing a Warehouse receipt intent", () => {
+  const { db, procurement, fx } = setup();
+  fx.recordCurrentUsdTry({ rate: "40", source: "MANUAL", changedAt: "2026-09-20T09:00:00.000Z", actorId: "finance-owner" });
+  procurement.createPurchase(purchase("po-final-gate", [
+    line({ id: "line-a", productId: "part-a", quantity: "2", supplierUnitPriceMinor: 100 }),
+    line({ id: "line-b", productId: "part-b", quantity: "1", supplierUnitPriceMinor: 200 }),
+  ]));
+  procurement.transitionWorkflow("po-final-gate", "ORDERED");
+  procurement.transitionWorkflow("po-final-gate", "IN_TRANSIT");
+  assert.throws(() => procurement.approveForReceipt("po-final-gate", "buyer"), (error: any) => error.code === "FINAL_LANDED_COST_REQUIRED");
+  const withFreight = procurement.addAcquisitionCost("po-final-gate", {
+    id: "freight-final", category: "FREIGHT", expenseType: "FREIGHT", amountMinor: 400, currency: "USD",
+    vatMode: "EXCLUDED", vatRateBps: 0, occurredOn: "2026-09-20", description: "Ocean freight",
+  });
+  assert.equal(withFreight.workflowState, "COST_PENDING");
+  assert.deepEqual(withFreight.allocationSuggestions.map((item: any) => item.amountTryMinor), [8000, 8000]);
+  const finalized = procurement.finalizeAcquisitionCosts("po-final-gate", {
+    allocations: [{ componentId: "freight-final", mode: "ACCEPT_SUGGESTION" }],
+  });
+  assert.equal(finalized.workflowState, "COST_PENDING");
+  assert.equal(procurement.listReceiptReady().length, 0);
+  const approved = procurement.approveForReceipt("po-final-gate", "buyer");
+  assert.equal(approved.workflowState, "RECEIPT_PENDING");
+  assert.deepEqual(procurement.listReceiptReady().map((item) => item.sku), ["PART-A", "PART-B"]);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM current_product_landed_costs").pluck().get(), 2);
+  assert.deepEqual(procurement.previewCsv([{ sku: "UNKNOWN", quantity: "1", unit_price_usd: "2" }])[0].errors, ["SKU_NOT_FOUND"]);
+  db.close();
+});
+
 test("VAT included and excluded inputs produce the same exact net, VAT and gross minor units", () => {
   const { db, procurement, fx } = setup();
   fx.recordCurrentUsdTry({ rate: "40", source: "MANUAL", changedAt: "2026-09-20T09:00:00.000Z", actorId: "finance-owner" });

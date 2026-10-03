@@ -891,7 +891,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                   <th className="px-4 py-5">Ürün</th>
                   <th className="px-4 py-5 hidden xl:table-cell">Kategori</th>
                   <th className="px-4 py-5 hidden md:table-cell text-right">Alış USD</th>
-                  <th className="px-4 py-5 hidden lg:table-cell text-right">Buffer TL</th>
+                  <th className="px-4 py-5 hidden lg:table-cell text-right">Landed Cost</th>
                   <th className="px-4 py-5 font-bold text-blue-600 text-right">Satış TL</th>
                   <th className="px-4 py-5 hidden sm:table-cell text-center">Marj %</th>
                   <th className="px-4 py-5 text-center">Merkez Stok</th>
@@ -901,11 +901,11 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
               </thead>
               <tbody className="divide-y divide-border-color">
                 {filteredProducts.map((p, index) => {
-                  const margin = p.sale_price && p.purchase_price_usd && p.exchange_rate_used
-                    ? ((p.sale_price - (p.purchase_price_usd * p.exchange_rate_used)) / p.sale_price) * 100
-                    : 0;
+                  const margin = p.sale_price && p.landed_cost_try != null
+                    ? ((p.sale_price - (p.landed_cost_try * (1 + (p.buffer_percentage || 0) / 100))) / p.sale_price) * 100
+                    : null;
                   const stockValue = (p.total_stock || 0) * (p.sale_price || 0);
-                  const bufferedCostTRY = (p.purchase_price_usd || 0) * (p.exchange_rate_used || 0) * (1 + (p.buffer_percentage || 0) / 100);
+                  const bufferedCostTRY = p.landed_cost_try == null ? null : p.landed_cost_try * (1 + (p.buffer_percentage || 0) / 100);
 
                   return (
                   <tr key={p.id} onClick={() => onProductClick(p.id)} className="hover:bg-bg-main cursor-pointer group transition-colors">
@@ -926,6 +926,11 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                           <div className="flex items-center gap-2 mt-0.5">
                             <p className="text-[10px] text-text-muted font-mono uppercase tracking-tighter truncate">{p.sku}</p>
                             <ProductKindBadge product={p} />
+                            {Number(p.total_stock ?? p.central_stock ?? 0) <= 0 && p.procurement_status && ['ORDERED', 'IN_TRANSIT', 'COST_PENDING', 'RECEIPT_PENDING'].includes(p.procurement_status) && (
+                              <span className="text-[9px] font-black text-amber-800 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded uppercase tracking-widest">
+                                {p.procurement_status === 'IN_TRANSIT' || p.procurement_status === 'ORDERED' ? 'Yolda' : p.procurement_status === 'RECEIPT_PENDING' ? 'Mal Kabul Bekliyor' : 'Maliyet Bekliyor'}
+                              </span>
+                            )}
                             {p.product_series && (
                               <span className="text-[9px] font-black text-primary bg-blue-50 border border-blue-100 px-1.5 py-0.5 rounded uppercase tracking-widest">
                                 {p.product_series}
@@ -956,7 +961,7 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                       ${(p.purchase_price_usd || 0).toFixed(2)}
                     </td>
                     <td className="px-4 py-4 hidden lg:table-cell text-sm font-medium text-gray-500 text-right">
-                      <FormatAmount align="right" amount={bufferedCostTRY} />
+                      {bufferedCostTRY == null ? <span className="text-xs font-bold text-amber-700">Landed Cost bekliyor</span> : <div><FormatAmount align="right" amount={bufferedCostTRY} /><span className="block text-[9px] text-text-muted">FINAL: <FormatAmount amount={p.landed_cost_try!}/></span></div>}
                     </td>
                     <td className="px-4 py-4 text-sm font-extrabold text-blue-600 text-right">
                       <FormatAmount align="right" amount={p.sale_price || 0} />
@@ -964,9 +969,9 @@ export default function ProductList({ onAddProduct, onProductClick }: ProductLis
                     <td className="px-4 py-4 hidden sm:table-cell text-center">
                       <span className={cn(
                         "text-[11px] font-bold px-2 py-1 rounded-md",
-                        margin > 0 ? "bg-green-100 text-green-700" : margin < 0 ? "bg-red-100 text-red-700" : "bg-gray-100 text-gray-600"
+                        margin != null && margin > 0 ? "bg-green-100 text-green-700" : margin != null && margin < 0 ? "bg-red-100 text-red-700" : "bg-gray-100 text-gray-600"
                       )}>
-                        {margin > 0 ? '+' : ''}{margin.toFixed(1)}%
+                        {margin == null ? 'Bekliyor' : `${margin > 0 ? '+' : ''}${margin.toFixed(1)}%`}
                       </span>
                     </td>
                     <td className="px-4 py-4 text-center">

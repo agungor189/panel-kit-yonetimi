@@ -24,6 +24,7 @@ before(async () => {
     lines: [{ id: "route-line", productId: "route-part", quantity: "2", quoteBasis: "piece", supplierUnitPriceMinor: 100, currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 0 }],
   });
   costSnapshotId = procurement.finalizeAcquisitionCosts("route-purchase", { allocations: [] }).lots[0].id;
+  procurement.approveForReceipt("route-purchase", "buyer");
   const allow: express.RequestHandler = (_req, _res, next) => next();
   const app = express();
   app.use(express.json());

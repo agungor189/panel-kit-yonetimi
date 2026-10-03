@@ -18,7 +18,8 @@ export type View =
   | 'panel-api'
   | 'trendyol'
   | 'channels'
-  | 'cash';
+  | 'cash'
+  | 'purchasing';
 
 export type NavigationState = {
   view: View;
@@ -32,6 +33,7 @@ const VIEW_PATHS: Partial<Record<View, string>> = {
   sales: '/sales',
   b2b: '/b2b',
   cash: '/cash',
+  purchasing: '/purchasing',
   income: '/income',
   expense: '/expenses',
   recurring: '/recurring',

@@ -4,6 +4,7 @@ import { WarehousePackageBalanceError, WarehousePackageBalanceService } from "..
 import { ProfileCutInventoryService, type ProfileCutPlanInput } from "./profileCutInventoryService.js";
 import { ReconciliationScopeGuard } from "../reconciliation/reconciliationGuard.js";
 import { enqueueCanonicalChannelChanges } from "../channels/channelOutboundProjection.js";
+import { ProcurementService } from "../procurement/procurementService.js";
 
 type LocationKind = "PICKING" | "RESERVE";
 type ReservationStatus = "ACTIVE" | "PICKED" | "PACKED" | "RELEASED" | "DISPATCHED" | "STOCK_DISCREPANCY";
@@ -70,14 +71,18 @@ export class InventoryService {
     }
     return this.db.transaction(() => {
       const snapshot = this.db.prepare(`SELECT l.id,l.purchase_order_id,l.purchase_line_id,l.product_id,l.state,
-        l.quantity_base_int,l.base_uom_code_snapshot,p.status AS purchase_status
-        FROM acquisition_lot_cost_snapshots l JOIN purchase_orders p ON p.id=l.purchase_order_id WHERE l.id=?`).get(costSnapshotId) as any;
+        l.quantity_base_int,l.base_uom_code_snapshot,p.status AS purchase_status,w.state AS workflow_state
+        FROM acquisition_lot_cost_snapshots l JOIN purchase_orders p ON p.id=l.purchase_order_id
+        LEFT JOIN procurement_workflows w ON w.purchase_order_id=p.id WHERE l.id=?`).get(costSnapshotId) as any;
       if (!snapshot) throw new InventoryValidationError("COST_SNAPSHOT_NOT_FOUND", "The acquisition-cost snapshot was not found.", 404);
       const affectedSku = this.db.prepare("SELECT COALESCE(NULLIF(sku,''),id) FROM products WHERE id=?").pluck().get(snapshot.product_id) as string;
       this.reconciliationGuard.assertAllowed("SKU", affectedSku,
         (message) => new InventoryValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409));
       if (snapshot.state !== "COSTED_PENDING_RECEIPT" || snapshot.purchase_status !== "APPROVED") {
         throw new InventoryValidationError("COST_SNAPSHOT_NOT_RECEIVABLE", "Only an approved COSTED_PENDING_RECEIPT snapshot may create inventory.", 409);
+      }
+      if (snapshot.workflow_state !== "RECEIPT_PENDING") {
+        throw new InventoryValidationError("PANEL_RECEIPT_APPROVAL_REQUIRED", "Panel receipt approval is required before inventory receipt.", 409);
       }
       const quantity = input.acceptedQuantityBaseInt === undefined
         ? Number(snapshot.quantity_base_int)
@@ -105,6 +110,7 @@ export class InventoryService {
       new ProfileCutInventoryService(this.db).createReceiptPieces(lotId, operationId);
       this.syncProjection(snapshot.product_id);
       enqueueCanonicalChannelChanges(this.db, { productId: snapshot.product_id, kinds: ["STOCK"], operationId, occurredAt: receivedAt });
+      new ProcurementService(this.db).markReceiptRecorded(snapshot.purchase_order_id, receivedAt);
       return {
         lot: {
           id: lotId,

@@ -98,6 +98,7 @@ const setup = (recipientFixture = marketplaceRecipient) => {
       currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 0 }],
   });
   const cost = procurement.finalizeAcquisitionCosts("purchase", { allocations: [] }).lots[0];
+  procurement.approveForReceipt("purchase", "buyer");
   const inventory = new InventoryService(db);
   inventory.receiveCostedLot({ receiptId: "receipt", costSnapshotId: cost.id, receivedAt: "2026-09-23T08:00:00.000Z",
     location: { id: "pick", kind: "PICKING" }, operationId: "receive" });
