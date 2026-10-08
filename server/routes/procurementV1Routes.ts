@@ -199,6 +199,13 @@ export function createProcurementV1Router({ db, authorizeProcurement, authorizeC
     } catch (error) { return sendError(error, res); }
   });
 
+  router.post("/purchases/:id/cost-preview", authorizeProcurement, (req, res) => {
+    try {
+      const data = procurement.previewAcquisitionCosts(req.params.id, req.body);
+      return res.json({ success: true, contract: "dsdst.acquisition-cost-preview.v1", data });
+    } catch (error) { return sendError(error, res); }
+  });
+
   router.post("/purchases/:id/payments", authorizePayment, (req, res) => {
     try {
       const payload = { purchaseId: req.params.id, payment: req.body };

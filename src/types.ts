@@ -46,6 +46,9 @@ export interface Product {
   procurement_status?: 'DRAFT' | 'ORDERED' | 'IN_TRANSIT' | 'COST_PENDING' | 'RECEIPT_PENDING' | 'COMPLETED' | null;
   sale_price: number;
   buffer_percentage: number;
+  profit_percentage?: number;
+  fixed_price_adjustment_try?: number;
+  price_rounding_increment?: 1 | 5 | 10;
   exchange_rate_used: number;
   weight_grams?: number;
   /** @deprecated Use weight_grams. Kept as an API compatibility alias. */
@@ -63,6 +66,7 @@ export interface Product {
   catalog_type?: 'product' | 'profile' | 'connector' | 'cap' | 'wheel' | 'complementary' | 'KIT';
   published_kit?: { current_version_id: string; versions: Array<{ id: string; version_number: number; current: boolean; published_at: string; content_hash: string; canonical_cost_minor: number; final_sale_price_minor: number; effective_kerf_mm: number; installation_guide_version: string; components: unknown[]; cuts: unknown[]; packages: unknown[] }> } | null;
   is_sellable?: boolean | number;
+  procurement_activation_pending?: boolean | number;
   visible_in_catalog?: boolean | number;
   exclude_from_analysis?: boolean | number;
   is_assembly?: boolean | number;

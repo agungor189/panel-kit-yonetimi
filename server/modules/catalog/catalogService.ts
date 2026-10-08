@@ -378,21 +378,23 @@ export class CatalogService {
     }).immediate();
   }
 
-  activateAfterFirstProcurementReceipt(productId: string): boolean {
+  activateProcurementProductIfReady(productId: string): boolean {
     return this.db.transaction(() => {
-      const current = this.db.prepare(`SELECT catalog_version,status,is_sellable,central_stock,product_type,
+      const current = this.db.prepare(`SELECT catalog_version,status,is_sellable,central_stock,sale_price,product_type,
         procurement_activation_pending FROM products WHERE id=?`).get(productId) as any;
       if (!current) throw new CatalogValidationError("Catalog product was not found.");
       if (Number(current.procurement_activation_pending) !== 1) return false;
-      if (current.status !== "Passive" || Number(current.is_sellable) !== 0 || Number(current.central_stock) <= 0) {
-        throw new CatalogValidationError("Procurement-created product cannot activate before its first physical receipt.", "PROCUREMENT_ACTIVATION_NOT_READY", 409);
+      if (current.status !== "Passive" || Number(current.is_sellable) !== 0) {
+        throw new CatalogValidationError("Procurement-created product activation state is invalid.", "PROCUREMENT_ACTIVATION_CONFLICT", 409);
       }
+      if (Number(current.central_stock) <= 0 || Number(current.sale_price) <= 0) return false;
       if (current.product_type === "kit") {
         throw new CatalogValidationError("Published KIT products cannot use procurement activation.", "KIT_PUBLICATION_REQUIRED", 409);
       }
       const changed = this.db.prepare(`UPDATE products
         SET status='Active',is_sellable=1,procurement_activation_pending=0,updated_at=CURRENT_TIMESTAMP
-        WHERE id=? AND procurement_activation_pending=1 AND status='Passive' AND is_sellable=0 AND central_stock>0`)
+        WHERE id=? AND procurement_activation_pending=1 AND status='Passive' AND is_sellable=0
+          AND central_stock>0 AND sale_price>0`)
         .run(productId);
       if (changed.changes !== 1) {
         throw new CatalogValidationError("Procurement-created product activation conflicted.", "PROCUREMENT_ACTIVATION_CONFLICT", 409);

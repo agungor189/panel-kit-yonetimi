@@ -80,3 +80,18 @@ test("catalog update increments version and preserves the immutable old snapshot
   assert.doesNotMatch(oldSnapshot, /30 mm cap v2/);
   assert.equal(db.prepare("SELECT COUNT(*) FROM command_audit_log WHERE command_type='catalog.product.update.v1'").pluck().get(), 1);
 });
+
+test("catalog product edit cannot bypass FINAL Landed Cost pricing approval", async () => {
+  const response = await fetch(`${baseUrl}/api/catalog-admin/v1/products/${product.id}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json", "x-operation-id": "catalog-price-bypass-cap-30" },
+    body: JSON.stringify({
+      expected_catalog_version: 2,
+      product: { ...product, title: "30 mm cap v2" },
+      operational: { sale_price: 999 },
+    }),
+  });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json() as any).error.code, "PRICING_FORMULA_APPROVAL_REQUIRED");
+  assert.equal(db.prepare("SELECT sale_price FROM products WHERE id=?").pluck().get(product.id), 0);
+});

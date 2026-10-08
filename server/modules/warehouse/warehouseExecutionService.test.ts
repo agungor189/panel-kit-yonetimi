@@ -6,6 +6,7 @@ import { CatalogService } from "../catalog/catalogService.js";
 import { CommandExecutor } from "../commands/commandFoundation.js";
 import { InventoryService } from "../inventory/inventoryService.js";
 import { ProcurementService, type PurchaseLineInput } from "../procurement/procurementService.js";
+import { ProductPricingService } from "../pricing/productPricingService.js";
 import { WarehouseExecutionError, WarehouseExecutionService, type WarehouseTopologyInput } from "./warehouseExecutionService.js";
 
 const actor = { human: { id: "warehouse-owner", name: "Warehouse Owner" } };
@@ -122,7 +123,7 @@ test("Warehouse rejects a finalized purchase until Panel explicitly approves rec
   db.close();
 });
 
-test("first authoritative receipt activates only a new procurement CSV product", () => {
+test("new procurement CSV product activates only after receipt and later approved positive price", () => {
   const { db, procurement, warehouse } = setup();
   const preview = procurement.previewCsv([{
     sku: "CSV-FIRST-RECEIPT", supplier_no: "SUP-CSV-1", type: "simple", size: "25 mm",
@@ -166,8 +167,50 @@ test("first authoritative receipt activates only a new procurement CSV product",
     { id: "csv-first-receipt-package", code: "CSV-FIRST-RECEIPT-PACKAGE", quantityBaseInt: 500 },
   ], 500);
   assert.deepEqual(db.prepare("SELECT status,is_sellable,central_stock,procurement_activation_pending FROM products WHERE id=?").get(product.id),
-    { status: "Active", is_sellable: 1, central_stock: 500, procurement_activation_pending: 0 });
+    { status: "Passive", is_sellable: 0, central_stock: 500, procurement_activation_pending: 1 });
   assert.equal(db.prepare("SELECT SUM(quantity_delta_base_int) FROM inventory_ledger_events WHERE product_id=? AND event_type='RECEIPT'").pluck().get(product.id), 500);
+  const priced = new ProductPricingService(db).applyMany({
+    productIds: [product.id], settings: { bufferPercentage: 20, profitPercentage: 50, fixedTry: 3, roundingIncrement: 5 },
+    actorId: "pricing-owner", reason: "test-approved-price", operationId: "price-after-receipt",
+  });
+  assert.deepEqual({ updated: priced.updatedCount, activated: priced.activatedCount }, { updated: 1, activated: 1 });
+  assert.deepEqual(db.prepare("SELECT status,is_sellable,central_stock,procurement_activation_pending,sale_price FROM products WHERE id=?").get(product.id),
+    { status: "Active", is_sellable: 1, central_stock: 500, procurement_activation_pending: 0, sale_price: 10 });
+  db.close();
+});
+
+test("approved positive price before receipt waits for authoritative physical stock", () => {
+  const { db, procurement, warehouse } = setup();
+  const preview = procurement.previewCsv([{
+    sku: "CSV-PRICE-FIRST", supplier_no: "SUP-CSV-2", type: "simple", size: "30 mm",
+    material: "Steel", profile_type: "Round", name_en: "Price first", name_tr: "Önce fiyat",
+    total_quantity: 2, box_count: 1, units_per_box: 2, box_weight_kg: 1,
+    total_weight_kg: 1, part_weight_g: 500, purchase_price_usd: 10,
+  }])[0];
+  procurement.createPurchase({
+    id: "purchase-csv-price-first", supplierId: "supplier",
+    acquisitionCostVatPolicy: "VAT_EXCLUDED_FROM_INVENTORY_COST",
+    lines: [{
+      id: "line-csv-price-first", quantity: preview.quantity, quoteBasis: "piece",
+      supplierUnitPriceMinor: 1_000, currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 0,
+      packing: preview.packing, catalogProposal: preview.catalogProposal,
+    }],
+  });
+  const product = db.prepare("SELECT id FROM products WHERE sku='CSV-PRICE-FIRST'").get() as any;
+  const lot = procurement.finalizeAcquisitionCosts("purchase-csv-price-first", { allocations: [] }).lots[0];
+  const priced = new ProductPricingService(db).applyMany({
+    productIds: [product.id], settings: { bufferPercentage: 0, profitPercentage: 0, fixedTry: 0, roundingIncrement: 1 },
+    actorId: "pricing-owner", reason: "test-price-before-receipt", operationId: "price-before-receipt",
+  });
+  assert.deepEqual({ updated: priced.updatedCount, activated: priced.activatedCount }, { updated: 1, activated: 0 });
+  assert.deepEqual(db.prepare("SELECT status,is_sellable,central_stock,procurement_activation_pending,sale_price FROM products WHERE id=?").get(product.id),
+    { status: "Passive", is_sellable: 0, central_stock: 0, procurement_activation_pending: 1, sale_price: 10 });
+  procurement.approveForReceipt("purchase-csv-price-first", "buyer");
+  receive(db, warehouse, lot.id, "csv-price-first", [
+    { id: "csv-price-first-package", code: "CSV-PRICE-FIRST-PACKAGE", quantityBaseInt: 2 },
+  ], 2);
+  assert.deepEqual(db.prepare("SELECT status,is_sellable,central_stock,procurement_activation_pending,sale_price FROM products WHERE id=?").get(product.id),
+    { status: "Active", is_sellable: 1, central_stock: 2, procurement_activation_pending: 0, sale_price: 10 });
   db.close();
 });
 

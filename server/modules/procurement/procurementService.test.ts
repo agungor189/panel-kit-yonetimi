@@ -79,10 +79,19 @@ test("Panel workflow requires FINAL landed cost before exposing a Warehouse rece
   });
   assert.equal(withFreight.workflowState, "COST_PENDING");
   assert.deepEqual(withFreight.allocationSuggestions.map((item: any) => item.amountTryMinor), [8000, 8000]);
+  const preview = procurement.previewAcquisitionCosts("po-final-gate", {
+    allocations: [{ componentId: "freight-final", mode: "ACCEPT_SUGGESTION" }],
+  });
+  assert.deepEqual(preview.lines.map((item) => ({ sku: item.sku, expense: item.allocatedExpenseTryMinor, total: item.totalCostTryMinor })), [
+    { sku: "PART-A", expense: 8000, total: 16000 },
+    { sku: "PART-B", expense: 8000, total: 16000 },
+  ]);
+  assert.deepEqual(preview.unallocatedCosts, []);
   const finalized = procurement.finalizeAcquisitionCosts("po-final-gate", {
     allocations: [{ componentId: "freight-final", mode: "ACCEPT_SUGGESTION" }],
   });
   assert.equal(finalized.workflowState, "COST_PENDING");
+  assert.deepEqual(finalized.lots.map((item: any) => item.landedCostTryMinor), preview.lines.map((item) => item.totalCostTryMinor));
   assert.equal(procurement.listReceiptReady().length, 0);
   const approved = procurement.approveForReceipt("po-final-gate", "buyer");
   assert.equal(approved.workflowState, "RECEIPT_PENDING");

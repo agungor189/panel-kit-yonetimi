@@ -186,7 +186,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 95);
+  assert.equal(manifest.length, 96);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -196,7 +196,8 @@ test("fresh production schema is exact, versioned and has zero business history"
   assert.ok(manifest.every(({ checksum }) => /^[a-f0-9]{64}$/.test(checksum)));
 
   const requiredColumns: Record<string, string[]> = {
-    products: ["base_uom_code", "catalog_class", "catalog_type", "catalog_version", "catalog_version_ref", "central_stock", "id", "mass_grams_int", "material_behavior", "procurement_activation_pending", "product_type", "sku", "title"],
+    products: ["base_uom_code", "catalog_class", "catalog_type", "catalog_version", "catalog_version_ref", "central_stock", "fixed_price_adjustment_try", "id", "mass_grams_int", "material_behavior", "price_rounding_increment", "procurement_activation_pending", "product_type", "sku", "title"],
+    pricing_history: ["buffer_percentage", "fixed_price_adjustment_try", "price_rounding_increment", "product_id", "profit_percentage", "sale_price"],
     product_profile_attributes: ["custom_length_allowed", "form", "material", "product_id", "standard_purchase_lengths_mm_json", "wall_thickness_micrometers", "wall_thickness_mm"],
     catalog_product_versions: ["catalog_version", "content_hash", "product_id", "snapshot_json", "version_ref"],
     uom_definitions: ["base_quantum", "code", "dimension", "quantity_scale", "registry_version"],

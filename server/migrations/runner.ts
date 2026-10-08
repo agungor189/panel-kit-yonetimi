@@ -29,6 +29,7 @@ import { PUSH_NOTIFICATION_DISPATCH_ALL_CATEGORIES_SCHEMA_V93 } from "../db/push
 import { PROCUREMENT_WORKFLOW_SCHEMA_V94 } from "../db/procurementWorkflowSchema.js";
 import { PROCUREMENT_PACKING_SCHEMA_V95 } from "../db/procurementPackingSchema.js";
 import { CATALOG_PROCUREMENT_ACTIVATION_SCHEMA_V96 } from "../db/catalogProcurementActivationSchema.js";
+import { PRICING_ACTIVATION_SCHEMA_V97 } from "../db/pricingActivationSchema.js";
 import { WAREHOUSE_EXECUTION_SCHEMA_V71, WAREHOUSE_REPLENISHMENT_RUNTIME_SCHEMA_V73 } from "../db/warehouseExecutionSchema.js";
 import { canonicalPayloadHash } from "../modules/commands/commandFoundation.js";
 
@@ -3110,9 +3111,16 @@ const migrations: Migration[] = [
       db.exec(CATALOG_PROCUREMENT_ACTIVATION_SCHEMA_V96);
     },
   },
+  {
+    version: 97,
+    name: "add_pricing_policy_and_sale_price_activation_guard",
+    up(db) {
+      db.exec(PRICING_ACTIVATION_SCHEMA_V97);
+    },
+  },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 96;
+export const CURRENT_SCHEMA_VERSION = 97;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),

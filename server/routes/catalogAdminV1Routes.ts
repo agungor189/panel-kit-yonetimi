@@ -3,7 +3,7 @@ import type Database from "better-sqlite3";
 import express, { type RequestHandler } from "express";
 import { CatalogService, CatalogValidationError, type CatalogProductInput } from "../modules/catalog/catalogService.js";
 import { CommandExecutor, CommandFoundationError } from "../modules/commands/commandFoundation.js";
-import { enqueueCanonicalChannelChanges } from "../modules/channels/channelOutboundProjection.js";
+import { ProductPricingService, ProductPricingValidationError } from "../modules/pricing/productPricingService.js";
 import { generateNormalizedFields } from "../utils/normalizeProductFields.js";
 
 type Dependencies = { db: Database.Database; authorize: RequestHandler };
@@ -28,6 +28,13 @@ const commandError = (error: unknown, res: express.Response) => {
     return res.status(error.statusCode || (conflict ? 409 : 400)).json({
       success: false,
       error: { code, message: error.message },
+    });
+  }
+
+  if (error instanceof ProductPricingValidationError) {
+    return res.status(error.statusCode).json({
+      success: false,
+      error: { code: error.code, message: error.message },
     });
   }
 
@@ -75,6 +82,7 @@ const persistOperationalMetadata = (
   productId: string,
   rawOperational: unknown,
   opId: string,
+  actorId: string,
 ) => {
   if (!rawOperational || typeof rawOperational !== "object" || Array.isArray(rawOperational)) return;
 
@@ -142,11 +150,15 @@ const persistOperationalMetadata = (
   });
 
   const previousSalePrice = Number(before.sale_price || 0);
-  const salePrice = nonNegativeNumber(
-    value("sale_price"),
-    "sale_price",
-    previousSalePrice,
-  );
+  const pricingApproved = operational.pricing_formula_approved === true;
+  const pricingKeys = ["sale_price", "buffer_percentage", "profit_percentage", "fixed_price_adjustment_try", "price_rounding_increment"];
+  if (!pricingApproved && pricingKeys.some((key) => hasOwn(operational, key))) {
+    throw new CatalogValidationError(
+      "Sale pricing changes require FINAL Landed Cost preview and approval.",
+      "PRICING_FORMULA_APPROVAL_REQUIRED",
+      409,
+    );
+  }
 
   db.prepare(`
     UPDATE products
@@ -165,9 +177,6 @@ const persistOperationalMetadata = (
       description=?,
       purchase_price_usd=?,
       purchase_cost=?,
-      sale_price=?,
-      buffer_percentage=?,
-      profit_percentage=?,
       exchange_rate_used=?,
       price_locked=?,
       notes=?,
@@ -200,9 +209,6 @@ const persistOperationalMetadata = (
     cleanText(value("description")),
     nonNegativeNumber(value("purchase_price_usd"), "purchase_price_usd", Number(before.purchase_price_usd || 0)),
     nonNegativeNumber(value("purchase_cost"), "purchase_cost", Number(before.purchase_cost || 0)),
-    salePrice,
-    nonNegativeNumber(value("buffer_percentage"), "buffer_percentage", Number(before.buffer_percentage || 0)),
-    nonNegativeNumber(value("profit_percentage"), "profit_percentage", Number(before.profit_percentage || 0)),
     nonNegativeNumber(value("exchange_rate_used"), "exchange_rate_used", Number(before.exchange_rate_used || 0)),
     Boolean(value("price_locked")) ? 1 : 0,
     cleanText(value("notes")),
@@ -256,7 +262,7 @@ const persistOperationalMetadata = (
       const price = nonNegativeNumber(
         platform?.price,
         `platforms.${platformName}.price`,
-        salePrice,
+        previousSalePrice,
       );
 
       const listed = platform?.is_listed === true ? 1 : 0;
@@ -277,12 +283,34 @@ const persistOperationalMetadata = (
     }
   }
 
-  if (previousSalePrice !== salePrice) {
-    enqueueCanonicalChannelChanges(db, {
-      productId,
-      kinds: ["PRICE"],
+  if (pricingApproved) {
+    const pricing = new ProductPricingService(db);
+    const settings = {
+      bufferPercentage: operational.buffer_percentage,
+      profitPercentage: operational.profit_percentage,
+      fixedTry: operational.fixed_price_adjustment_try ?? 0,
+      roundingIncrement: operational.price_rounding_increment ?? 1,
+    };
+    const preview = pricing.preview(productId, settings);
+    if (!preview.willUpdate || preview.newSalePrice === null) {
+      const code = preview.skipReason === "LOCKED" ? "PRICE_LOCKED" : "FINAL_LANDED_COST_REQUIRED";
+      throw new ProductPricingValidationError(code, preview.skipReason === "LOCKED"
+        ? "Locked prices cannot be changed."
+        : "A positive price requires FINAL Landed Cost and valid pricing settings.", 409);
+    }
+    if (hasOwn(operational, "sale_price") && Number(operational.sale_price) !== preview.newSalePrice) {
+      throw new ProductPricingValidationError("PRICING_PREVIEW_MISMATCH", "Submitted sale price does not match the authoritative pricing engine.", 409);
+    }
+    const result = pricing.applyMany({
+      productIds: [productId],
+      settings,
+      actorId,
+      reason: "product-edit",
       operationId: opId,
     });
+    if (result.updatedCount !== 1) {
+      throw new ProductPricingValidationError("PRICING_UPDATE_REJECTED", "The authoritative pricing update was rejected.", 409);
+    }
   }
 };
 
@@ -314,6 +342,7 @@ export function createCatalogAdminV1Router({ db, authorize }: Dependencies) {
           created.id,
           operational,
           operationId(req),
+          req.user!.id,
         );
 
         const product = catalog.getProduct(created.id)!;
@@ -379,6 +408,7 @@ export function createCatalogAdminV1Router({ db, authorize }: Dependencies) {
           updated.id,
           operational,
           operationId(req),
+          req.user!.id,
         );
 
         const product = catalog.getProduct(updated.id)!;

@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { X, Check, Calculator, AlertTriangle, RefreshCw } from 'lucide-react';
-import { api } from '../lib/api';
+import { api, createRetryOperation } from '../lib/api';
 import { useCurrency } from '../CurrencyContext';
-import { calculateFinalLandedSalePrice, finalLandedPricingDecision } from '../../shared/finalLandedPricing';
+import { finalLandedPricingDecision } from '../../shared/finalLandedPricing';
 
 export default function PricingSettingsModal({ 
   onClose, 
@@ -14,9 +14,11 @@ export default function PricingSettingsModal({
   products: any[] 
 }) {
   const { FormatAmount } = useCurrency();
+  const [pricingOperation] = useState(() => createRetryOperation('bulk-pricing'));
   const [bufferPercentage, setBufferPercentage] = useState<number>(20);
   const [profitPercentage, setProfitPercentage] = useState<number>(50);
-  const [includeLocked, setIncludeLocked] = useState<boolean>(false);
+  const [fixedTry, setFixedTry] = useState<number>(0);
+  const [roundingIncrement, setRoundingIncrement] = useState<1 | 5 | 10>(1);
 
   const [previewData, setPreviewData] = useState<any[]>([]);
   const [showPreview, setShowPreview] = useState(false);
@@ -24,17 +26,19 @@ export default function PricingSettingsModal({
   const [errorMessage, setErrorMessage] = useState("");
   const [confirmUpdate, setConfirmUpdate] = useState<{ updates: any[], missingOnly: boolean } | null>(null);
 
-  const calculatePricing = (product: any) => {
-    return calculateFinalLandedSalePrice(product.landed_cost_try, bufferPercentage, profitPercentage);
+  const invalidatePreview = () => {
+    setShowPreview(false);
+    setPreviewData([]);
+    setConfirmUpdate(null);
   };
 
   const handlePreview = () => {
     let hasFailures = false;
     const data = products.map(p => {
-      if (p.price_locked && !includeLocked) {
+      if (p.price_locked) {
         return { ...p, newSalePrice: null, willUpdate: false, skipReason: 'LOCKED' };
       }
-      const decision = finalLandedPricingDecision(p.landed_cost_try, bufferPercentage, profitPercentage);
+      const decision = finalLandedPricingDecision(p.landed_cost_try, bufferPercentage, profitPercentage, fixedTry, roundingIncrement);
       if (!decision.willUpdate) {
         hasFailures = true;
       }
@@ -51,12 +55,16 @@ export default function PricingSettingsModal({
 
   const executeUpdate = (onlyMissing: boolean = false) => {
     setErrorMessage("");
-    const dataToUpdate = products.filter(p => {
-      if (p.price_locked && !includeLocked) return false;
+    if (!showPreview) {
+      setErrorMessage("Önce fiyat önizlemesini oluşturun.");
+      return;
+    }
+    const dataToUpdate = previewData.filter(p => {
+      if (!p.willUpdate) return false;
       if (onlyMissing && p.sale_price > 0) return false;
-      return calculatePricing(p) !== null;
+      return true;
     }).map(p => {
-      return { id: p.id, newSalePrice: calculatePricing(p)! };
+      return { id: p.id, newSalePrice: p.newSalePrice };
     });
 
     if (dataToUpdate.length === 0) {
@@ -72,13 +80,18 @@ export default function PricingSettingsModal({
     
     setSaving(true);
     try {
-      await api.post('/products/bulk-pricing', {
+      const payload = {
         updates: confirmUpdate.updates,
         settings: {
           bufferPercentage,
-          profitPercentage
+          profitPercentage,
+          fixedTry,
+          roundingIncrement,
         }
-      });
+      };
+      const operationId = pricingOperation.idFor(payload);
+      await api.post('/products/bulk-pricing', payload, { operationId });
+      pricingOperation.complete(operationId);
       onRefresh();
       onClose();
     } catch (err: any) {
@@ -109,7 +122,7 @@ export default function PricingSettingsModal({
         </div>
 
         <div className="p-6 flex-1 overflow-y-auto space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
             <div>
               <label className="block text-sm font-bold text-gray-700 mb-2">Buffer Marjı (%)</label>
               <div className="relative">
@@ -118,7 +131,7 @@ export default function PricingSettingsModal({
                   type="number" 
                   min="0"
                   value={bufferPercentage}
-                  onChange={e => setBufferPercentage(parseFloat(e.target.value) || 0)}
+                  onChange={e => { setBufferPercentage(parseFloat(e.target.value) || 0); invalidatePreview(); }}
                   className="w-full px-4 pr-10 py-2 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all font-bold text-orange-600"
                 />
               </div>
@@ -131,24 +144,25 @@ export default function PricingSettingsModal({
                   type="number" 
                   min="0"
                   value={profitPercentage}
-                  onChange={e => setProfitPercentage(parseFloat(e.target.value) || 0)}
+                  onChange={e => { setProfitPercentage(parseFloat(e.target.value) || 0); invalidatePreview(); }}
                   className="w-full px-4 pr-10 py-2 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all font-bold text-green-600"
                 />
               </div>
             </div>
-          </div>
-
-          <div className="flex items-center gap-3 bg-yellow-50 p-4 rounded-xl border border-yellow-200">
-            <input 
-              type="checkbox" 
-              id="includeLocked"
-              checked={includeLocked}
-              onChange={e => setIncludeLocked(e.target.checked)}
-              className="w-5 h-5 text-yellow-600 rounded"
-            />
-            <label htmlFor="includeLocked" className="text-sm font-semibold text-yellow-800">
-              Kilitli fiyatları da güncelle (Manuel ayarlananlar değişecektir)
-            </label>
+            <div>
+              <label className="block text-sm font-bold text-gray-700 mb-2">Sabit Tutar (TRY)</label>
+              <input type="number" min="0" step="0.01" value={fixedTry}
+                onChange={e => { setFixedTry(parseFloat(e.target.value) || 0); invalidatePreview(); }}
+                className="w-full px-4 py-2 border border-gray-300 rounded-xl font-bold" />
+            </div>
+            <div>
+              <label className="block text-sm font-bold text-gray-700 mb-2">Yukarı Yuvarlama</label>
+              <select value={roundingIncrement}
+                onChange={e => { setRoundingIncrement(Number(e.target.value) as 1 | 5 | 10); invalidatePreview(); }}
+                className="w-full px-4 py-2 border border-gray-300 rounded-xl font-bold">
+                <option value={1}>1 TL</option><option value={5}>5 TL</option><option value={10}>10 TL</option>
+              </select>
+            </div>
           </div>
 
           <div className="flex flex-wrap gap-3">
@@ -161,14 +175,14 @@ export default function PricingSettingsModal({
             <div className="flex-1"></div>
             <button 
               onClick={() => executeUpdate(true)}
-              disabled={saving || !!confirmUpdate}
+              disabled={saving || !!confirmUpdate || !showPreview}
               className="px-6 py-2 bg-blue-50 font-bold text-blue-600 rounded-xl border border-blue-200 hover:bg-blue-100 transition-colors disabled:opacity-50"
             >
               Sadece Satış Fiyatı Boş Olanları Güncelle
             </button>
             <button 
               onClick={() => executeUpdate(false)}
-              disabled={saving || !!confirmUpdate}
+              disabled={saving || !!confirmUpdate || !showPreview}
               className="px-6 py-2 bg-blue-600 font-bold text-white rounded-xl hover:bg-blue-700 transition-colors flex items-center shadow-lg disabled:opacity-50"
             >
               {saving ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : null}

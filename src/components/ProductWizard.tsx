@@ -12,6 +12,7 @@ import { api, createRetryOperation, PLATFORMS } from '../lib/api';
 import { Settings } from '../types';
 import { useCurrency } from '../CurrencyContext';
 import { Button, cn } from './ui';
+import { calculateFinalLandedSalePrice } from '../../shared/finalLandedPricing';
 
 interface ProductWizardProps {
   productId?: string | null;
@@ -21,6 +22,8 @@ interface ProductWizardProps {
 
 export default function ProductWizard({ productId, settings, onClose }: ProductWizardProps) {
   const [loading, setLoading] = useState(false);
+  const [pricingPreview, setPricingPreview] = useState<number | null>(null);
+  const [pricingApproved, setPricingApproved] = useState(false);
   const { activeRate } = useCurrency();
   const catalogMutation = useRef(createRetryOperation('catalog-product-wizard')).current;
 
@@ -46,6 +49,8 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
     sale_price: 0,
     buffer_percentage: settings?.default_buffer_percentage || 0,
     profit_percentage: settings?.default_profit_percentage || 0,
+    fixed_price_adjustment_try: 0,
+    price_rounding_increment: 1,
     exchange_rate_used: activeRate || 0,
     price_locked: false,
     weight_grams: 0,
@@ -94,6 +99,8 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
           return p ? { name, stock: 0, price: p.price, is_listed: !!p.is_listed } : { name, stock: 0, price: data.sale_price, is_listed: false };
         })
       });
+      setPricingPreview(null);
+      setPricingApproved(false);
       setImages(data.images || []);
     } catch (err) {
       console.error(err);
@@ -111,6 +118,31 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
     const newPlatforms = [...formData.platforms];
     newPlatforms[index] = { ...newPlatforms[index], [field]: value };
     setFormData((prev: any) => ({ ...prev, platforms: newPlatforms }));
+  };
+
+  const updatePricingPolicy = (field: string, value: number) => {
+    setFormData((prev: any) => ({ ...prev, [field]: value }));
+    setPricingPreview(null);
+    setPricingApproved(false);
+  };
+
+  const previewSalePrice = () => {
+    if (formData.price_locked) return;
+    const preview = calculateFinalLandedSalePrice(
+      formData.landed_cost_try,
+      Number(formData.buffer_percentage) || 0,
+      Number(formData.profit_percentage) || 0,
+      Number(formData.fixed_price_adjustment_try) || 0,
+      Number(formData.price_rounding_increment) as 1 | 5 | 10,
+    );
+    setPricingPreview(preview && preview > 0 ? preview : null);
+    setPricingApproved(false);
+  };
+
+  const approveSalePrice = () => {
+    if (pricingPreview === null) return;
+    setFormData((prev: any) => ({ ...prev, sale_price: pricingPreview }));
+    setPricingApproved(true);
   };
 
   const handleFileChange = (e: any) => {
@@ -184,9 +216,6 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
       description: formData.description || null,
       purchase_price_usd: Number(formData.purchase_price_usd) || 0,
       purchase_cost: Number(formData.purchase_cost) || 0,
-      sale_price: Number(formData.sale_price) || 0,
-      buffer_percentage: Number(formData.buffer_percentage) || 0,
-      profit_percentage: Number(formData.profit_percentage) || 0,
       exchange_rate_used: Number(formData.exchange_rate_used) || 0,
       price_locked: Boolean(formData.price_locked),
       notes: formData.notes || null,
@@ -201,6 +230,14 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
         price: Number(platform.price) || 0,
         is_listed: Boolean(platform.is_listed),
       })),
+      ...(pricingApproved ? {
+        pricing_formula_approved: true,
+        sale_price: Number(formData.sale_price),
+        buffer_percentage: Number(formData.buffer_percentage) || 0,
+        profit_percentage: Number(formData.profit_percentage) || 0,
+        fixed_price_adjustment_try: Number(formData.fixed_price_adjustment_try) || 0,
+        price_rounding_increment: Number(formData.price_rounding_increment) || 1,
+      } : {}),
     };
 
     const commandPayload = productId
@@ -549,14 +586,7 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                       min="0"
                       value={formData.buffer_percentage} 
                       onChange={(e) => {
-                        const buff = parseFloat(e.target.value) || 0;
-                        const landed = formData.landed_cost_try;
-                        const saleTl = landed == null ? null : landed * (1 + buff / 100) * (1 + formData.profit_percentage / 100);
-                        setFormData((prev: any) => ({ 
-                          ...prev, 
-                          buffer_percentage: buff, 
-                          sale_price: prev.price_locked || saleTl == null ? prev.sale_price : (saleTl > 0 ? Math.ceil(saleTl) : prev.sale_price)
-                        }));
+                        updatePricingPolicy('buffer_percentage', parseFloat(e.target.value) || 0);
                       }}
                       className="form-input pr-10 font-bold text-orange-600" 
                     />
@@ -570,18 +600,26 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                       min="0"
                       value={formData.profit_percentage} 
                       onChange={(e) => {
-                        const profit = parseFloat(e.target.value) || 0;
-                        const landed = formData.landed_cost_try;
-                        const saleTl = landed == null ? null : landed * (1 + formData.buffer_percentage / 100) * (1 + profit / 100);
-                        setFormData((prev: any) => ({ 
-                          ...prev, 
-                          profit_percentage: profit, 
-                          sale_price: prev.price_locked || saleTl == null ? prev.sale_price : (saleTl > 0 ? Math.ceil(saleTl) : prev.sale_price)
-                        }));
+                        updatePricingPolicy('profit_percentage', parseFloat(e.target.value) || 0);
                       }}
                       className="form-input pr-10 font-bold text-green-600" 
                     />
                   </div>
+                </Field>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 border-t border-primary/10 pt-8">
+                <Field label="Sabit Tutar (₺)">
+                  <input type="number" min="0" step="0.01" value={formData.fixed_price_adjustment_try || 0}
+                    onChange={(e) => updatePricingPolicy('fixed_price_adjustment_try', parseFloat(e.target.value) || 0)}
+                    className="form-input font-bold" />
+                </Field>
+                <Field label="Yukarı Yuvarlama">
+                  <select value={formData.price_rounding_increment || 1}
+                    onChange={(e) => updatePricingPolicy('price_rounding_increment', Number(e.target.value))}
+                    className="form-input font-bold">
+                    <option value={1}>1 TL</option><option value={5}>5 TL</option><option value={10}>10 TL</option>
+                  </select>
                 </Field>
               </div>
 
@@ -616,8 +654,8 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                     <input 
                       type="number" 
                       value={formData.sale_price} 
-                      onChange={(e) => setFormData((prev: any) => ({ ...prev, sale_price: parseFloat(e.target.value) || 0 }))}
-                      className="form-input pl-10 font-black text-xl text-primary border-primary/30 focus:border-primary shadow-lg shadow-primary/5" 
+                      readOnly
+                      className="form-input pl-10 font-black text-xl text-primary border-primary/30 bg-bg-main/50 shadow-lg shadow-primary/5"
                     />
                   </div>
                   <div className="mt-4 flex items-center gap-2">
@@ -625,7 +663,7 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                       type="checkbox" 
                       id="price_locked"
                       checked={formData.price_locked}
-                      onChange={(e) => setFormData((prev: any) => ({ ...prev, price_locked: e.target.checked }))}
+                      onChange={(e) => { setFormData((prev: any) => ({ ...prev, price_locked: e.target.checked })); setPricingPreview(null); setPricingApproved(false); }}
                       className="w-4 h-4 text-primary rounded focus:ring-primary"
                     />
                     <label htmlFor="price_locked" className="text-xs font-semibold text-text-main cursor-pointer">
@@ -633,6 +671,21 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                     </label>
                   </div>
                 </Field>
+              </div>
+              <div className="flex flex-wrap items-center gap-3 border-t border-primary/10 pt-6">
+                <Button type="button" variant="secondary" onClick={previewSalePrice}
+                  disabled={formData.price_locked || formData.landed_cost_try == null}>
+                  Fiyatı Önizle
+                </Button>
+                {formData.landed_cost_try == null && <span className="text-sm font-bold text-amber-700">FINAL Landed Cost bekleniyor</span>}
+                {pricingPreview !== null && (
+                  <>
+                    <span className="text-sm font-bold text-text-main">Önizleme: ₺{pricingPreview.toFixed(2)}</span>
+                    <Button type="button" onClick={approveSalePrice} disabled={pricingApproved}>
+                      {pricingApproved ? 'Onaylandı' : 'Onayla ve Uygula'}
+                    </Button>
+                  </>
+                )}
               </div>
             </div>
           </section>

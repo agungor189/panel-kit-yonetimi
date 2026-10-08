@@ -29,6 +29,12 @@ type Purchase = PurchaseSummary & {
   lots: Array<{ id: string; lineId: string; productId: string; landedCostTryMinor: number; merchandiseCostTryMinor: number; freightCostTryMinor: number; customsCostTryMinor: number; cuttingLaborCostTryMinor: number; otherDirectCostTryMinor: number; normalizedAcquisitionUnitCostTry: { numerator: number; denominator: number; perBaseUom: string } }>;
   documents: Array<{ id: string; documentType: string; fileName: string; storageReference: string; createdAt: string }>;
 };
+type CostPreview = {
+  formulaVersion: string;
+  lines: Array<{ lineId: string; sku: string; quantityBaseInt: number; baseUomCode: string; unitPurchaseCostTry: { numerator: number; denominator: number }; allocatedExpenseTryMinor: number; estimatedUnitLandedCostTry: { numerator: number; denominator: number }; totalCostTryMinor: number }>;
+  unallocatedCosts: Array<{ componentId: string; amountTryMinor: number; category: string }>;
+  warnings: Array<{ code: string; message: string }>;
+};
 
 const stateLabels: Record<string, string> = {
   DRAFT: 'Taslak', ORDERED: 'Sipariş Verildi', IN_TRANSIT: 'Yolda', COST_PENDING: 'Maliyet Bekliyor',
@@ -53,6 +59,7 @@ export default function Procurement() {
   const [documentType, setDocumentType] = useState('COMMERCIAL_INVOICE');
   const [documentCostId, setDocumentCostId] = useState('');
   const [csvPreview, setCsvPreview] = useState<any[]>([]);
+  const [costPreview, setCostPreview] = useState<CostPreview | null>(null);
 
   const load = async () => {
     const [supplierData, productData, purchaseData] = await Promise.all([
@@ -66,6 +73,7 @@ export default function Procurement() {
 
   const loadPurchase = async (id: string) => {
     setSelectedId(id);
+    setCostPreview(null);
     if (!id) return setSelected(null);
     const data = await api.get(`/procurement/v1/purchases/${id}`);
     setSelected(data.data);
@@ -119,8 +127,21 @@ export default function Procurement() {
   }, op('purchase-cost')), 'Maliyet kalemi ve kur snapshotı kaydedildi.');
 
   const transition = (state: string) => selected && mutate(() => api.post(`/procurement/v1/purchases/${selected.id}/workflow`, { state }, op('purchase-state')), `${stateLabels[state]} durumuna geçildi.`);
+  const allocationPayload = () => ({
+    allocations: selected?.acquisitionCosts.map((item) => ({ componentId: item.id, mode: 'ACCEPT_SUGGESTION' })) || [],
+  });
+  const previewCosts = async () => {
+    if (!selected) return;
+    try {
+      setBusy(true);
+      const response = await api.post(`/procurement/v1/purchases/${selected.id}/cost-preview`, allocationPayload());
+      setCostPreview(response.data);
+    } catch (error: any) {
+      toast.error(error.message || 'Maliyet önizlemesi oluşturulamadı.');
+    } finally { setBusy(false); }
+  };
   const finalize = () => selected && mutate(() => api.post(`/procurement/v1/purchases/${selected.id}/finalize-costs`, {
-    allocations: selected.acquisitionCosts.map((item) => ({ componentId: item.id, mode: 'ACCEPT_SUGGESTION' })),
+    ...allocationPayload(),
   }, op('purchase-finalize')), 'FINAL Landed Cost kesinleştirildi.');
   const approveReceipt = () => selected && mutate(() => api.post(`/procurement/v1/purchases/${selected.id}/approve-receipt`, {}, op('receipt-approve')), 'Warehouse mal kabul onayı verildi.');
 
@@ -183,8 +204,9 @@ export default function Procurement() {
       </Card>
       {selected.acquisitionCosts.length > 0 && <Card padding="lg" className="space-y-2"><h3 className="font-black">Kaydedilmiş Giderler</h3>{selected.acquisitionCosts.map((item) => <div key={item.id} className="rounded-xl border p-3 text-sm"><strong>{item.expenseType} · {money(item.sourceAmountMinor, item.currency)}</strong><p className="text-xs text-text-muted">TL karşılığı {money(item.amounts.baseTry.netMinor)} · kur {item.fx.numerator / item.fx.denominator} · {item.occurredOn} · {item.targetLineIds.length ? `${item.targetLineIds.length} seçili satır` : 'ortak gider'}</p></div>)}</Card>}
       {selected.status === 'DRAFT' && <Card padding="lg" className="space-y-4"><h3 className="font-black">Maliyet Kalemi</h3><div className="grid gap-3 md:grid-cols-3"><Select value={cost.expenseType} onChange={(e) => setCost({ ...cost, expenseType: e.target.value })}>{['FREIGHT','CUSTOMS_DUTY','ADDITIONAL_TAX','CUSTOMS_BROKER','WAREHOUSE_PORT','DOMESTIC_FREIGHT','INSURANCE','BANK_TRANSFER','OTHER'].map((item) => <option key={item}>{item}</option>)}</Select><Input type="number" min="0" step="0.01" placeholder="Tutar" value={cost.amount} onChange={(e) => setCost({ ...cost, amount: e.target.value })}/><Select value={cost.currency} onChange={(e) => setCost({ ...cost, currency: e.target.value })}><option>USD</option><option>TRY</option></Select><Input type="date" value={cost.occurredOn} onChange={(e) => setCost({ ...cost, occurredOn: e.target.value })}/><Input className="md:col-span-2" placeholder="Açıklama" value={cost.description} onChange={(e) => setCost({ ...cost, description: e.target.value })}/></div><div><p className="mb-2 text-xs font-bold text-text-muted">Boş bırakırsanız tüm satırlara ürün bedeli oranında dağıtılır.</p><div className="flex flex-wrap gap-2">{selected.lines.map((line) => <label key={line.id} className="rounded-lg border px-3 py-2 text-xs"><input className="mr-2" type="checkbox" checked={cost.targetLineIds.includes(line.id)} onChange={(e) => setCost({ ...cost, targetLineIds: e.target.checked ? [...cost.targetLineIds, line.id] : cost.targetLineIds.filter((id) => id !== line.id) })}/>{line.product.sku}</label>)}</div></div><Button disabled={busy || !cost.amount} onClick={addCost}><Plus className="h-4 w-4"/>Maliyet Ekle</Button></Card>}
+      {costPreview && <Card padding="lg" className="space-y-4"><div><h3 className="font-black">Salt-okunur FINAL Landed Cost Önizlemesi</h3><p className="text-xs text-text-muted">{costPreview.formulaVersion} · Önizleme kesinleştirme ile aynı hesap motorunu kullanır.</p></div><div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left text-xs text-text-muted"><th>SKU</th><th>Miktar</th><th>Birim alış</th><th>Gider payı</th><th>Tahmini birim LC</th><th>Toplam maliyet</th></tr></thead><tbody>{costPreview.lines.map((line) => <tr key={line.lineId} className="border-t"><td className="py-3 font-bold">{line.sku}</td><td>{line.quantityBaseInt} {line.baseUomCode}</td><td>{money(line.unitPurchaseCostTry.numerator / line.unitPurchaseCostTry.denominator)}</td><td>{money(line.allocatedExpenseTryMinor)}</td><td className="font-bold">{money(line.estimatedUnitLandedCostTry.numerator / line.estimatedUnitLandedCostTry.denominator)}</td><td>{money(line.totalCostTryMinor)}</td></tr>)}</tbody></table></div>{costPreview.unallocatedCosts.length > 0 && <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"><strong>Dağıtılmamış giderler</strong>{costPreview.warnings.map((warning) => <p key={warning.message}>{warning.message}</p>)}</div>}</Card>}
       <Card padding="lg" className="space-y-4"><h3 className="font-black">Belgeler</h3><div className="flex flex-wrap gap-3"><Select value={documentType} onChange={(e) => setDocumentType(e.target.value)}>{['PROFORMA_INVOICE','COMMERCIAL_INVOICE','PACKING_LIST','CUSTOMS_DOCUMENT','FREIGHT_DOCUMENT','EXPENSE_INVOICE','OTHER'].map((item) => <option key={item}>{item}</option>)}</Select><Select value={documentCostId} onChange={(e) => setDocumentCostId(e.target.value)}><option value="">Genel satın alma evrakı</option>{selected.acquisitionCosts.map((item) => <option key={item.id} value={item.id}>{item.expenseType} · {item.description || item.occurredOn}</option>)}</Select><label className="cursor-pointer rounded-xl bg-slate-900 px-4 py-2 text-sm font-bold text-white"><FileUp className="mr-2 inline h-4 w-4"/>Belge Yükle<input className="hidden" type="file" accept=".pdf,image/png,image/jpeg,image/webp" onChange={(e) => uploadDocument(e.target.files?.[0])}/></label></div>{selected.documents.map((doc) => <a className="block text-sm font-bold text-primary" href={doc.storageReference} key={doc.id} target="_blank" rel="noreferrer">{doc.documentType} · {doc.fileName}</a>)}</Card>
-      <Card padding="lg" className="space-y-3"><h3 className="font-black">Kesinleştirme ve Mal Kabul</h3><p className="text-sm text-text-muted">FINAL Landed Cost kesinleşmeden Warehouse onayı açılamaz; fiziksel stok sadece Warehouse mal kabulüyle artar.</p><div className="flex flex-wrap gap-2">{selected.status === 'DRAFT' && <Button disabled={busy} onClick={finalize}><RefreshCw className="h-4 w-4"/>FINAL Landed Cost'u Kesinleştir</Button>}{selected.status === 'APPROVED' && selected.workflowState === 'COST_PENDING' && <Button disabled={busy} onClick={approveReceipt}><Truck className="h-4 w-4"/>Mal Kabul İçin Onayla</Button>}</div></Card>
+      <Card padding="lg" className="space-y-3"><h3 className="font-black">Kesinleştirme ve Mal Kabul</h3><p className="text-sm text-text-muted">FINAL Landed Cost kesinleşmeden Warehouse onayı açılamaz; fiziksel stok sadece Warehouse mal kabulüyle artar.</p><div className="flex flex-wrap gap-2">{selected.status === 'DRAFT' && <Button variant="secondary" disabled={busy} onClick={previewCosts}>Maliyet Önizlemesi</Button>}{selected.status === 'DRAFT' && costPreview && <Button disabled={busy} onClick={finalize}><RefreshCw className="h-4 w-4"/>Önizlemeyi Onayla ve Kesinleştir</Button>}{selected.status === 'APPROVED' && selected.workflowState === 'COST_PENDING' && <Button disabled={busy} onClick={approveReceipt}><Truck className="h-4 w-4"/>Mal Kabul İçin Onayla</Button>}</div></Card>
     </>}</div>}
   </div>;
 }

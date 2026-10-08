@@ -45,6 +45,7 @@ export const createRetryOperation = (prefix: string) => {
 const requiresOperationId = (method: "POST" | "PUT" | "PATCH", endpoint: string) => (
   (method === "POST" && endpoint === "/sales")
   || (method === "POST" && endpoint === "/catalog-admin/v1/products")
+  || (method === "POST" && endpoint === "/products/bulk-pricing")
   || (method === "POST" && /^\/sales\/[^/]+\/financial-expenses$/.test(endpoint))
   || (method === "POST" && /^\/returns\/v1\/(?:sales\/[^/]+|[^/]+\/refunds)$/.test(endpoint))
   || (method === "PUT" && /^\/catalog-admin\/v1\/products\/[^/]+$/.test(endpoint))

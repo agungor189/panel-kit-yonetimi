@@ -110,7 +110,7 @@ export class InventoryService {
       );
       new ProfileCutInventoryService(this.db).createReceiptPieces(lotId, operationId);
       this.syncProjection(snapshot.product_id);
-      const activated = new CatalogService(this.db).activateAfterFirstProcurementReceipt(snapshot.product_id);
+      const activated = new CatalogService(this.db).activateProcurementProductIfReady(snapshot.product_id);
       enqueueCanonicalChannelChanges(this.db, {
         productId: snapshot.product_id,
         kinds: activated ? ["STOCK", "VISIBILITY"] : ["STOCK"],

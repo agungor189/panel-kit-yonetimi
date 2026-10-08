@@ -437,13 +437,29 @@ export class ProcurementService {
     return this.getPurchase(purchaseId)!;
   }
 
-  finalizeAcquisitionCosts(purchaseIdValue: string, input: { allocations: Array<{ componentId: string; mode: "ACCEPT_SUGGESTION" | "MANUAL" | "UNALLOCATED"; lineAllocations?: Array<{ lineId: string; amountTryMinor: number }> }> }) {
+  private calculateAcquisitionCosts(purchaseIdValue: string, input: { allocations: Array<{ componentId: string; mode: "ACCEPT_SUGGESTION" | "MANUAL" | "UNALLOCATED"; lineAllocations?: Array<{ lineId: string; amountTryMinor: number }> }> }) {
     const purchaseId = requiredText(purchaseIdValue, "purchaseId", 200);
     const header = this.db.prepare("SELECT * FROM purchase_orders WHERE id=?").get(purchaseId) as any;
     if (!header) throw new ProcurementValidationError("PURCHASE_NOT_FOUND", "Purchase was not found.", 404);
     if (header.status !== "DRAFT") throw new ProcurementValidationError("PURCHASE_ALREADY_FINALIZED", "Purchase acquisition cost is already finalized.", 409);
     const lines = this.db.prepare("SELECT * FROM purchase_order_lines WHERE purchase_order_id=? ORDER BY line_index").all(purchaseId) as any[];
     const components = this.db.prepare("SELECT * FROM purchase_cost_components WHERE purchase_order_id=? ORDER BY id").all(purchaseId) as any[];
+    for (const line of lines) {
+      if (!Number.isSafeInteger(Number(line.quantity_base_int)) || Number(line.quantity_base_int) <= 0
+        || !Number.isSafeInteger(Number(line.base_uom_scale_snapshot)) || Number(line.base_uom_scale_snapshot) <= 0
+        || !Number.isSafeInteger(Number(line.fx_rate_numerator)) || Number(line.fx_rate_numerator) <= 0
+        || !Number.isSafeInteger(Number(line.fx_rate_denominator)) || Number(line.fx_rate_denominator) <= 0
+        || !String(line.fx_source || "").trim()) {
+        throw new ProcurementValidationError("COST_PREVIEW_INPUT_INVALID", `Quantity or FX snapshot is invalid for SKU ${line.product_sku_snapshot}.`);
+      }
+    }
+    for (const component of components) {
+      if (!Number.isSafeInteger(Number(component.fx_rate_numerator)) || Number(component.fx_rate_numerator) <= 0
+        || !Number.isSafeInteger(Number(component.fx_rate_denominator)) || Number(component.fx_rate_denominator) <= 0
+        || !String(component.fx_source || "").trim()) {
+        throw new ProcurementValidationError("COST_PREVIEW_INPUT_INVALID", `FX snapshot is invalid for cost component ${component.id}.`);
+      }
+    }
     if (!input || !Array.isArray(input.allocations)) throw new ProcurementValidationError("PROCUREMENT_VALIDATION_FAILED", "allocations is required.");
     const decisions = new Map(input.allocations.map((decision) => [requiredText(decision.componentId, "componentId", 200), decision]));
     if (decisions.size !== input.allocations.length || decisions.size !== components.length || components.some((component) => !decisions.has(component.id))) {
@@ -491,6 +507,59 @@ export class ProcurementService {
       for (const share of vatShares) allocatedVatByComponentAndLine.set(share.key, share.allocated);
     }
 
+    const lineCosts = lines.map((line) => {
+      const allocated = allocations.filter((entry) => entry.lineId === line.id);
+      const amountFor = (category: CostCategory) => safeAdd(allocated.filter((entry) => components.find((component) => component.id === entry.componentId)?.category === category).map((entry) => entry.amountTryMinor), category);
+      const freight = amountFor("FREIGHT");
+      const customs = amountFor("CUSTOMS");
+      const cutting = amountFor("CUTTING_LABOR");
+      const other = amountFor("OTHER");
+      const merchandiseCost = header.acquisition_cost_vat_policy === "VAT_INCLUDED_IN_INVENTORY_COST" ? line.base_try_gross_minor : line.base_try_net_minor;
+      const allocatedComponentVat = safeAdd(allocated.map((entry) => allocatedVatByComponentAndLine.get(`${entry.componentId}:${line.id}`) || 0), "allocated acquisition VAT");
+      const vatSnapshot = safeAdd([line.base_try_vat_minor, allocatedComponentVat], "lot VAT snapshot");
+      const landed = safeAdd([merchandiseCost, freight, customs, cutting, other], "landed cost");
+      const normalized = reduceRational(BigInt(landed) * BigInt(line.base_uom_scale_snapshot), BigInt(line.quantity_base_int), "landed unit cost");
+      return { line, allocated, freight, customs, cutting, other, merchandiseCost, vatSnapshot, landed, normalized };
+    });
+    return { purchaseId, header, components, allocations, lineCosts };
+  }
+
+  previewAcquisitionCosts(purchaseIdValue: string, input: { allocations: Array<{ componentId: string; mode: "ACCEPT_SUGGESTION" | "MANUAL" | "UNALLOCATED"; lineAllocations?: Array<{ lineId: string; amountTryMinor: number }> }> }) {
+    const calculation = this.calculateAcquisitionCosts(purchaseIdValue, input);
+    const unallocatedCosts = calculation.allocations.filter((entry) => entry.lineId === null).map((entry) => ({
+      componentId: entry.componentId,
+      amountTryMinor: entry.amountTryMinor,
+      category: calculation.components.find((component) => component.id === entry.componentId)?.category,
+    }));
+    return {
+      purchaseId: calculation.purchaseId,
+      formulaVersion: "dsdst.acquisition-cost.v2",
+      readOnly: true,
+      lines: calculation.lineCosts.map((cost) => ({
+        lineId: cost.line.id,
+        sku: cost.line.product_sku_snapshot,
+        quantityBaseInt: cost.line.quantity_base_int,
+        baseUomCode: cost.line.base_uom_code_snapshot,
+        unitPurchaseCostTry: reduceRational(BigInt(cost.merchandiseCost) * BigInt(cost.line.base_uom_scale_snapshot), BigInt(cost.line.quantity_base_int), "purchase unit cost"),
+        merchandiseCostTryMinor: cost.merchandiseCost,
+        allocatedExpenseTryMinor: safeAdd([cost.freight, cost.customs, cost.cutting, cost.other], "allocated expenses"),
+        estimatedUnitLandedCostTry: cost.normalized,
+        totalCostTryMinor: cost.landed,
+      })),
+      unallocatedCosts,
+      warnings: unallocatedCosts.map((cost) => ({ code: "UNALLOCATED_COST", message: `${cost.componentId} giderinin ${cost.amountTryMinor} kuruşu dağıtılmadı.` })),
+      totals: {
+        merchandiseTryMinor: safeAdd(calculation.lineCosts.map((cost) => cost.merchandiseCost), "preview merchandise total"),
+        allocatedExpensesTryMinor: safeAdd(calculation.lineCosts.map((cost) => safeAdd([cost.freight, cost.customs, cost.cutting, cost.other], "preview allocated expense")), "preview expense total"),
+        landedCostTryMinor: safeAdd(calculation.lineCosts.map((cost) => cost.landed), "preview landed total"),
+      },
+    };
+  }
+
+  finalizeAcquisitionCosts(purchaseIdValue: string, input: { allocations: Array<{ componentId: string; mode: "ACCEPT_SUGGESTION" | "MANUAL" | "UNALLOCATED"; lineAllocations?: Array<{ lineId: string; amountTryMinor: number }> }> }) {
+    const calculation = this.calculateAcquisitionCosts(purchaseIdValue, input);
+    const { purchaseId, header, components, allocations, lineCosts } = calculation;
+
     const finalizedAt = new Date().toISOString();
     this.db.transaction(() => {
       const insertAllocation = this.db.prepare(`INSERT INTO purchase_cost_allocations
@@ -502,18 +571,8 @@ export class ProcurementService {
         vat_try_minor,landed_cost_try_minor,normalized_cost_numerator,normalized_cost_denominator,
         allocation_snapshot_json,source_snapshot_json,formula_version,vat_policy_snapshot,created_at
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-      for (const line of lines) {
-        const allocated = allocations.filter((entry) => entry.lineId === line.id);
-        const amountFor = (category: CostCategory) => safeAdd(allocated.filter((entry) => components.find((component) => component.id === entry.componentId)?.category === category).map((entry) => entry.amountTryMinor), category);
-        const freight = amountFor("FREIGHT");
-        const customs = amountFor("CUSTOMS");
-        const cutting = amountFor("CUTTING_LABOR");
-        const other = amountFor("OTHER");
-        const merchandiseCost = header.acquisition_cost_vat_policy === "VAT_INCLUDED_IN_INVENTORY_COST" ? line.base_try_gross_minor : line.base_try_net_minor;
-        const allocatedComponentVat = safeAdd(allocated.map((entry) => allocatedVatByComponentAndLine.get(`${entry.componentId}:${line.id}`) || 0), "allocated acquisition VAT");
-        const vatSnapshot = safeAdd([line.base_try_vat_minor, allocatedComponentVat], "lot VAT snapshot");
-        const landed = safeAdd([merchandiseCost, freight, customs, cutting, other], "landed cost");
-        const normalized = reduceRational(BigInt(landed) * BigInt(line.base_uom_scale_snapshot), BigInt(line.quantity_base_int), "landed unit cost");
+      for (const cost of lineCosts) {
+        const { line, allocated, freight, customs, cutting, other, merchandiseCost, vatSnapshot, landed, normalized } = cost;
         const lotSnapshotId = randomUUID();
         insertLot.run(
           lotSnapshotId, purchaseId, line.id, line.product_id, line.quantity_base_int, line.base_uom_code_snapshot,

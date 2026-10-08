@@ -593,7 +593,9 @@ export default function ProductList({ onProductClick }: ProductListProps) {
                    </div>
                  )}
                  <div className="absolute top-2 right-2 shadow-sm">
-                   <StatusBadge status={p.status} />
+                   {Number(p.procurement_activation_pending) === 1 && Number(p.sale_price || 0) <= 0
+                     ? <span className="text-[9px] font-black text-amber-800 bg-amber-50 border border-amber-200 px-2 py-1 rounded uppercase">Fiyat Bekliyor / Pasif</span>
+                     : <StatusBadge status={p.status} />}
                  </div>
               </div>
               <div className="p-4">
@@ -679,6 +681,11 @@ export default function ProductList({ onProductClick }: ProductListProps) {
                           <div className="flex items-center gap-2 mt-0.5">
                             <p className="text-[10px] text-text-muted font-mono uppercase tracking-tighter truncate">{p.sku}</p>
                             <ProductKindBadge product={p} />
+                            {Number(p.procurement_activation_pending) === 1 && Number(p.sale_price || 0) <= 0 && (
+                              <span className="text-[9px] font-black text-amber-800 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded uppercase tracking-widest">
+                                Fiyat Bekliyor / Pasif
+                              </span>
+                            )}
                             {Number(p.total_stock ?? p.central_stock ?? 0) <= 0 && p.procurement_status && ['ORDERED', 'IN_TRANSIT', 'COST_PENDING', 'RECEIPT_PENDING'].includes(p.procurement_status) && (
                               <span className="text-[9px] font-black text-amber-800 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded uppercase tracking-widest">
                                 {p.procurement_status === 'IN_TRANSIT' || p.procurement_status === 'ORDERED' ? 'Yolda' : p.procurement_status === 'RECEIPT_PENDING' ? 'Mal Kabul Bekliyor' : 'Maliyet Bekliyor'}
@@ -755,7 +762,11 @@ export default function ProductList({ onProductClick }: ProductListProps) {
                     <td className="px-4 py-4 text-sm font-bold text-gray-700 text-right">
                       <FormatAmount align="right" amount={stockValue} />
                     </td>
-                    <td className="px-4 py-4 hidden sm:table-cell text-center"><StatusBadge status={p.status} /></td>
+                    <td className="px-4 py-4 hidden sm:table-cell text-center">
+                      {Number(p.procurement_activation_pending) === 1 && Number(p.sale_price || 0) <= 0
+                        ? <span className="text-[9px] font-black text-amber-800">Fiyat Bekliyor / Pasif</span>
+                        : <StatusBadge status={p.status} />}
+                    </td>
                   </tr>
                 )})}
               </tbody>

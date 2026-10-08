@@ -81,7 +81,7 @@ import {
 } from "./server/services/productImageImport.js";
 import { ensureOwnedUploadRoot, persistUpload, removeStoredUpload, removeStoredUploadReference } from "./server/services/uploadSecurity.js";
 import { PRODUCT_TYPES, canonicalProductType, parseReserveLocations } from "./shared/productCsvMapping.js";
-import { calculateFinalLandedSalePrice } from "./shared/finalLandedPricing.js";
+import { ProductPricingService, ProductPricingValidationError } from "./server/modules/pricing/productPricingService.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2559,100 +2559,25 @@ async function startServer() {
       const operationId = saleOperationId(req);
       const { updates, settings } = req.body;
       if (!Array.isArray(updates)) return res.status(400).json({ success: false, error: { code: 'INVALID_PRICING_UPDATES', message: 'updates must be an array.' } });
-      const kitMutation = updates.find((update: any) => db.prepare(`SELECT 1 FROM products p
-        LEFT JOIN published_kits k ON k.product_id=p.id WHERE p.id=? AND (p.product_type='kit' OR k.id IS NOT NULL)`).get(update?.id));
-      if (kitMutation) return res.status(409).json({ success: false, error: { code: 'KIT_PUBLICATION_REQUIRED', message: 'KIT price changes require a new canonical published kit version.' } });
-      const { bufferPercentage, profitPercentage } = settings ?? {};
-      let updatedCount = 0;
-      let skippedLockedCount = 0;
-      let skippedMissingCount = 0;
-      let skippedMissingLandedCostCount = 0;
-
-      db.transaction(() => {
-        const currentProductStmt = db.prepare(`
-          SELECT p.id,p.purchase_price_usd,p.purchase_cost,p.sale_price,p.buffer_percentage,
-                 p.profit_percentage,p.exchange_rate_used,p.price_locked,
-                 lc.cost_try_numerator,lc.cost_try_denominator
-          FROM products p LEFT JOIN current_product_landed_costs lc ON lc.product_id=p.id
-          WHERE p.id = ?
-        `);
-        const historyStmt = db.prepare(`
-          INSERT INTO pricing_history (
-            id, product_id, purchase_price_usd, purchase_cost, sale_price,
-            buffer_percentage, profit_percentage, exchange_rate_used, price_locked,
-            changed_by, change_reason
-          )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-        const stmt = db.prepare(`
-          UPDATE products
-          SET sale_price = ?,
-              buffer_percentage = ?,
-              profit_percentage = ?,
-              updated_at = CURRENT_TIMESTAMP
-          WHERE id = ? AND COALESCE(price_locked, 0) = 0
-        `);
-
-        const platformStmt = db.prepare(`
-          UPDATE product_platforms
-          SET price = ?
-          WHERE product_id = ?
-        `);
-
-        for (const update of updates) {
-          const currentProduct = currentProductStmt.get(update.id) as any;
-          if (!currentProduct) {
-            skippedMissingCount += 1;
-            continue;
-          }
-          if (currentProduct.price_locked === 1) {
-            skippedLockedCount += 1;
-            continue;
-          }
-          if (currentProduct.cost_try_numerator == null || !Number(currentProduct.cost_try_denominator)) {
-            skippedMissingLandedCostCount += 1;
-            continue;
-          }
-
-          historyStmt.run(
-            uuidv4(),
-            currentProduct.id,
-            currentProduct.purchase_price_usd,
-            currentProduct.purchase_cost,
-            currentProduct.sale_price,
-            currentProduct.buffer_percentage,
-            currentProduct.profit_percentage,
-            currentProduct.exchange_rate_used,
-            currentProduct.price_locked,
-            req.user?.id ?? null,
-            'bulk-pricing'
-          );
-
-          const landedCostTry = Number(currentProduct.cost_try_numerator) / Number(currentProduct.cost_try_denominator) / 100;
-          const newSalePrice = calculateFinalLandedSalePrice(landedCostTry, bufferPercentage, profitPercentage);
-          if (newSalePrice === null) {
-            skippedMissingLandedCostCount += 1;
-            continue;
-          }
-          const result = stmt.run(newSalePrice, bufferPercentage, profitPercentage, update.id);
-          if (result.changes > 0) {
-            updatedCount += result.changes;
-            platformStmt.run(newSalePrice, update.id);
-            enqueueCanonicalChannelChanges(db, { productId: update.id, kinds: ["PRICE"], operationId });
-          }
-        }
-      })();
-
-      logActivity('BULK_PRICING_UPDATED', 'product', 'bulk-pricing', {
-        updatedCount,
-        skippedLockedCount,
-        skippedMissingCount,
-        skippedMissingLandedCostCount,
-        bufferPercentage,
-        profitPercentage,
-      }, req.user?.id);
-      res.json({ success: true, updatedCount, skippedLockedCount, skippedMissingCount, skippedMissingLandedCostCount });
+      const outcome = saleCommands.execute({
+        operationId,
+        commandType: 'pricing.products.bulk-apply.v1',
+        payload: req.body,
+        actor: saleActor(req),
+        authorization: { decision: 'ALLOW', capability: 'catalog:write' },
+      }, () => {
+        const result = new ProductPricingService(db).applyMany({
+          productIds: updates.map((update: any) => update?.id), settings: settings ?? {},
+          actorId: req.user?.id ?? null, reason: 'bulk-pricing', operationId,
+        });
+        logActivity('BULK_PRICING_UPDATED', 'product', 'bulk-pricing', { ...result, settings }, req.user?.id);
+        return { statusCode: 200, body: { success: true, ...result } };
+      });
+      res.status(outcome.result.statusCode).json({ ...outcome.result.body, idempotent: outcome.replayed });
     } catch (err: any) {
+      if (err instanceof ProductPricingValidationError || err instanceof CommandFoundationError) {
+        return res.status(err.statusCode).json({ success: false, error: { code: err.code, message: err.message } });
+      }
       res.status(500).json({ error: err.message });
     }
   });
