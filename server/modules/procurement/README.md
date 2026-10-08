@@ -108,6 +108,17 @@ Rollback must preserve these tables and use an application compatible with v98;
 after business use, dropping source records or replaying imports is not rollback.
 Migration v101 adds immutable incomplete import-draft and completion records only;
 it does not backfill, reprice or modify applied migrations.
+Migration v102 stages editable draft cost items with immutable revisions, and records
+explicit supplier-alias retractions/reversals without deleting source evidence.
+CSV import takes supplier numbers only from MasterInfo `PRODUCT.supplier_code`;
+Packing List `source_supplier_code` remains source package evidence, including box
+descriptions. Alias repair is an explicit dry-run manifest followed by an
+authorization-gated command requiring backup and approval references; it is never
+an automatic migration. Draft cost entry needs only title, positive amount, USD/TRY
+and optional description. Currency conversion in the draft is a read-only estimate
+from the accepted FX observation. Tax, counterparty, prior-stock evidence and
+allocation approval remain mandatory at FINAL cost conversion, which uses the
+existing ProcurementService engine atomically.
 
 Receipt intents gain optional `packagePlan` with a version, backend package IDs,
 per-package quantities, immutable catalog snapshots and source-carton references.

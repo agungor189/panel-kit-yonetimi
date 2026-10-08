@@ -36,7 +36,8 @@ function largeFixture() {
     for (const lineIndex of lineNumbers) {
       const index = lineIndex % 167;
       rows.push(record('PACKAGE_ITEM',`item-${lineIndex}`,{ parent_ref:`group-${i}`,product_ref:productRef(index),sku:index < 5 ? '' : productSku(index),
-        purchase_line_ref:`line-${lineIndex}`,quantity:String(packageCount),units_per_package:'1',uom:'piece' }));
+        purchase_line_ref:`line-${lineIndex}`,quantity:String(packageCount),units_per_package:'1',uom:'piece',
+        source_supplier_code:lineIndex < 10 ? `in number ${lineIndex + 1} box` : '' }));
     }
   }
   for (let i = 0; i < 18; i++) for (let j = 0; j < (i < 8 ? 3 : 2); j++) {
@@ -78,7 +79,9 @@ test('185 products auto-match without per-row choices; 199 prices, 18 BOMs and 4
   assert.equal(preview.parsed.summary.goodsAmountMinor,1906214);
   assert.equal(preview.parsed.summary.sourceInvoiceTotalMinor,2101314);
   assert.deepEqual(preview.products.slice(0,5).map(product => product.sku),approved);
-  assert.deepEqual(preview.skippedAliases,['Screw']);
+  assert.deepEqual(preview.skippedAliases,[]);
+  assert.equal(preview.summary.aliasCount,3);
+  assert.equal(preview.parsed.items.filter(item => item.source_supplier_code.includes('in number')).length,10);
   assert.equal(db.prepare('SELECT count(*) FROM products').pluck().get(),0);
   const purchase: any = execute('import-185',input).result.body;
   assert.equal(execute('import-185',input).replayed,true);

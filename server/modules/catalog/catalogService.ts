@@ -260,13 +260,22 @@ const productSelect = `
 
 export class CatalogService {
   supplierAlias(supplierId: string, alias: string): string | null {
-    return (this.db.prepare('SELECT product_id FROM catalog_supplier_aliases WHERE supplier_id=? AND alias=? COLLATE NOCASE').get(supplierId, alias.trim()) as any)?.product_id ?? null;
+    return (this.db.prepare(`SELECT a.product_id FROM catalog_supplier_aliases a
+      WHERE a.supplier_id=? AND a.alias=? COLLATE NOCASE
+        AND NOT EXISTS(SELECT 1 FROM catalog_supplier_alias_retractions r
+          WHERE r.supplier_id=a.supplier_id AND r.alias=a.alias
+            AND NOT EXISTS(SELECT 1 FROM catalog_supplier_alias_retraction_reversals v
+              WHERE v.supplier_id=r.supplier_id AND v.alias=r.alias))`).get(supplierId, alias.trim()) as any)?.product_id ?? null;
   }
 
   confirmSupplierAlias(supplierId: string, alias: string, productId: string, sourceRef: string) {
     const existing = this.supplierAlias(supplierId, alias);
     if (existing && existing !== productId) throw new CatalogValidationError('Supplier alias already points to another SKU.', 'ALIAS_CONFLICT', 409);
-    if (!existing) this.db.prepare('INSERT INTO catalog_supplier_aliases(supplier_id,alias,product_id,source_ref) VALUES (?,?,?,?)').run(supplierId, alias.trim(), productId, sourceRef);
+    if (!existing) {
+      if (this.db.prepare('SELECT 1 FROM catalog_supplier_aliases WHERE supplier_id=? AND alias=? COLLATE NOCASE').get(supplierId, alias.trim()))
+        throw new CatalogValidationError('Supplier alias was retracted and requires an approved correction before reuse.', 'ALIAS_RETRACTED', 409);
+      this.db.prepare('INSERT INTO catalog_supplier_aliases(supplier_id,alias,product_id,source_ref) VALUES (?,?,?,?)').run(supplierId, alias.trim(), productId, sourceRef);
+    }
   }
 
   readBom(productId: string) {

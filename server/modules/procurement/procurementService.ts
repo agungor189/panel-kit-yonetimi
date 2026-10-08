@@ -661,6 +661,10 @@ export class ProcurementService {
     const payable = this.supplierPayable(header);
     const lineRows = this.db.prepare("SELECT * FROM purchase_order_lines WHERE purchase_order_id=? ORDER BY line_index").all(purchaseId) as any[];
     const componentRows = this.db.prepare("SELECT * FROM purchase_cost_components WHERE purchase_order_id=? ORDER BY id").all(purchaseId) as any[];
+    const importedCostDetails = new Map((this.hasTable('procurement_import_draft_costs')
+      ? this.db.prepare(`SELECT id,title,description FROM procurement_import_draft_costs
+        WHERE id IN (SELECT id FROM purchase_cost_components WHERE purchase_order_id=?)`).all(purchaseId) as Array<{ id: string; title: string; description: string | null }>
+      : []).map(row => [row.id,row]));
     const allocationRows = this.db.prepare("SELECT * FROM purchase_cost_allocations WHERE purchase_order_id=? ORDER BY component_id,line_id").all(purchaseId) as any[];
     const packingByLine = new Map((this.hasTable("purchase_line_packing_snapshots")
       ? this.db.prepare("SELECT * FROM purchase_line_packing_snapshots WHERE purchase_order_id=?").all(purchaseId) as any[]
@@ -747,9 +751,10 @@ export class ProcurementService {
       })),
       acquisitionCosts: componentRows.map((row) => ({
         id: row.id, category: row.category, sourceAmountMinor: row.source_amount_minor, currency: row.source_currency,
+        title: importedCostDetails.get(row.id)?.title || costDetails.get(row.id)?.description || row.category,
         counterparty: costDetails.get(row.id)?.counterparty || null,
         expenseType: costDetails.get(row.id)?.expense_type || row.category,
-        description: costDetails.get(row.id)?.description || row.notes,
+        description: importedCostDetails.get(row.id)?.description || costDetails.get(row.id)?.description || row.notes,
         occurredOn: costDetails.get(row.id)?.occurred_on || row.created_at,
         targetLineIds: JSON.parse(costDetails.get(row.id)?.target_line_ids_json || "[]"),
         vat: { mode: row.vat_mode, rateBps: row.vat_rate_bps },

@@ -15,6 +15,7 @@ import { finalLandedCostSource } from '../pricing/finalLandedCostSource.js';
 import { ProductPricingService } from '../pricing/productPricingService.js';
 import { InventoryService } from '../inventory/inventoryService.js';
 import { PrintingService } from '../printing/printingService.js';
+import { SupplierAliasRepairService } from './supplierAliasRepairService.js';
 
 const rows = () => [
   { record_type: 'PURCHASE', record_id: 'p', invoice_number: 'SYNTHETIC', invoice_date: '2026-01-01', supplier_name: 'Fixture', currency: 'USD' },
@@ -84,6 +85,73 @@ test('CSV apply creates only catalog and incomplete purchase intent; financial p
   assert.equal(purchase.lines.length, 1);
   assert.equal(importer.completeDraft(draft.id, decision, 'tester').id, purchase.id);
   assert.equal(importer.listDrafts().length, 0);
+  db.close();
+});
+
+test('packing-list box descriptions remain source evidence, never supplier aliases or label supplier numbers; approved repair retracts only historical mistakes', () => {
+  const { db, importer, request, catalog, procurement, decision } = setup();
+  const data: any[] = rows();
+  data[1].supplier_code = 'MASTER-42';
+  data[2].source_supplier_code = 'in no:4 box';
+  data[5].source_supplier_code = 'in no:4 box';
+  const input = request(data);
+  const preview = importer.preview(input);
+  assert.deepEqual(preview.aliases.map(item => item.alias),['MASTER-42']);
+  const draft = importer.apply(input,'tester');
+  const productId = draft.lines[0].productId;
+  assert.equal(catalog.supplierAlias('supplier','MASTER-42'),productId);
+  assert.equal(catalog.supplierAlias('supplier','in no:4 box'),null);
+  assert.equal(draft.lines[0].plannedPackages.count,4);
+  const source = db.prepare('SELECT source_csv FROM procurement_import_drafts WHERE id=?').get(draft.id) as any;
+  assert.match(source.source_csv,/in no:4 box/);
+  const approved = importer.finalizeDraft(draft.id,{ ...decision, approveProportionalAllocation:true },'tester');
+  procurement.approveForReceipt(approved.id,'tester');
+  const labelPlan = db.prepare('SELECT id,plan_version FROM procurement_package_plan WHERE purchase_order_id=? LIMIT 1').get(approved.id) as any;
+  const label = new PrintingService(db).packageSnapshot(labelPlan.id,{ planVersion:labelPlan.plan_version,supplierLotCode:'FIXTURE-LOT' });
+  assert.equal(label.payload.Supplier_no,'MASTER-42');
+  // Model a legacy bad import without modifying applied migrations or a live DB.
+  catalog.confirmSupplierAlias('supplier','in no:4 box',productId,`${draft.id}:a`);
+  const repair = new SupplierAliasRepairService(db);
+  const plan = repair.preview('supplier');
+  assert.deepEqual(plan.candidates.map(item => item.alias),['in no:4 box']);
+  assert.equal(plan.retainedAliasCount,1);
+  assert.throws(() => repair.apply('supplier',{ expectedManifestHash:'wrong',backupReference:'backup',backupSha256:'a'.repeat(64),approvalReference:'approval',reason:'packing alias' },'tester'),/manifesti/);
+  const corrected = repair.apply('supplier',{ expectedManifestHash:plan.manifestHash,backupReference:'isolated-backup',backupSha256:'a'.repeat(64),approvalReference:'approved-repair',reason:'packing alias' },'tester');
+  assert.equal(corrected.corrected.length,1);
+  assert.equal(catalog.supplierAlias('supplier','in no:4 box'),null);
+  assert.equal(catalog.supplierAlias('supplier','MASTER-42'),productId);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM catalog_supplier_aliases').pluck().get(),2);
+  const reversal = repair.previewCompensation('supplier','in no:4 box');
+  repair.compensate('supplier','in no:4 box',{ expectedManifestHash:reversal.manifestHash,expectedProductId:productId,
+    backupReference:'isolated-backup',backupSha256:'b'.repeat(64),approvalReference:'approved-compensation',reason:'reversal test' },'tester');
+  assert.equal(catalog.supplierAlias('supplier','in no:4 box'),productId);
+  db.close();
+});
+
+test('draft costs are editable without tax/FX decisions and FINAL conversion uses the existing LC engine once', () => {
+  const { db, importer, request, decision } = setup();
+  const draft = importer.apply(request(),'tester');
+  const first = importer.addDraftCost(draft.id,{title:'Nakliye',amountMinor:1000,currency:'USD',description:'freight'},'tester','add-1');
+  const freight = first.draftCosts[0];
+  assert.equal(first.estimatedTotalUsdMinor,21000);
+  const second = importer.addDraftCost(draft.id,{title:'Paketleme',amountMinor:4000,currency:'TRY'},'tester','add-2');
+  assert.equal(second.additionalCostsUsdMinor,1100);
+  const edited = importer.updateDraftCost(draft.id,freight.id,{title:'Nakliye',amountMinor:1500,currency:'USD',description:'updated',expectedVersion:1},'tester','edit-1');
+  assert.equal(edited.draftCosts.find(cost => cost.id === freight.id)?.version,2);
+  assert.throws(() => importer.updateDraftCost(draft.id,freight.id,{title:'x',amountMinor:1500,currency:'USD',expectedVersion:1},'tester','stale'),/değişmiş/);
+  const deleted = importer.deleteDraftCost(draft.id,second.draftCosts[1].id,1,'tester','delete-1');
+  assert.equal(deleted.draftCosts.length,1);
+  assert.equal(deleted.additionalCostsUsdMinor,1500);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM procurement_import_draft_cost_revisions').pluck().get(),4);
+  assert.throws(() => importer.finalizeDraft(draft.id,{...decision,approveProportionalAllocation:true},'tester'),/Her ek maliyet/);
+  const final = importer.finalizeDraft(draft.id,{...decision,approveProportionalAllocation:true,
+    costDecisions:[{costId:freight.id,category:'FREIGHT',counterparty:'THIRD_PARTY',vatMode:'EXCLUDED',vatRateBps:0}]},'tester');
+  assert.equal(final.status,'APPROVED');
+  assert.equal(final.acquisitionCosts.length,1);
+  assert.equal(final.lots[0].landedCostTryMinor,860000);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM procurement_package_plan').pluck().get(),4);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM inventory_ledger_events').pluck().get(),0);
+  assert.throws(() => importer.deleteDraftCost(draft.id,freight.id,2,'tester','too-late'),/kesinleştirilmiş/);
   db.close();
 });
 

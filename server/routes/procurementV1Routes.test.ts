@@ -4,6 +4,7 @@ import Database from "better-sqlite3";
 import express from "express";
 import { initializeDatabase } from "../db/initialize.js";
 import { CatalogService } from "../modules/catalog/catalogService.js";
+import { ProcurementImportService } from "../modules/procurement/procurementImportService.js";
 import { createProcurementV1Router } from "./procurementV1Routes.js";
 
 let db: Database.Database;
@@ -52,6 +53,38 @@ test("procurement API requires operation identity and replays exact mutation res
   assert.deepEqual(replay.data, first.data);
   assert.equal(db.prepare("SELECT COUNT(*) FROM purchase_orders WHERE id='purchase'").pluck().get(), 1);
   assert.equal(db.prepare("SELECT COUNT(*) FROM command_audit_log WHERE command_type='procurement.purchase.create.v1'").pluck().get(), 1);
+});
+
+test('import draft cost mutations replay safely and FINAL conversion remains explicit', async () => {
+  const records = [
+    { record_type:'PURCHASE',record_id:'p',invoice_number:'ROUTE-DRAFT',invoice_date:'2026-09-20',supplier_name:'Supplier',currency:'USD' },
+    { record_type:'LINE',record_id:'line',parent_ref:'p',sku:'PART',quantity:'1',unit_price:'10.00',amount:'10.00',currency:'USD',uom:'piece',pricing_basis:'BILLED' },
+    { record_type:'PACKAGE_GROUP',record_id:'group',parent_ref:'p',package_count:'1',meta_json:'{"mixed":false}' },
+    { record_type:'PACKAGE_ITEM',record_id:'item',parent_ref:'group',sku:'PART',purchase_line_ref:'line',quantity:'1',units_per_package:'1',uom:'piece' },
+  ].map(row => ({ schema_version:'dsdst.procurement.import.v1', ...row }));
+  const fields = [...new Set(records.flatMap(Object.keys))];
+  const cell = (value: unknown) => `"${String(value ?? '').replaceAll('"','""')}"`;
+  const csv = fields.map(cell).join(',') + '\r\n' + records.map(row => fields.map(field => cell((row as any)[field])).join(',')).join('\r\n');
+  const importer = new ProcurementImportService(db);
+  const request = { csv, supplierId:'supplier' };
+  const draft = importer.apply({ ...request, expectedPreviewHash:importer.preview(request).previewHash },'owner');
+  const cost = { title:'Nakliye',amountMinor:100,currency:'USD',description:'fixture' };
+  const first = await (await post(`/imports/drafts/${draft.id}/costs`,'draft-cost-add',cost)).json() as any;
+  const replay = await (await post(`/imports/drafts/${draft.id}/costs`,'draft-cost-add',cost)).json() as any;
+  assert.equal(replay.idempotent,true);
+  assert.equal(first.data.draftCosts.length,1);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM procurement_import_draft_costs WHERE draft_id=?').pluck().get(draft.id),1);
+  const item = first.data.draftCosts[0];
+  const update = await (await post(`/imports/drafts/${draft.id}/costs/${item.id}/update`,'draft-cost-update',{...cost,amountMinor:200,expectedVersion:1})).json() as any;
+  assert.equal(update.data.draftCosts[0].amountMinor,200);
+  const removed = await (await post(`/imports/drafts/${draft.id}/costs/${item.id}/remove`,'draft-cost-remove',{expectedVersion:2})).json() as any;
+  assert.equal(removed.data.draftCosts.length,0);
+  const final = await (await post(`/imports/drafts/${draft.id}/finalize`,'draft-finalize',{
+    vatMode:'EXCLUDED',vatRateBps:0,acquisitionCostVatPolicy:'VAT_EXCLUDED_FROM_INVENTORY_COST',
+    includedCost:'NO_SEPARATE_CHARGE',stockCheck:'NO_PRIOR_RECEIPT',stockEvidence:'Synthetic empty DB',costDecisions:[],
+  })).json() as any;
+  assert.equal(final.data.status,'APPROVED');
+  assert.equal(db.prepare('SELECT COUNT(*) FROM inventory_ledger_events').pluck().get(),0);
 });
 
 test("cost finalization and payment are separate idempotent commands and do not create inventory", async () => {

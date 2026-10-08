@@ -69,10 +69,8 @@ export class PrintingService {
     }
     if (plan) {
       const product = JSON.parse(plan.product_snapshot_json);
-      const sourceItem = this.db.prepare('SELECT source_json FROM procurement_import_records WHERE import_id=? AND record_id=?').pluck().get(plan.import_id, plan.source_item_ref) as string | undefined;
-      const supplierCode = sourceItem ? JSON.parse(sourceItem).source_supplier_code || product.supplier_code : product.supplier_code;
       Object.assign(current, { sku: product.sku, title: product.title, name_tr: product.name_tr, name_en: product.name_en,
-        supplier_code: supplierCode, form_code: product.profile_type, material: product.material, size: product.size, product_type: product.product_type, unit_weight_grams: product.mass_grams });
+        supplier_code: product.supplier_code, form_code: product.profile_type, material: product.material, size: product.size, product_type: product.product_type, unit_weight_grams: product.mass_grams });
     }
     if (current) return {
       subjectId: current.id, subjectCode: current.package_code,

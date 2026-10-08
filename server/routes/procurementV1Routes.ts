@@ -7,6 +7,7 @@ import { ExchangeRateService, ExchangeRateValidationError } from "../modules/fin
 import { MoneyValidationError } from "../modules/finance/money.js";
 import { ProcurementService, ProcurementValidationError } from "../modules/procurement/procurementService.js";
 import { ProcurementImportService } from '../modules/procurement/procurementImportService.js';
+import { SupplierAliasRepairService } from '../modules/procurement/supplierAliasRepairService.js';
 import { ImportValidationError } from '../modules/procurement/procurementImport.js';
 import { CatalogValidationError } from '../modules/catalog/catalogService.js';
 import { persistUpload, removeStoredUpload } from "../services/uploadSecurity.js";
@@ -58,6 +59,35 @@ export function createProcurementV1Router({ db, authorizeProcurement, authorizeC
   const fx = new ExchangeRateService(db);
   const commands = new CommandExecutor(db);
   const importer = new ProcurementImportService(db);
+  const aliasRepair = new SupplierAliasRepairService(db);
+  router.get('/imports/alias-repair/:supplierId', authorizeProcurement, (req, res) => {
+    try { return res.json({ success: true, contract: 'dsdst.procurement.alias-repair-preview.v1', data: aliasRepair.preview(req.params.supplierId) }); }
+    catch (error) { return sendError(error,res); }
+  });
+  router.post('/imports/alias-repair/:supplierId/apply', authorizeProcurement, authorizeCatalog || ((_req, res) => { res.status(403).json({ error: { code: 'CATALOG_AUTHORIZATION_REQUIRED' } }); }), (req, res) => {
+    try {
+      const outcome = execute(commands,req,'procurement:write+catalog:write','procurement.alias-repair.apply.v1', { supplierId: req.params.supplierId, evidence: req.body }, context => {
+        const data = aliasRepair.apply(req.params.supplierId,req.body,req.user!.id);
+        context.addOutbox({ topic: 'catalog', eventType: 'catalog.supplier-aliases.retracted.v1', aggregateType: 'supplier', aggregateId: req.params.supplierId, payload: { supplierId: req.params.supplierId, manifestHash: data.manifestHash } });
+        return { statusCode: 200, body: { success: true, contract: 'dsdst.procurement.alias-repair.v1', data } };
+      });
+      return sendOutcome(res,outcome);
+    } catch (error) { return sendError(error,res); }
+  });
+  router.get('/imports/alias-repair/:supplierId/compensate/:alias', authorizeProcurement, (req, res) => {
+    try { return res.json({ success: true, contract: 'dsdst.procurement.alias-repair-preview.v1', data: aliasRepair.previewCompensation(req.params.supplierId,req.params.alias) }); }
+    catch (error) { return sendError(error,res); }
+  });
+  router.post('/imports/alias-repair/:supplierId/compensate', authorizeProcurement, authorizeCatalog || ((_req, res) => { res.status(403).json({ error: { code: 'CATALOG_AUTHORIZATION_REQUIRED' } }); }), (req, res) => {
+    try {
+      const outcome = execute(commands,req,'procurement:write+catalog:write','procurement.alias-repair.compensate.v1', { supplierId: req.params.supplierId, evidence: req.body }, context => {
+        const data = aliasRepair.compensate(req.params.supplierId,req.body.alias,req.body,req.user!.id);
+        context.addOutbox({ topic: 'catalog', eventType: 'catalog.supplier-alias.restored.v1', aggregateType: 'supplier', aggregateId: req.params.supplierId, payload: { supplierId: req.params.supplierId, alias: data.alias } });
+        return { statusCode: 200, body: { success: true, contract: 'dsdst.procurement.alias-repair.v1', data } };
+      });
+      return sendOutcome(res,outcome);
+    } catch (error) { return sendError(error,res); }
+  });
   router.post('/imports/preview', authorizeProcurement, (req, res) => {
     try { return res.json({ success: true, contract: 'dsdst.procurement.import.v1', data: importer.preview(req.body) }); }
     catch (error) { return sendError(error, res); }
@@ -81,6 +111,46 @@ export function createProcurementV1Router({ db, authorizeProcurement, authorizeC
       });
       return sendOutcome(res, outcome);
     } catch (error) { return sendError(error, res); }
+  });
+  router.post('/imports/drafts/:id/costs', authorizeProcurement, (req, res) => {
+    try {
+      const outcome = execute(commands, req, 'procurement:write', 'procurement.import-draft.cost.add.v1', { draftId: req.params.id, cost: req.body }, context => {
+        const data = importer.addDraftCost(req.params.id,req.body,req.user!.id,operationId(req));
+        context.addOutbox({ topic: 'procurement', eventType: 'procurement.import-draft.cost-changed.v1', aggregateType: 'procurement_import_draft', aggregateId: req.params.id, payload: { draftId: req.params.id } });
+        return { statusCode: 201, body: { success: true, contract: 'dsdst.procurement.import-draft.v1', data } };
+      });
+      return sendOutcome(res,outcome);
+    } catch (error) { return sendError(error,res); }
+  });
+  router.post('/imports/drafts/:id/costs/:costId/update', authorizeProcurement, (req, res) => {
+    try {
+      const outcome = execute(commands, req, 'procurement:write', 'procurement.import-draft.cost.update.v1', { draftId: req.params.id, costId: req.params.costId, cost: req.body }, context => {
+        const data = importer.updateDraftCost(req.params.id,req.params.costId,req.body,req.user!.id,operationId(req));
+        context.addOutbox({ topic: 'procurement', eventType: 'procurement.import-draft.cost-changed.v1', aggregateType: 'procurement_import_draft', aggregateId: req.params.id, payload: { draftId: req.params.id } });
+        return { statusCode: 200, body: { success: true, contract: 'dsdst.procurement.import-draft.v1', data } };
+      });
+      return sendOutcome(res,outcome);
+    } catch (error) { return sendError(error,res); }
+  });
+  router.post('/imports/drafts/:id/costs/:costId/remove', authorizeProcurement, (req, res) => {
+    try {
+      const outcome = execute(commands, req, 'procurement:write', 'procurement.import-draft.cost.remove.v1', { draftId: req.params.id, costId: req.params.costId, expectedVersion: req.body?.expectedVersion }, context => {
+        const data = importer.deleteDraftCost(req.params.id,req.params.costId,req.body?.expectedVersion,req.user!.id,operationId(req));
+        context.addOutbox({ topic: 'procurement', eventType: 'procurement.import-draft.cost-changed.v1', aggregateType: 'procurement_import_draft', aggregateId: req.params.id, payload: { draftId: req.params.id } });
+        return { statusCode: 200, body: { success: true, contract: 'dsdst.procurement.import-draft.v1', data } };
+      });
+      return sendOutcome(res,outcome);
+    } catch (error) { return sendError(error,res); }
+  });
+  router.post('/imports/drafts/:id/finalize', authorizeCostApproval, (req, res) => {
+    try {
+      const outcome = execute(commands, req, 'acquisition-cost:approve', 'procurement.import-draft.finalize.v1', { draftId: req.params.id, decision: req.body }, context => {
+        const data = importer.finalizeDraft(req.params.id,req.body,req.user!.id);
+        context.addOutbox({ topic: 'procurement', eventType: 'procurement.acquisition-cost.finalized.v1', aggregateType: 'purchase_order', aggregateId: data.id, payload: { purchase_id: data.id, planned_lot_ids: data.lots.map((lot: any) => lot.id) } });
+        return { statusCode: 200, body: { success: true, contract: 'dsdst.acquisition-cost.v1', data } };
+      });
+      return sendOutcome(res,outcome);
+    } catch (error) { return sendError(error,res); }
   });
   const documentUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
 
