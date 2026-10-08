@@ -128,6 +128,14 @@ Turkish name is synthesized. Before FINAL, the draft uses the existing LC previe
 calculator in a rolled-back transaction and requires an unchanged preview hash
 and explicit approval. Preview creates no persisted purchase, plan, cost or stock.
 
+Migration v103 adds immutable draft lifecycle events. Cancelling an incomplete CSV
+draft appends `CANCELLED` and soft-deletes only its active draft cost entries with
+revision history. The source CSV, source hash, catalog cards, supplier aliases and
+BOM remain untouched. The draft disappears from ordinary lists and cannot be
+completed; importing the identical source again appends `REOPENED` to the same
+stable draft identity with an empty cost-entry list. A completed draft cannot be
+cancelled.
+
 Receipt intents gain optional `packagePlan` with a version, backend package IDs,
 per-package quantities, immutable catalog snapshots and source-carton references.
 Mixed cartons produce single-SKU children sharing a source identity; parent gross

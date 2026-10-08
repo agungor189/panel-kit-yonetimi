@@ -10,7 +10,7 @@ export function ProcurementImport({ csv, supplierId, onCreated }: { csv: string;
   const [attempt, setAttempt] = useState<{ payload: string; operationId: string } | null>(null);
   const payload = () => ({ csv, supplierId });
   const inspect = async () => {
-    setBusy(true); setError(''); setReviewed(false);
+    setBusy(true); setError(''); setReviewed(false); setAttempt(null);
     try { const result = await api.post('/procurement/v1/imports/preview', payload()); setPreview(result.data); setReviewed(true); }
     catch (e: any) { setPreview(null); setError(e.message); } finally { setBusy(false); }
   };
@@ -40,6 +40,7 @@ export function ProcurementImport({ csv, supplierId, onCreated }: { csv: string;
       </div>
       <p className="text-sm">Kaynak fatura genel toplamı: {preview.parsed.summary.sourceInvoiceTotalMinor == null ? '—' : (preview.parsed.summary.sourceInvoiceTotalMinor / 100).toFixed(2)} {preview.parsed.header.currency}. Giderler aktarılmadı, Satın Alma'dan manuel girilecek.</p>
       {preview.existingDraftId && <p className="text-amber-700">Bu fatura daha önce aktarılmış; mevcut taslak döner.</p>}
+      {preview.cancelledDraftId && <p className="text-amber-700">Önceki taslak iptal edildi; aynı CSV yeniden açılabilir.</p>}
       {!preview.existingDraftId && preview.existingPurchaseId && <p className="text-amber-700">Bu fatura zaten satın alma kaydında; yeniden import edilemez.</p>}
       {preview.blockingErrors.length > 0 && <div role="alert" className="space-y-1 rounded border border-red-300 p-3 text-sm text-danger"><strong>CSV'de düzeltilmesi gereken hatalar ({preview.blockingErrors.length})</strong>{preview.blockingErrors.map((message: string, index: number) => <p key={index}>{message}</p>)}</div>}
       {preview.skippedAliases.length > 0 && <p className="text-xs text-amber-700">Birden fazla SKU için kullanılan genel kaynak açıklamaları alias olarak kaydedilmedi: {preview.skippedAliases.join(', ')}.</p>}
@@ -48,7 +49,7 @@ export function ProcurementImport({ csv, supplierId, onCreated }: { csv: string;
       <details><summary className="cursor-pointer font-bold">Kaynak koliler ve planlanan paketler</summary>{preview.parsed.groups.map((group: any) => <div className="border-b py-2 text-xs" key={group.record_id}><strong>{group.record_id} · {group.package_count} koli {group.meta.mixed ? '· Karışık: depoda ayrılıp tartılacak' : ''}</strong><p>Net {group.net_weight_kg || '—'} kg · brüt {group.gross_weight_kg || '—'} kg</p>{preview.parsed.items.filter((item: any) => item.parent_ref === group.record_id).map((item: any) => <p key={item.record_id}>{item.sku || item.product_ref} · {item.quantity} toplam · {item.units_per_package}/koli · alış {item.purchase_line_ref}</p>)}</div>)}</details>
       <details><summary>Kaynak gider kanıtı (işlem oluşturulmaz)</summary>{preview.parsed.expenses.map((row: any) => <p key={row.record_id}>{row.name_en} · {row.amount} {row.currency}</p>)}</details>
       <p className="text-xs">Vergi, kur, stok kanıtı ve maliyet politikası taslaktan sonra Satın Alma'da tamamlanır. Fiziksel mal kabul ayrıca onaylanır.</p>
-      <Button disabled={busy || !reviewed || preview.blockingErrors.length > 0 || (preview.existingPurchaseId && !preview.existingDraftId)} onClick={apply}>Taslağı Oluştur</Button>
+      <Button disabled={busy || !reviewed || preview.blockingErrors.length > 0 || (preview.existingPurchaseId && !preview.existingDraftId)} onClick={apply}>{preview.cancelledDraftId ? 'Taslağı Yeniden Aç' : 'Taslağı Oluştur'}</Button>
     </>}
   </Card>;
 }

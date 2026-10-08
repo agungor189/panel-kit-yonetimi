@@ -71,6 +71,11 @@ export class ProcurementImportService {
   private catalog: CatalogService;
   constructor(private db: Database.Database) { this.catalog = new CatalogService(db); }
 
+  private draftLifecycle(draftId: string): 'CANCELLED' | 'REOPENED' | null {
+    return (this.db.prepare(`SELECT event_type FROM procurement_import_draft_lifecycle_events
+      WHERE draft_id=? ORDER BY sequence DESC LIMIT 1`).pluck().get(draftId) as 'CANCELLED' | 'REOPENED' | undefined) || null;
+  }
+
   preview(input: ImportRequest) {
     const parsed = parseProcurementImport(input.csv);
     const supplier = this.db.prepare('SELECT id,name FROM procurement_suppliers WHERE id=? AND active=1').get(input.supplierId) as any;
@@ -184,16 +189,28 @@ export class ProcurementImportService {
       aliases, blockingErrors });
     return { parsed, supplier, products, bom, aliases, skippedAliases, summary, blockingErrors, previewHash,
       existingPurchaseId: identity?.purchase_order_id || previousPurchase?.purchase_order_id || null,
-      existingDraftId: identity?.id || null, packagePreview: expandSourcePackages(parsed) };
+      existingDraftId: identity?.id && this.draftLifecycle(identity.id) !== 'CANCELLED' ? identity.id : null,
+      cancelledDraftId: identity?.id && this.draftLifecycle(identity.id) === 'CANCELLED' ? identity.id : null,
+      packagePreview: expandSourcePackages(parsed) };
   }
 
-  apply(input: ImportRequest, actorId: string) {
+  apply(input: ImportRequest, actorId: string, operationId?: string) {
     return this.db.transaction(() => {
       if ('policy' in input) throw new ProcurementValidationError('IMPORT_COST_DECISION_FORBIDDEN', 'Maliyet kararları CSV importunda alınmaz.', 400);
       const parsed = parseProcurementImport(input.csv);
       const existing = this.db.prepare('SELECT * FROM procurement_import_drafts WHERE source_hash=? OR (supplier_id=? AND invoice_number=?)').get(parsed.sourceHash, input.supplierId, parsed.header.invoice_number.trim()) as any;
       if (existing) {
         if (existing.source_hash !== parsed.sourceHash || existing.supplier_id !== input.supplierId) throw new ProcurementValidationError('IMPORT_IDENTITY_CONFLICT', 'Bu kaynak/fatura farklı içerikle zaten kayıtlı.', 409);
+        if (this.draftLifecycle(existing.id) === 'CANCELLED') {
+          if (this.db.prepare('SELECT 1 FROM procurement_import_draft_completions WHERE draft_id=?').get(existing.id))
+            throw new ProcurementValidationError('DRAFT_ALREADY_COMPLETED','Kesinleştirilmiş taslak yeniden açılamaz.',409);
+          const review = this.preview(input);
+          if (review.previewHash !== input.expectedPreviewHash || review.blockingErrors.length)
+            throw new ProcurementValidationError('IMPORT_PREVIEW_STALE','Kaynak veya katalog değişti; önizlemeyi yenileyin.',409);
+          this.db.prepare(`INSERT INTO procurement_import_draft_lifecycle_events
+            (draft_id,event_type,operation_id,actor_id,created_at) VALUES (?,'REOPENED',?,?,?)`)
+            .run(existing.id,draftText(operationId,'operationId',200),draftText(actorId,'actorId',200),new Date().toISOString());
+        }
         return this.getDraft(existing.id)!;
       }
       // All purchases, including older/manual ones, participate in invoice duplication protection.
@@ -241,7 +258,26 @@ export class ProcurementImportService {
   private openDraft(draftId: string) {
     const row = this.db.prepare(`SELECT d.id FROM procurement_import_drafts d
       LEFT JOIN procurement_import_draft_completions c ON c.draft_id=d.id WHERE d.id=? AND c.draft_id IS NULL`).get(draftId) as any;
-    if (!row) throw new ProcurementValidationError('DRAFT_NOT_EDITABLE', 'Taslak bulunamadı veya maliyetleri kesinleştirilmiş.', 409);
+    if (!row || this.draftLifecycle(draftId) === 'CANCELLED')
+      throw new ProcurementValidationError('DRAFT_NOT_EDITABLE', 'Taslak bulunamadı, iptal edilmiş veya maliyetleri kesinleştirilmiş.', 409);
+  }
+
+  cancelDraft(draftId: string, actorId: string, operationId: string) {
+    return this.db.transaction(() => {
+      this.openDraft(draftId);
+      const now = new Date().toISOString();
+      for (const cost of this.activeDraftCosts(draftId)) {
+        const changed = this.db.prepare(`UPDATE procurement_import_draft_costs SET status='DELETED',version=version+1,updated_by=?,updated_at=?
+          WHERE id=? AND draft_id=? AND status='ACTIVE' AND version=?`).run(actorId,now,cost.id,draftId,cost.version);
+        if (changed.changes !== 1) throw new ProcurementValidationError('DRAFT_COST_STALE','Maliyet kalemi değişti; iptal işlemini yenileyin.',409);
+        this.recordCostRevision(this.db.prepare('SELECT * FROM procurement_import_draft_costs WHERE id=?').get(cost.id),
+          'DELETE',actorId,operationId,now);
+      }
+      this.db.prepare(`INSERT INTO procurement_import_draft_lifecycle_events
+        (draft_id,event_type,operation_id,actor_id,created_at) VALUES (?,'CANCELLED',?,?,?)`)
+        .run(draftId,draftText(operationId,'operationId',200),draftText(actorId,'actorId',200),now);
+      return { id:draftId,status:'CANCELLED' as const,cancelledAt:now };
+    }).immediate();
   }
 
   private activeDraftCosts(draftId: string) {
@@ -302,6 +338,7 @@ export class ProcurementImportService {
       JOIN procurement_suppliers s ON s.id=d.supplier_id
       LEFT JOIN procurement_import_draft_completions c ON c.draft_id=d.id WHERE d.id=?`).get(id) as any;
     if (!row) return null;
+    if (this.draftLifecycle(id) === 'CANCELLED') return null;
     if (row.purchase_order_id) return new ProcurementService(this.db).getPurchase(row.purchase_order_id);
     const parsed = parseProcurementImport(row.source_csv);
     const resolved = JSON.parse(row.resolved_json) as { productIds: Record<string,string>; lineIds: Record<string,string> };
@@ -353,6 +390,8 @@ export class ProcurementImportService {
     return (this.db.prepare(`SELECT d.id,d.invoice_number,d.invoice_date,d.currency,d.created_at,s.name AS supplier_name,
       d.source_csv FROM procurement_import_drafts d JOIN procurement_suppliers s ON s.id=d.supplier_id
       LEFT JOIN procurement_import_draft_completions c ON c.draft_id=d.id WHERE c.draft_id IS NULL
+        AND COALESCE((SELECT event_type FROM procurement_import_draft_lifecycle_events e
+          WHERE e.draft_id=d.id ORDER BY e.sequence DESC LIMIT 1),'ACTIVE')!='CANCELLED'
       ORDER BY d.created_at DESC`).all() as any[]).map(row => ({
         id: row.id, purchaseNumber: `CSV-${row.invoice_number}`, orderDate: row.invoice_date, workflowState: 'DRAFT',
         supplierName: row.supplier_name, supplierCurrency: row.currency, totalGrossMinor: null,
@@ -364,6 +403,8 @@ export class ProcurementImportService {
     return this.db.transaction(() => {
       const row = this.db.prepare('SELECT * FROM procurement_import_drafts WHERE id=?').get(draftId) as any;
       if (!row) throw new ProcurementValidationError('PURCHASE_NOT_FOUND', 'Satın alma taslağı bulunamadı.', 404);
+      if (this.draftLifecycle(draftId) === 'CANCELLED')
+        throw new ProcurementValidationError('DRAFT_NOT_EDITABLE','İptal edilmiş taslak kesinleştirilemez.',409);
       const completed = this.db.prepare('SELECT purchase_order_id,decision_json FROM procurement_import_draft_completions WHERE draft_id=?').get(draftId) as any;
       if (completed) {
         if (completed.decision_json !== JSON.stringify(policy)) throw new ProcurementValidationError('IMPORT_DECISION_CONFLICT', 'Taslak farklı maliyet kararlarıyla tamamlandı.', 409);

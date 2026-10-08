@@ -96,6 +96,32 @@ test('import draft cost mutations replay safely and FINAL conversion remains exp
   assert.equal(db.prepare('SELECT COUNT(*) FROM inventory_ledger_events').pluck().get(),0);
 });
 
+test('cancel draft API requires operation identity, replays safely and removes the draft from purchase listing', async () => {
+  const rows = [
+    { record_type:'PURCHASE',record_id:'p',invoice_number:'ROUTE-CANCEL',invoice_date:'2026-09-20',supplier_name:'Supplier',currency:'USD' },
+    { record_type:'LINE',record_id:'line',parent_ref:'p',sku:'PART',quantity:'1',unit_price:'1.00',amount:'1.00',currency:'USD',uom:'piece',pricing_basis:'BILLED' },
+    { record_type:'PACKAGE_GROUP',record_id:'group',parent_ref:'p',package_count:'1',meta_json:'{"mixed":false}' },
+    { record_type:'PACKAGE_ITEM',record_id:'item',parent_ref:'group',sku:'PART',purchase_line_ref:'line',quantity:'1',units_per_package:'1',uom:'piece' },
+  ].map(row => ({ schema_version:'dsdst.procurement.import.v1',...row }));
+  const fields = [...new Set(rows.flatMap(Object.keys))];
+  const cell = (value:unknown) => `"${String(value ?? '').replaceAll('"','""')}"`;
+  const csv = fields.map(cell).join(',')+'\r\n'+rows.map(row => fields.map(field => cell((row as any)[field])).join(',')).join('\r\n');
+  const importer = new ProcurementImportService(db);
+  const input = { csv,supplierId:'supplier' };
+  const draft = importer.apply({ ...input,expectedPreviewHash:importer.preview(input).previewHash },'owner');
+  const missing = await fetch(`${baseUrl}/api/procurement/v1/imports/drafts/${draft.id}/cancel`,{ method:'POST',headers:{'content-type':'application/json'},body:'{}' });
+  assert.equal(missing.status,400);
+  const first = await (await post(`/imports/drafts/${draft.id}/cancel`,'draft-cancel',{})).json() as any;
+  const replay = await (await post(`/imports/drafts/${draft.id}/cancel`,'draft-cancel',{})).json() as any;
+  assert.equal(first.data.status,'CANCELLED');
+  assert.equal(replay.idempotent,true);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM procurement_import_draft_lifecycle_events WHERE draft_id=?').pluck().get(draft.id),1);
+  const list = await (await fetch(`${baseUrl}/api/procurement/v1/purchases`)).json() as any;
+  assert.equal(list.data.some((item:any) => item.id === draft.id),false);
+  assert.equal((await fetch(`${baseUrl}/api/procurement/v1/purchases/${draft.id}`)).status,404);
+  assert.equal((await post(`/imports/drafts/${draft.id}/cancel`,'cancel-completed',{})).status,409);
+});
+
 test("cost finalization and payment are separate idempotent commands and do not create inventory", async () => {
   const stockBefore = db.prepare("SELECT central_stock FROM products WHERE id='part'").pluck().get();
   const movementBefore = db.prepare("SELECT COUNT(*) FROM stock_movements").pluck().get();

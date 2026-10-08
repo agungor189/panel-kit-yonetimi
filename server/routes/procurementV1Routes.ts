@@ -95,12 +95,23 @@ export function createProcurementV1Router({ db, authorizeProcurement, authorizeC
   router.post('/imports/apply', authorizeProcurement, authorizeCatalog || ((_req, res) => { res.status(403).json({ error: { code: 'CATALOG_AUTHORIZATION_REQUIRED' } }); }), (req, res) => {
     try {
       const outcome = execute(commands, req, 'procurement:write+catalog:write', 'procurement.import.apply.v1', req.body, context => {
-        const data = importer.apply(req.body, req.user!.id);
+        const data = importer.apply(req.body, req.user!.id, operationId(req));
         context.addOutbox({ topic: 'procurement', eventType: 'procurement.import.drafted.v1', aggregateType: 'procurement_import_draft', aggregateId: data.id, payload: { draftId: data.id } });
         return { statusCode: 201, body: { success: true, contract: 'dsdst.procurement.import.v1', data } };
       });
       return sendOutcome(res, outcome);
     } catch (error) { return sendError(error, res); }
+  });
+  router.post('/imports/drafts/:id/cancel', authorizeProcurement, (req, res) => {
+    try {
+      const outcome = execute(commands,req,'procurement:write','procurement.import-draft.cancel.v1', { draftId:req.params.id }, context => {
+        const data = importer.cancelDraft(req.params.id,req.user!.id,operationId(req));
+        context.addOutbox({ topic:'procurement',eventType:'procurement.import-draft.cancelled.v1',
+          aggregateType:'procurement_import_draft',aggregateId:req.params.id,payload:{ draftId:req.params.id } });
+        return { statusCode:200,body:{ success:true,contract:'dsdst.procurement.import-draft.v1',data } };
+      });
+      return sendOutcome(res,outcome);
+    } catch (error) { return sendError(error,res); }
   });
   router.post('/imports/drafts/:id/complete', authorizeProcurement, (req, res) => {
     try {

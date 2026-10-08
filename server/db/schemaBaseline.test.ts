@@ -75,6 +75,7 @@ const businessTablesThatMustStartEmpty = [
   "procurement_import_draft_completions",
   "procurement_import_draft_costs",
   "procurement_import_draft_cost_revisions",
+  "procurement_import_draft_lifecycle_events",
   "procurement_import_records",
   "procurement_package_plan",
   "catalog_supplier_aliases",
@@ -196,7 +197,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 101);
+  assert.equal(manifest.length, 102);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(

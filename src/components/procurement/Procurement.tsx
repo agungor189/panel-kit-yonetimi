@@ -103,6 +103,18 @@ export default function Procurement() {
     } finally { setBusy(false); }
   };
 
+  const cancelDraft = async () => {
+    if (!selected?.costDecisionPending || !window.confirm('Bu satın alma taslağı iptal edilsin mi? Ürün kartları ve işlem geçmişi korunur.')) return;
+    try {
+      setBusy(true);
+      await api.post(`/procurement/v1/imports/drafts/${selected.id}/cancel`,{},op('import-draft-cancel'));
+      setSelected(null); setSelectedId(''); setCostPreview(null);
+      await load();
+      toast.success('Taslak listeden kaldırıldı. Aynı CSV yeniden aktarılabilir.');
+    } catch (error:any) { toast.error(error.message || 'Taslak iptal edilemedi.'); }
+    finally { setBusy(false); }
+  };
+
   const createSupplier = () => mutate(async () => {
     const result = await api.post('/procurement/v1/suppliers', supplierForm, op('supplier-create'));
     setSupplierForm({ name: '', defaultCurrency: 'USD', taxIdentifier: '' });
@@ -213,7 +225,7 @@ export default function Procurement() {
 
     {tab === 'costs' && <div className="space-y-6"><PurchasePicker purchases={purchases} selectedId={selectedId} onSelect={loadPurchase}/>{selected && <>
       <Card padding="lg" className="space-y-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="font-black">{selected.purchaseNumber}</h3><p className="text-sm text-text-muted">{selected.supplier.name}</p></div><Badge>{stateLabels[selected.workflowState]}</Badge></div>
-        <div className="flex flex-wrap gap-2">{!selected.costDecisionPending && selected.workflowState === 'DRAFT' && <Button variant="secondary" onClick={() => transition('ORDERED')}>Sipariş Verildi</Button>}{selected.workflowState === 'ORDERED' && <Button variant="secondary" onClick={() => transition('IN_TRANSIT')}>Yolda</Button>}{!selected.costDecisionPending && ['DRAFT','ORDERED','IN_TRANSIT'].includes(selected.workflowState) && <Button variant="secondary" onClick={() => transition('COST_PENDING')}>Maliyet Bekliyor</Button>}</div>
+        <div className="flex flex-wrap gap-2">{selected.costDecisionPending && <Button variant="secondary" disabled={busy} onClick={cancelDraft}>Taslağı Sil</Button>}{!selected.costDecisionPending && selected.workflowState === 'DRAFT' && <Button variant="secondary" onClick={() => transition('ORDERED')}>Sipariş Verildi</Button>}{selected.workflowState === 'ORDERED' && <Button variant="secondary" onClick={() => transition('IN_TRANSIT')}>Yolda</Button>}{!selected.costDecisionPending && ['DRAFT','ORDERED','IN_TRANSIT'].includes(selected.workflowState) && <Button variant="secondary" onClick={() => transition('COST_PENDING')}>Maliyet Bekliyor</Button>}</div>
         <PurchaseProductTree lines={selected.lines} lots={selected.lots}/>
       </Card>
       {selected.costDecisionPending && selected.draftCosts && <DraftCostsPanel draft={{ id:selected.id, goodsAmountUsdMinor:selected.goodsAmountUsdMinor ?? null,

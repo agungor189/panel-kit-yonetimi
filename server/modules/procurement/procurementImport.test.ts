@@ -88,6 +88,58 @@ test('CSV apply creates only catalog and incomplete purchase intent; financial p
   db.close();
 });
 
+test('incomplete draft cancellation is immutable, hides the intent and reopens the same CSV without changing catalog or stock', () => {
+  const { db,importer,request,catalog,decision } = setup();
+  const data:any[] = rows();
+  data[1].supplier_code = 'MASTER-42';
+  data.push({ schema_version:'dsdst.procurement.import.v1',record_type:'PRODUCT',record_id:'assembly',parent_ref:'p',
+    sku:'ASSEMBLY-A',product_type:'assembly',uom:'piece',name_en:'Assembly A' });
+  data.push({ schema_version:'dsdst.procurement.import.v1',record_type:'BOM',record_id:'bom-a',parent_ref:'assembly',
+    product_ref:'assembly',component_ref:'a',quantity_per_unit:'2' });
+  const input = request(data);
+  const draft = importer.apply(input,'tester');
+  importer.addDraftCost(draft.id,{ title:'Nakliye',amountMinor:100,currency:'USD' },'tester','draft-cost');
+  const productId = draft.lines[0].productId;
+  const sourceHash = db.prepare('SELECT source_hash FROM procurement_import_drafts WHERE id=?').pluck().get(draft.id);
+  const aliasCount = db.prepare('SELECT COUNT(*) FROM catalog_supplier_aliases').pluck().get();
+  const bomCount = db.prepare('SELECT COUNT(*) FROM product_bom').pluck().get();
+  assert.equal(aliasCount,1); assert.equal(bomCount,1);
+  const cancelled = importer.cancelDraft(draft.id,'tester','cancel-draft');
+  assert.equal(cancelled.status,'CANCELLED');
+  assert.equal(importer.listDrafts().length,0);
+  assert.equal(importer.getDraft(draft.id),null);
+  assert.throws(() => importer.cancelDraft(draft.id,'tester','cancel-again'),/iptal edilmiş/);
+  assert.throws(() => importer.completeDraft(draft.id,decision,'tester'),/İptal edilmiş/);
+  assert.equal(db.prepare('SELECT source_hash FROM procurement_import_drafts WHERE id=?').pluck().get(draft.id),sourceHash);
+  assert.equal(db.prepare('SELECT status FROM procurement_import_draft_costs WHERE draft_id=?').pluck().get(draft.id),'DELETED');
+  assert.equal(db.prepare('SELECT COUNT(*) FROM procurement_import_draft_cost_revisions').pluck().get(),2);
+  const renewedPreview = importer.preview(input);
+  assert.equal(renewedPreview.existingDraftId,null);
+  assert.equal(renewedPreview.cancelledDraftId,draft.id);
+  const reopened = importer.apply({ ...input,expectedPreviewHash:renewedPreview.previewHash },'tester','reopen-draft');
+  assert.equal(reopened.id,draft.id);
+  assert.equal(reopened.draftCosts.length,0);
+  assert.equal(importer.listDrafts().length,1);
+  assert.deepEqual(db.prepare('SELECT event_type FROM procurement_import_draft_lifecycle_events ORDER BY sequence').all(),
+    [{event_type:'CANCELLED'},{event_type:'REOPENED'}]);
+  assert.equal(catalog.getProduct(productId)?.sku,'A');
+  assert.equal(catalog.supplierAlias('supplier','MASTER-42'),productId);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM catalog_supplier_aliases').pluck().get(),aliasCount);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM product_bom').pluck().get(),bomCount);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM purchase_orders').pluck().get(),0);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM inventory_ledger_events').pluck().get(),0);
+  db.close();
+});
+
+test('financially completed import draft cannot be cancelled', () => {
+  const { db,importer,request,decision } = setup();
+  const draft = importer.apply(request(),'tester');
+  importer.completeDraft(draft.id,decision,'tester');
+  assert.throws(() => importer.cancelDraft(draft.id,'tester','late-cancel'),/kesinleştirilmiş/);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM procurement_import_draft_lifecycle_events').pluck().get(),0);
+  db.close();
+});
+
 test('packing-list box descriptions remain source evidence, never supplier aliases or label supplier numbers; approved repair retracts only historical mistakes', () => {
   const { db, importer, request, catalog, procurement, decision } = setup();
   const data: any[] = rows();
