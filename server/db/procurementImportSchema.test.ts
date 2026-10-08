@@ -19,3 +19,18 @@ for (const version of [48,53]) test(`v${version} fixture upgrades through v97 to
   assert.throws(() => db.exec("INSERT INTO procurement_package_plan(id) VALUES ('invalid')"), /NOT NULL/);
   fresh.close(); db.close();
 });
+
+
+test('v98 to v99 preserves immutable source money and adds nullable historical counterparty only', () => {
+  const db = new Database(':memory:'); db.pragma('foreign_keys=ON');
+  db.exec(readFileSync(new URL('./fixtures/panel-v48.sql', import.meta.url), 'utf8'));
+  runMigrations(db, 98);
+  const before = db.prepare("SELECT type,name,sql FROM sqlite_master WHERE name='trg_purchase_order_snapshot_immutable'").get();
+  runMigrations(db, 99);
+  assert.deepEqual(db.prepare("SELECT type,name,sql FROM sqlite_master WHERE name='trg_purchase_order_snapshot_immutable'").get(), before);
+  const column = db.prepare('PRAGMA table_info(purchase_cost_component_details)').all().find((r: any) => r.name === 'counterparty') as any;
+  assert.equal(column.notnull, 0);
+  assert.equal(column.dflt_value, null);
+  assert.throws(() => db.prepare("INSERT INTO purchase_cost_component_details(component_id,expense_type,occurred_on,target_scope,target_line_ids_json,counterparty) VALUES ('x','OTHER','2026-01-01','COMMON','[]','INVENTED')").run());
+  db.close();
+});

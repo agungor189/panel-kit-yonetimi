@@ -11,7 +11,7 @@ const actorId = "print-operator";
 const template = (purpose: "goods_receipt" | "location", version = 1): TemplateSnapshot => ({
   id: `${purpose}-template`, name: purpose, purpose, version, contentHash: String(version).padStart(64, "a").slice(-64),
   width: purpose === "goods_receipt" ? 100 : 100, height: purpose === "goods_receipt" ? 150 : 50,
-  elements: [{ id: "barcode", type: "barcode", value: purpose === "goods_receipt" ? "{SKU}" : "{Lokasyon}" }],
+  elements: [{ id: "barcode", type: "barcode", value: purpose === "goods_receipt" ? "{Package_code}" : "{Lokasyon}" }],
 });
 const setup = () => {
   const db = new Database(":memory:"); db.pragma("foreign_keys = ON"); initializeDatabase(db);

@@ -10,7 +10,7 @@ type Choice = { action: 'KEEP' | 'UPDATE' | 'CREATE'; productId?: string; fields
 export type ImportRequest = {
   csv: string; supplierId: string; choices?: Record<string, Choice>; confirmations?: string[];
   expectedPreviewHash?: string;
-  policy?: { vatMode: 'INCLUDED' | 'EXCLUDED'; vatRateBps: number; acquisitionCostVatPolicy: PurchaseInput['acquisitionCostVatPolicy']; includedCost: 'NO_SEPARATE_CHARGE'; stockCheck: 'NO_PRIOR_RECEIPT'; stockEvidence: string; expenseTypes: Record<string, any> };
+  policy?: { vatMode: 'INCLUDED' | 'EXCLUDED'; vatRateBps: number; acquisitionCostVatPolicy: PurchaseInput['acquisitionCostVatPolicy']; includedCost: 'NO_SEPARATE_CHARGE'; stockCheck: 'NO_PRIOR_RECEIPT'; stockEvidence: string; expenseTypes?: Record<string, any> };
 };
 
 export class ProcurementImportService {
@@ -27,12 +27,12 @@ export class ProcurementImportService {
     const review = (r: ImportRow, code: string, message: string) => required.set(`${r.record_id}:${code}`, { key: `${r.record_id}:${code}`, row: r.row, sku: r.sku || r.suggested_sku || '', message });
     if (supplier.name.trim().toLocaleUpperCase('en-US') !== parsed.header.supplier_name.trim().toLocaleUpperCase('en-US')) review(parsed.header, 'SUPPLIER_CONFIRM', `Kaynak tedarikçi ${parsed.header.supplier_name} → kayıtlı ${supplier.name} eşleştirmesini onaylayın.`);
     for (const r of parsed.rows) {
-      for (const code of (r.review_codes || '').split(';').filter(Boolean)) review(r, code, `${code} · ${r.notes || r.name_en || r.record_id}`);
+      for (const code of (r.record_type === 'EXPENSE' ? [] : (r.review_codes || '').split(';').filter(code => code && code !== 'EXPENSE_POLICY_CONFIRM'))) review(r, code, `${code} · ${r.notes || r.name_en || r.record_id}`);
       if (r.record_type === 'LINE' && r.pricing_basis === 'INCLUDED_IN_PRICE') review(r, 'INCLUDED_COST_POLICY_CONFIRM', 'Fiyata dahil içerik: ayrı bedel eklenmeyecek; LC dağıtımı ayrıca onaylanır.');
       if (r.meta.quantity_derived_from || r.meta.quantity_derived || Object.hasOwn(r.meta, 'original_total_qty_cell_value') && String(r.meta.original_total_qty_cell_value ?? '').trim() === '') review(r, 'DERIVED_QUANTITY_CONFIRM', 'Kaynakta boş toplam miktarın koli içeriğinden türetilmesini onaylayın.');
     }
     review(parsed.header, 'EXISTING_STOCK_CHECK', 'Bu fatura/parti daha önce fiziksel kabul veya başlangıç stokuna alınmadı; kanıt açıklaması gerekli.');
-    for (const r of parsed.expenses) review(r, 'EXPENSE_POLICY_CONFIRM', `${r.name_en}: ${r.amount} ${r.currency}; gider türünü ve vergi politikasını seçin.`);
+
     const products = definitions.map(r => {
       const choice = input.choices?.[r.record_id];
       const exact = r.sku ? this.db.prepare('SELECT id FROM products WHERE upper(sku)=upper(?)').get(r.sku) as any : null;
@@ -107,7 +107,7 @@ export class ProcurementImportService {
       }
       for (const b of preview.bom) this.catalog.replaceBom(ids.get(b.parentRef)!, b.current.version, b.incoming.map(c => ({ componentId: ids.get(c.componentRef)!, quantity: c.quantity })));
       const lineIds = new Map(parsed.lines.map(r => [r.record_id, randomUUID()]));
-      const expenseIds = new Map(parsed.expenses.map(r => [r.record_id, randomUUID()]));
+
       const purchase = new ProcurementService(this.db).createPurchase({ id: purchaseId, supplierId: input.supplierId, invoiceNumber: parsed.header.invoice_number.trim(), invoiceDate: parsed.header.invoice_date,
         acquisitionCostVatPolicy: policy!.acquisitionCostVatPolicy,
         lines: parsed.lines.map(r => {
@@ -117,13 +117,9 @@ export class ProcurementImportService {
           if (!r.uom || r.uom !== product.base_uom.code) fail(r, 'Kaynak ve katalog UOM uyuşmuyor.');
           return { id: lineIds.get(r.record_id), productId, quantity: r.quantity, quoteBasis: r.uom as any, supplierUnitPriceMinor: Number(decimal(r.unit_price, r, 'unit_price', 2)), currency: r.currency, vatMode: policy!.vatMode, vatRateBps: policy!.vatRateBps };
         }),
-        acquisitionCosts: parsed.expenses.map(r => {
-          const expenseType = policy!.expenseTypes?.[r.record_id];
-          if (!['FREIGHT','CUSTOMS_DUTY','ADDITIONAL_TAX','CUSTOMS_BROKER','WAREHOUSE_PORT','DOMESTIC_FREIGHT','INSURANCE','BANK_TRANSFER','OTHER'].includes(expenseType)) fail(r, 'DECISION REQUIRED: gider türü seçilmeli.');
-          return { id: expenseIds.get(r.record_id), category: ['FREIGHT','DOMESTIC_FREIGHT'].includes(expenseType) ? 'FREIGHT' : ['CUSTOMS_DUTY','ADDITIONAL_TAX'].includes(expenseType) ? 'CUSTOMS' : 'OTHER', expenseType, description: r.name_en, amountMinor: Number(decimal(r.amount, r, 'amount', 2)), currency: r.currency, vatMode: policy!.vatMode, vatRateBps: policy!.vatRateBps };
-        }) });
+        acquisitionCosts: [] });
       this.db.prepare('INSERT INTO procurement_imports VALUES (?,?,?,?,?,?,?,?,?,?)').run(importId, parsed.sourceHash, parsed.version, input.supplierId, parsed.header.invoice_number.trim(), purchaseId, approvalHash, JSON.stringify({ choices: input.choices, confirmations: input.confirmations, policy, previewHash: preview.previewHash }), actorId, createdAt);
-      for (const r of parsed.rows) this.db.prepare('INSERT INTO procurement_import_records VALUES (?,?,?,?,?)').run(importId, r.record_id, r.record_type, JSON.stringify(r), ids.get(r.record_id) || lineIds.get(r.record_id) || expenseIds.get(r.record_id) || (r.record_type === 'PURCHASE' ? purchaseId : null));
+      for (const r of parsed.rows) this.db.prepare('INSERT INTO procurement_import_records VALUES (?,?,?,?,?)').run(importId, r.record_id, r.record_type, JSON.stringify(r), ids.get(r.record_id) || lineIds.get(r.record_id) || (r.record_type === 'PURCHASE' ? purchaseId : null));
       const cartons = new Map<string, string>();
       for (const p of preview.packagePreview) {
         const key = `${p.groupRef}:${p.cartonIndex}`;

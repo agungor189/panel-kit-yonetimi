@@ -6,7 +6,7 @@ export function ProcurementImport({ csv, supplierId, products, onCreated }: { cs
   const [preview, setPreview] = useState<any>(null);
   const [choices, setChoices] = useState<Record<string, any>>({});
   const [confirmations, setConfirmations] = useState<string[]>([]);
-  const [policy, setPolicy] = useState<any>({ vatMode: '', vatRateBps: '', acquisitionCostVatPolicy: '', includedCost: '', stockCheck: '', stockEvidence: '', expenseTypes: {} });
+  const [policy, setPolicy] = useState<any>({ vatMode: '', vatRateBps: '', acquisitionCostVatPolicy: '', includedCost: '', stockCheck: '', stockEvidence: '' });
   const [reviewed, setReviewed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -36,7 +36,7 @@ export function ProcurementImport({ csv, supplierId, products, onCreated }: { cs
     {error && <p role="alert" className="text-danger">{error}</p>}
     <Button disabled={busy || !supplierId} onClick={inspect}>{preview ? 'Kararlarla Önizlemeyi Yenile' : 'CSV Önizle'}</Button>
     {preview && <>
-      <p>{preview.parsed.header.invoice_number} · {preview.parsed.summary.records} kayıt · {preview.parsed.summary.sourceCartons} kaynak koli → {preview.parsed.summary.warehousePackages} depo paketi · Ürün {(preview.parsed.summary.goodsAmountMinor / 100).toFixed(2)} + gider {(preview.parsed.summary.expenseAmountMinor / 100).toFixed(2)} {preview.parsed.header.currency}</p>
+      <p>{preview.parsed.header.invoice_number} · {preview.parsed.summary.records} kayıt · {preview.parsed.summary.sourceCartons} kaynak koli → {preview.parsed.summary.warehousePackages} depo paketi · Ürün {(preview.parsed.summary.goodsAmountMinor / 100).toFixed(2)} · Kaynak fatura genel toplamı {preview.parsed.summary.sourceInvoiceTotalMinor == null ? '—' : (preview.parsed.summary.sourceInvoiceTotalMinor / 100).toFixed(2)} {preview.parsed.header.currency}</p>
       {preview.existingPurchaseId && <p className="text-amber-700">Bu fatura daha önce kaydedilmiş. Aynı onaylarla tekrar mevcut taslağı döndürür.</p>}
       <details><summary className="cursor-pointer font-bold">Ürün eşleştirmeleri ve katalog farkları ({preview.products.length})</summary>
         <div className="space-y-3">{preview.products.map((p: any) => {
@@ -63,7 +63,8 @@ export function ProcurementImport({ csv, supplierId, products, onCreated }: { cs
         <Select value={policy.stockCheck} onChange={e => editPolicy({ ...policy, stockCheck: e.target.value })}><option value="">Önceki stok kontrolü</option><option value="NO_PRIOR_RECEIPT">Bu parti daha önce kabul/başlangıç stokuna alınmadı</option></Select>
         <Input placeholder="Kontrol kanıtı / açıklaması" value={policy.stockEvidence} onChange={e => editPolicy({ ...policy, stockEvidence: e.target.value })}/>
       </div>
-      {preview.parsed.expenses.map((r: any) => <label className="block text-sm" key={r.record_id}>{r.name_en} · {r.amount} {r.currency}<Select value={policy.expenseTypes[r.record_id] || ''} onChange={e => editPolicy({ ...policy, expenseTypes: { ...policy.expenseTypes, [r.record_id]: e.target.value } })}><option value="">Gider kapsamını seçin</option>{['FREIGHT','CUSTOMS_DUTY','ADDITIONAL_TAX','CUSTOMS_BROKER','WAREHOUSE_PORT','DOMESTIC_FREIGHT','INSURANCE','BANK_TRANSFER','OTHER'].map(v => <option key={v}>{v}</option>)}</Select></label>)}
+      <p role="status" className="text-amber-700">Giderler aktarılmadı, manuel girilecek. Taslak yalnız ürün bedelini içerir; kaynak fatura genel toplamı değiştirilmez.</p>
+      <details><summary>Kaynak gider bilgileri (işlem oluşturulmadı)</summary>{preview.parsed.expenses.map((r: any) => <p key={r.record_id}>{r.name_en} · {r.amount} {r.currency}</p>)}</details>
       <div className="space-y-2">{preview.requirements.map((r: any) => <label className="block text-xs" key={r.key}><input type="checkbox" checked={confirmations.includes(r.key)} onChange={e => setConfirmations(c => e.target.checked ? [...c, r.key] : c.filter(k => k !== r.key))}/> Satır {r.row} · {r.sku} · {r.message}</label>)}</div>
       <Button disabled={busy || !reviewed || preview.products.some((p: any) => !choices[p.ref]?.action) || preview.requirements.some((r: any) => !confirmations.includes(r.key))} onClick={apply}>Onaylanan Satın Alma Taslağını Oluştur</Button>
       {!reviewed && <p className="text-sm">Değişikliklerden sonra önizlemeyi yenileyin.</p>}

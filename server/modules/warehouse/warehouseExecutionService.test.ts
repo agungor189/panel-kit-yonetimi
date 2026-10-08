@@ -359,7 +359,7 @@ test("placement enforces pick faces, uses rear depth, prefers same-SKU rear pair
   db.close();
 });
 
-test("goods receipt preserves V2-06 facts, records shortage, gates excess, quarantines damage, and rejects partial stages", () => {
+test("goods receipt preserves V2-06 facts, records shortage, gates excess, rejects damage, and rejects partial stages", () => {
   const { db, procurement, warehouse } = setup();
   const shortageLot = costed(procurement, "p1", "shortage", 10);
   const costBefore = db.prepare("SELECT * FROM acquisition_lot_cost_snapshots WHERE id=?").get(shortageLot.id);
@@ -382,25 +382,20 @@ test("goods receipt preserves V2-06 facts, records shortage, gates excess, quara
   assert.equal(excess.excessQuantityBaseInt, 1);
 
   const damagedLot = costed(procurement, "p3", "damaged", 10);
-  const damaged = receive(db, warehouse, damagedLot.id, "damaged", [
-    { id: "ok", code: "OK", quantityBaseInt: 8 },
-    { id: "damaged", code: "DAMAGED", quantityBaseInt: 2, disposition: "DAMAGED" },
-  ], 8, 2);
-  assert.equal(damaged.deliveredQuantityBaseInt, 10);
-  assert.equal(damaged.varianceQuantityBaseInt, 0);
-  assert.equal(damaged.shortageQuantityBaseInt, 0);
-  assert.equal(damaged.excessQuantityBaseInt, 0);
-  assert.equal(damaged.damagedQuantityBaseInt, 2);
-  assert.equal(warehouse.getPackage("damaged").status, "QUARANTINE");
-  assert.equal(warehouse.getAvailability("p3").availableBaseInt, 8);
+  for (const damagedQuantity of [0, 2]) assert.throws(() => receive(db, warehouse, damagedLot.id, `damaged-${damagedQuantity}`, [
+    { id: 'ok', code: 'OK', quantityBaseInt: 8 },
+    { id: 'damaged', code: 'DAMAGED', quantityBaseInt: 2, disposition: 'DAMAGED' },
+  ], 8, damagedQuantity), (error: unknown) => error instanceof WarehouseExecutionError && error.code === 'GOODS_RECEIPT_DAMAGE_DISABLED');
+  assert.throws(() => receive(db, warehouse, damagedLot.id, 'positive-damaged', [{ id: 'ok', code: 'OK', quantityBaseInt: 10 }], 10, 2), /hasar/);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM warehouse_goods_receipts WHERE acquisition_cost_snapshot_id=?").pluck().get(damagedLot.id), 0);
+  assert.equal(warehouse.getAvailability('p3').availableBaseInt, 0);
 
   const deliveredExcessLot = costed(procurement, "p3", "delivered-excess", 10);
   const deliveredApproval = execute(db, "approve-delivered-excess", "warehouse.goods-receipt.excess-approve.v1", { costSnapshotId: deliveredExcessLot.id }, () =>
     warehouse.approveExcess({ approvalId: "approval-delivered-excess", costSnapshotId: deliveredExcessLot.id, maximumAcceptedQuantityBaseInt: 11, reason: "Only eleven delivered units approved", operationId: "approve-delivered-excess" }));
   assert.throws(() => receive(db, warehouse, deliveredExcessLot.id, "delivered-excess", [
-    { id: "delivered-ok", code: "DELIVERED-OK", quantityBaseInt: 9 },
-    { id: "delivered-damaged", code: "DELIVERED-DAMAGED", quantityBaseInt: 3, disposition: "DAMAGED" },
-  ], 9, 3, { excessApprovalId: deliveredApproval.id }),
+    { id: "delivered-ok", code: "DELIVERED-OK", quantityBaseInt: 12 },
+  ], 12, 0, { excessApprovalId: deliveredApproval.id }),
   (error: unknown) => error instanceof WarehouseExecutionError && error.code === "EXCESS_APPROVAL_REQUIRED");
 
   const partialLot = costed(procurement, "p3", "partial", 5);

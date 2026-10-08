@@ -373,6 +373,9 @@ export class WarehouseExecutionService {
     const supplierLotCode = requiredText(input.supplierLotCode, "supplierLotCode");
     const accepted = nonNegativeInteger(input.acceptedQuantityBaseInt, "acceptedQuantityBaseInt");
     const damaged = nonNegativeInteger(input.damagedQuantityBaseInt, "damagedQuantityBaseInt");
+    if (damaged !== 0 || (Array.isArray(input.packages) && input.packages.some(p => p.disposition && p.disposition !== 'ACCEPTED'))) {
+      throw new WarehouseExecutionError('GOODS_RECEIPT_DAMAGE_DISABLED', 'Yeni mal kabulde hasar/karantina desteklenmez; damagedQuantityBaseInt 0 olmalı.');
+    }
     const receivedAt = timestamp(input.receivedAt, "receivedAt");
     const operationId = requiredText(input.operationId, "operationId");
     if (!Array.isArray(input.packages)) {

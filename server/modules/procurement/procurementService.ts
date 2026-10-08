@@ -111,6 +111,7 @@ export type PurchaseLinePackingInput = PurchaseCatalogProposal & {
 };
 
 export type PurchaseCostInput = {
+  counterparty?: "SUPPLIER" | "THIRD_PARTY";
   id?: string;
   category: CostCategory;
   amountMinor: number;
@@ -325,6 +326,7 @@ export class ProcurementService {
     if (lines.some((item) => item.currency !== supplierCurrency)) {
       throw new ProcurementValidationError("MIXED_PURCHASE_CURRENCY", "One purchase cannot mix supplier currencies.");
     }
+    for (const cost of input.acquisitionCosts || []) this.validateCounterparty(cost, supplierCurrency);
     const costs = (input.acquisitionCosts || []).map((item) => this.normalizeCost(item, lines, createdAt, vatPolicy));
     const merchandise = {
       netMinor: safeAdd(lines.map((item) => item.supplier.netMinor), "merchandise net"),
@@ -413,11 +415,11 @@ export class ProcurementService {
         const normalized = costs[index];
         const targets = Array.isArray(item.targetLineIds) ? item.targetLineIds : [];
         this.db.prepare(`INSERT INTO purchase_cost_component_details
-          (component_id,expense_type,description,occurred_on,target_scope,target_line_ids_json,created_at)
-          VALUES (?,?,?,?,?,?,?)`).run(
+          (component_id,expense_type,description,occurred_on,target_scope,target_line_ids_json,created_at,counterparty)
+          VALUES (?,?,?,?,?,?,?,?)`).run(
           normalized.id, item.expenseType || (item.category === "FREIGHT" ? "FREIGHT" : item.category === "CUSTOMS" ? "CUSTOMS_DUTY" : "OTHER"),
           optionalText(item.description || item.notes, "cost.description", 1000), item.occurredOn || createdAt.slice(0, 10),
-          targets.length ? "SELECTED_LINES" : "COMMON", JSON.stringify(targets), createdAt,
+          targets.length ? "SELECTED_LINES" : "COMMON", JSON.stringify(targets), createdAt, item.counterparty,
         );
       }
       const insertAttachment = this.db.prepare(`INSERT INTO purchase_attachments
@@ -622,7 +624,8 @@ export class ProcurementService {
     const account = this.db.prepare("SELECT id,currency FROM cash_accounts WHERE id=? AND is_active=1").get(cashAccountId) as any;
     if (!account) throw new ProcurementValidationError("CASH_ACCOUNT_NOT_FOUND", "Active cash account was not found.", 404);
     if (account.currency !== currency) throw new ProcurementValidationError("PAYMENT_ACCOUNT_CURRENCY_MISMATCH", "Cash account currency must match payment currency.");
-    const outstanding = header.total_gross_minor - header.paid_minor;
+    const payable = this.supplierPayable(header);
+    const outstanding = payable.grossMinor - header.paid_minor;
     if (amountMinor > outstanding) throw new ProcurementValidationError("PAYMENT_EXCEEDS_OUTSTANDING", "Payment exceeds purchase outstanding balance.", 409);
     const paidAt = requiredText(input.paidAt, "paidAt", 50);
     if (Number.isNaN(Date.parse(paidAt))) throw new ProcurementValidationError("PROCUREMENT_VALIDATION_FAILED", "paidAt is invalid.");
@@ -630,7 +633,7 @@ export class ProcurementService {
     const postingId = randomUUID();
     const cashTransactionId = `procurement-payment:${paymentId}`;
     const nextPaid = header.paid_minor + amountMinor;
-    const paymentStatus = nextPaid === header.total_gross_minor ? "PAID" : "PARTIAL";
+    const paymentStatus = nextPaid === payable.grossMinor ? "PAID" : "PARTIAL";
     this.db.transaction(() => {
       this.db.prepare(`INSERT INTO purchase_payments
         (id,purchase_order_id,cash_account_id,amount_minor,currency,paid_at,reference,notes)
@@ -654,6 +657,7 @@ export class ProcurementService {
     const purchaseId = requiredText(purchaseIdValue, "purchaseId", 200);
     const header = this.db.prepare("SELECT * FROM purchase_orders WHERE id=?").get(purchaseId) as any;
     if (!header) return null;
+    const payable = this.supplierPayable(header);
     const lineRows = this.db.prepare("SELECT * FROM purchase_order_lines WHERE purchase_order_id=? ORDER BY line_index").all(purchaseId) as any[];
     const componentRows = this.db.prepare("SELECT * FROM purchase_cost_components WHERE purchase_order_id=? ORDER BY id").all(purchaseId) as any[];
     const allocationRows = this.db.prepare("SELECT * FROM purchase_cost_allocations WHERE purchase_order_id=? ORDER BY component_id,line_id").all(purchaseId) as any[];
@@ -686,12 +690,12 @@ export class ProcurementService {
       supplierCurrency: header.supplier_currency,
       vatPolicy: header.acquisition_cost_vat_policy,
       status: header.status,
-      paymentStatus: header.payment_status,
-      totalNetMinor: header.total_net_minor,
-      totalVatMinor: header.total_vat_minor,
-      totalGrossMinor: header.total_gross_minor,
+      paymentStatus: this.paymentStatus(header, payable.grossMinor),
+      totalNetMinor: payable.netMinor,
+      totalVatMinor: payable.vatMinor,
+      totalGrossMinor: payable.grossMinor,
       paidMinor: header.paid_minor,
-      outstandingMinor: header.total_gross_minor - header.paid_minor,
+      outstandingMinor: payable.grossMinor - header.paid_minor,
       lines: lineRows.map((row) => ({
         id: row.id,
         productId: row.product_id,
@@ -706,6 +710,7 @@ export class ProcurementService {
       })),
       acquisitionCosts: componentRows.map((row) => ({
         id: row.id, category: row.category, sourceAmountMinor: row.source_amount_minor, currency: row.source_currency,
+        counterparty: costDetails.get(row.id)?.counterparty || null,
         expenseType: costDetails.get(row.id)?.expense_type || row.category,
         description: costDetails.get(row.id)?.description || row.notes,
         occurredOn: costDetails.get(row.id)?.occurred_on || row.created_at,
@@ -742,7 +747,7 @@ export class ProcurementService {
       FROM purchase_orders p JOIN procurement_workflows w ON w.purchase_order_id=p.id
       ORDER BY datetime(p.created_at) DESC`).all() as any[]).map((row) => ({
         id: row.id, purchaseNumber: row.purchase_number, orderDate: row.order_date, workflowState: row.state,
-        supplierName: row.supplier_name_snapshot, supplierCurrency: row.supplier_currency, totalGrossMinor: row.total_gross_minor,
+        supplierName: row.supplier_name_snapshot, supplierCurrency: row.supplier_currency, totalGrossMinor: safeAdd([row.total_gross_minor, this.supplierSurcharges(row.id).grossMinor], "supplier payable"),
         lineCount: Number(row.line_count), receivedLineCount: Number(row.received_line_count), finalizedAt: row.finalized_at,
       }));
   }
@@ -763,9 +768,10 @@ export class ProcurementService {
 
   addAcquisitionCost(purchaseIdValue: string, input: PurchaseCostInput) {
     const purchaseId = requiredText(purchaseIdValue, "purchaseId", 200);
-    const header = this.db.prepare("SELECT status,acquisition_cost_vat_policy FROM purchase_orders WHERE id=?").get(purchaseId) as any;
+    const header = this.db.prepare("SELECT status,supplier_currency,acquisition_cost_vat_policy FROM purchase_orders WHERE id=?").get(purchaseId) as any;
     if (!header) throw new ProcurementValidationError("PURCHASE_NOT_FOUND", "Purchase was not found.", 404);
     if (header.status !== "DRAFT") throw new ProcurementValidationError("PURCHASE_ALREADY_FINALIZED", "Finalized purchase costs cannot be changed.", 409);
+    this.validateCounterparty(input, header.supplier_currency);
     const rows = this.db.prepare("SELECT * FROM purchase_order_lines WHERE purchase_order_id=? ORDER BY line_index").all(purchaseId) as any[];
     const targetIds = Array.isArray(input.targetLineIds) ? [...new Set(input.targetLineIds.map((id) => requiredText(id, "targetLineId", 200)))] : [];
     const selectedRows = targetIds.length ? rows.filter((row) => targetIds.includes(row.id)) : rows;
@@ -792,9 +798,11 @@ export class ProcurementService {
         JSON.stringify(normalized.suggestions),normalized.roundingResidualMinor,normalized.notes,createdAt,
       );
       this.db.prepare(`INSERT INTO purchase_cost_component_details
-        (component_id,expense_type,description,occurred_on,target_scope,target_line_ids_json,created_at) VALUES (?,?,?,?,?,?,?)`)
+        (component_id,expense_type,description,occurred_on,target_scope,target_line_ids_json,created_at,counterparty) VALUES (?,?,?,?,?,?,?,?)`)
         .run(normalized.id, expenseType, optionalText(input.description || input.notes, "description", 1000), occurredOn,
-          targetIds.length ? "SELECTED_LINES" : "COMMON", JSON.stringify(targetIds), createdAt);
+          targetIds.length ? "SELECTED_LINES" : "COMMON", JSON.stringify(targetIds), createdAt, input.counterparty);
+      const currentHeader = this.db.prepare('SELECT * FROM purchase_orders WHERE id=?').get(purchaseId);
+      this.db.prepare('UPDATE purchase_orders SET payment_status=? WHERE id=?').run(this.paymentStatus(currentHeader), purchaseId);
       this.db.prepare("UPDATE procurement_workflows SET state='COST_PENDING',updated_at=? WHERE purchase_order_id=? AND state IN ('DRAFT','ORDERED','IN_TRANSIT')")
         .run(createdAt, purchaseId);
     }).immediate();
@@ -1189,6 +1197,30 @@ export class ProcurementService {
       profileLengthMm, profileLengthKind, quantityBaseInt, unitPriceMinor, currency, vatMode: mode, vatRateBps: rateBps,
       supplier: supplierAmounts, baseTry, fx, normalizedCost, notes: optionalText(input.notes, "line.notes", 1000), packing,
     };
+  }
+
+  private validateCounterparty(input: PurchaseCostInput, supplierCurrency: string) {
+    if (!['SUPPLIER','THIRD_PARTY'].includes(input.counterparty || '')) throw new ProcurementValidationError('COST_COUNTERPARTY_REQUIRED', 'DECISION REQUIRED: cost counterparty / gider muhatabı seçilmeli.');
+    if (input.counterparty === 'SUPPLIER' && input.currency !== supplierCurrency) throw new ProcurementValidationError('SUPPLIER_COST_CURRENCY_MISMATCH', 'Tedarikçi ek bedeli fatura para biriminde olmalı.');
+  }
+
+  // Original invoice snapshots never change. Explicit manual supplier surcharges extend payable once.
+  private supplierSurcharges(purchaseId: string) {
+    const rows = this.db.prepare(`SELECT c.source_net_minor,c.source_vat_minor,c.source_gross_minor
+      FROM purchase_cost_components c JOIN purchase_cost_component_details d ON d.component_id=c.id
+      WHERE c.purchase_order_id=? AND d.counterparty='SUPPLIER'`).all(purchaseId) as any[];
+    return { netMinor: safeAdd(rows.map(r => r.source_net_minor), 'supplier surcharge net'),
+      vatMinor: safeAdd(rows.map(r => r.source_vat_minor), 'supplier surcharge VAT'),
+      grossMinor: safeAdd(rows.map(r => r.source_gross_minor), 'supplier surcharge gross') };
+  }
+  private supplierPayable(header: any) {
+    const surcharge = this.supplierSurcharges(header.id);
+    return { netMinor: safeAdd([header.total_net_minor, surcharge.netMinor], 'supplier net'),
+      vatMinor: safeAdd([header.total_vat_minor, surcharge.vatMinor], 'supplier VAT'),
+      grossMinor: safeAdd([header.total_gross_minor, surcharge.grossMinor], 'supplier gross') };
+  }
+  private paymentStatus(header: any, grossMinor = this.supplierPayable(header).grossMinor) {
+    return header.paid_minor === 0 ? 'UNPAID' : header.paid_minor === grossMinor ? 'PAID' : 'PARTIAL';
   }
 
   private normalizeCost(input: PurchaseCostInput, lines: NormalizedLine[], createdAt: string, vatPolicy: AcquisitionCostVatPolicy): NormalizedCost {

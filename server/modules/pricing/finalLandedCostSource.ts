@@ -8,7 +8,7 @@ export function finalLandedCostSource(db: Database.Database, productId: string, 
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='current_product_landed_costs'").get()) return null;
   if (visited.has(productId)) return null;
   const next = new Set(visited).add(productId);
-  const product = db.prepare('SELECT product_type,catalog_version_ref FROM products WHERE id=?').get(productId) as any;
+  const product = db.prepare('SELECT product_type FROM products WHERE id=?').get(productId) as any;
   if (!product) return null;
   if (product.product_type === 'assembly') {
     const bom = db.prepare('SELECT component_product_id,quantity_per_unit FROM product_bom WHERE parent_product_id=? ORDER BY component_product_id').all(productId) as any[];
@@ -25,7 +25,7 @@ export function finalLandedCostSource(db: Database.Database, productId: string, 
       numerator = BigInt(reduced.numerator); denominator = BigInt(reduced.denominator);
       sources.push({ ...component, reference: cost.reference, sources: cost.sources });
     }
-    return { reference: `bom-final:${canonicalPayloadHash({ productId, catalogVersion: product.catalog_version_ref, sources })}`, numerator: Number(numerator), denominator: Number(denominator), sources };
+    return { reference: `bom-final:${canonicalPayloadHash({ productId, formulaVersion: 'assembly-final-v1', sources })}`, numerator: Number(numerator), denominator: Number(denominator), sources };
   }
   const current = db.prepare('SELECT * FROM current_product_landed_costs WHERE product_id=?').get(productId) as any;
   if (!current) return null;

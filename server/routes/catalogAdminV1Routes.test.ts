@@ -1,3 +1,6 @@
+import { CatalogService } from '../modules/catalog/catalogService.js';
+import { ProcurementService } from '../modules/procurement/procurementService.js';
+import { finalLandedCostSource } from '../modules/pricing/finalLandedCostSource.js';
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import Database from "better-sqlite3";
@@ -123,4 +126,38 @@ test("catalog channel edit preserves visibility but cannot bypass authoritative 
   });
   assert.equal(visibility.status, 200);
   assert.deepEqual(db.prepare("SELECT price,is_listed FROM product_platforms WHERE id='platform-cap-30'").get(), { price: 125, is_listed: 1 });
+});
+
+
+test('assembly single edit saves renamed catalog and approved price; real BOM or FINAL source changes return 409 atomically', async () => {
+  const catalog = new CatalogService(db), procurement = new ProcurementService(db);
+  const part = catalog.createProduct({ sku: 'ASSEMBLY-PART', title: 'Part', catalog_type: 'product', base_uom_code: 'piece', product_type: 'component' });
+  const fields = { sku: 'ASSEMBLY-PRICE', title: 'Assembly', catalog_type: 'product' as const, base_uom_code: 'piece' as const, product_type: 'assembly' as const };
+  const assembly = catalog.createProduct(fields);
+  catalog.replaceBom(assembly.id, catalog.readBom(assembly.id).version, [{ componentId: part.id, quantity: 2 }]);
+  procurement.registerSupplier({ id: 'assembly-supplier', name: 'Fixture', defaultCurrency: 'TRY' });
+  const finalize = (price: number) => {
+    const p = procurement.createPurchase({ supplierId: 'assembly-supplier', acquisitionCostVatPolicy: 'VAT_EXCLUDED_FROM_INVENTORY_COST', lines: [{ productId: part.id, quantity: '1', quoteBasis: 'piece', supplierUnitPriceMinor: price, currency: 'TRY', vatMode: 'EXCLUDED', vatRateBps: 0 }] });
+    procurement.finalizeAcquisitionCosts(p.id, { allocations: [] });
+  };
+  finalize(1000);
+  const cost = finalLandedCostSource(db, assembly.id)!;
+  const save = (key: string, reference = cost, price = 20) => fetch(`${baseUrl}/api/catalog-admin/v1/products/${assembly.id}`, {
+    method: 'PUT', headers: { 'content-type': 'application/json', 'x-operation-id': key },
+    body: JSON.stringify({ expected_catalog_version: catalog.getProduct(assembly.id)!.catalog_version, product: { ...fields, title: 'New display name' }, operational: { description: 'New description', pricing_formula_approved: true, sale_price: price, buffer_percentage: 0, profit_percentage: 0, fixed_price_adjustment_try: 0, price_rounding_increment: 1, pricing_preview: { landedCostSnapshotId: reference.reference, landedCostNumerator: reference.numerator, landedCostDenominator: reference.denominator, salePrice: Number((db.prepare('SELECT sale_price FROM products WHERE id=?').get(assembly.id) as any).sale_price), priceLocked: false } } }),
+  });
+  const saved = await save('assembly-single-save');
+  assert.equal(saved.status, 200, JSON.stringify(await saved.json()));
+  assert.equal(finalLandedCostSource(db, assembly.id)!.reference, cost.reference);
+  assert.equal(db.prepare('SELECT sale_price FROM products WHERE id=?').pluck().get(assembly.id), 20);
+  catalog.replaceBom(assembly.id, catalog.readBom(assembly.id).version, [{ componentId: part.id, quantity: 3 }]);
+  const changedBom = await save('assembly-bom-stale');
+  assert.equal(changedBom.status, 409);
+  assert.equal((await changedBom.json() as any).error.code, 'PRICING_PREVIEW_STALE');
+  const currentCost = finalLandedCostSource(db, assembly.id)!;
+  finalize(2000);
+  const changedCost = await save('assembly-cost-stale', currentCost, 30);
+  assert.equal(changedCost.status, 409);
+  assert.equal((await changedCost.json() as any).error.code, 'PRICING_PREVIEW_STALE');
+  assert.equal(db.prepare('SELECT COUNT(*) FROM pricing_history WHERE product_id=?').pluck().get(assembly.id), 1);
 });

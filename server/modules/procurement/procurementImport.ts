@@ -102,6 +102,7 @@ export function parseProcurementImport(csv: string) {
   }
   const sum = (rs: ImportRow[], field: string, scale = 6) => rs.reduce((s, r) => s + decimal(r[field], r, field, scale), 0n);
   const summary = { records: rows.length, sourceCartons: Number(sum(groups, 'package_count', 0)), warehousePackages: groups.reduce((s, g) => s + Number(g.package_count) * items.filter(i => i.parent_ref === g.record_id).length, 0),
+    sourceInvoiceTotalMinor: header.meta.invoice_total_usd === undefined ? null : Number(decimal(String(header.meta.invoice_total_usd), header, 'invoice_total_usd', 2)),
     goodsAmountMinor: Number(sum(lines, 'amount', 2)), expenseAmountMinor: Number(sum(ofType('EXPENSE'), 'amount', 2)),
     netWeightKg: groups.every(g => g.net_weight_kg) ? textDecimal(sum(groups, 'net_weight_kg')) : null,
     grossWeightKg: groups.every(g => g.gross_weight_kg) ? textDecimal(sum(groups, 'gross_weight_kg')) : null };

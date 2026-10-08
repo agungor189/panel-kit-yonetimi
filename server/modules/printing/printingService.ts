@@ -29,11 +29,11 @@ export type TemplateSnapshot = {
 export class PrintingService {
   constructor(private readonly db: Database.Database) {}
 
-  private validateTemplate(template: TemplateSnapshot, purpose: Exclude<PrintPurpose, "SHIPPING">, plannedPackage = false) {
+  private validateTemplate(template: TemplateSnapshot, purpose: Exclude<PrintPurpose, "SHIPPING">) {
     if (!template || typeof template !== "object" || !Array.isArray(template.elements)) throw new PrintingError("TEMPLATE_SNAPSHOT_REQUIRED", "An immutable L template snapshot is required.");
     const expectedPurpose = purpose === "GOODS_RECEIPT_PACKAGE" ? "goods_receipt" : "location";
-    const expectedSize = purpose === "GOODS_RECEIPT_PACKAGE" ? (plannedPackage ? [100, 100] : [100, 150]) : [100, 50];
-    const expectedBarcode = purpose === "GOODS_RECEIPT_PACKAGE" ? (plannedPackage ? "{Package_code}" : "{SKU}") : "{Lokasyon}";
+    const expectedSize = purpose === "GOODS_RECEIPT_PACKAGE" ? [100, 150] : [100, 50];
+    const expectedBarcode = purpose === "GOODS_RECEIPT_PACKAGE" ? "{Package_code}" : "{Lokasyon}";
     if (template.purpose !== expectedPurpose || template.width !== expectedSize[0] || template.height !== expectedSize[1]) {
       throw new PrintingError("TEMPLATE_CONTRACT_MISMATCH", `${purpose} template must be ${expectedSize.join("x")} mm.`);
     }
@@ -46,24 +46,40 @@ export class PrintingService {
     }
   }
 
-  packageSnapshot(packageIdValue: string) {
+  packageSnapshot(packageIdValue: string, observation?: { planVersion?: string; supplierLotCode?: string; quantityBaseInt?: number }): { subjectId: string; subjectCode: string; payload: Record<string, unknown> } {
     const packageId = required(packageIdValue, "packageId", 200);
-    const current = this.db.prepare(`SELECT ep.*,p.sku,p.title,p.name_tr,p.name_en,p.material,p.form_code,p.product_series,p.size,p.weight_grams AS unit_weight_grams,p.product_type
+    let current = this.db.prepare(`SELECT ep.*,p.supplier_code,p.sku,p.title,p.name_tr,p.name_en,p.material,p.form_code,p.product_series,p.size,p.weight_grams AS unit_weight_grams,p.product_type
       FROM warehouse_execution_packages ep JOIN products p ON p.id=ep.product_id WHERE ep.id=? OR ep.package_code=?`).get(packageId, packageId) as any;
-    const plan = current && this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='procurement_package_plan'").get()
-      ? this.db.prepare('SELECT source_carton_id,source_group_ref,plan_version,product_snapshot_json FROM procurement_package_plan WHERE id=?').get(current.id) as any : null;
+    const plan = this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='procurement_package_plan'").get()
+      ? this.db.prepare('SELECT * FROM procurement_package_plan WHERE id=? OR package_code=?').get(current?.id || packageId, packageId) as any : null;
+    if (!current && plan) {
+      const workflow = this.db.prepare(`SELECT w.state,p.status FROM procurement_workflows w JOIN purchase_orders p ON p.id=w.purchase_order_id WHERE p.id=?`).get(plan.purchase_order_id) as any;
+      if (workflow?.state !== 'RECEIPT_PENDING' || workflow.status !== 'APPROVED') throw new PrintingError('PACKAGE_PLAN_NOT_APPROVED', 'Paket planı mal kabul için onaylanmış olmalı.', 409);
+      if (observation?.planVersion !== plan.plan_version) throw new PrintingError('PACKAGE_PLAN_STALE', 'Paket planı sürümü değişti.', 409);
+      if (this.db.prepare('SELECT 1 FROM warehouse_goods_receipts WHERE purchase_line_id=?').get(plan.purchase_line_id)) throw new PrintingError('PACKAGE_NOT_RECEIVED', 'Bu satırın nihai kabulünde bulunmayan paket basılamaz.', 409);
+      const quantity = observation?.quantityBaseInt ?? plan.quantity_base_int;
+      if (!Number.isSafeInteger(quantity) || quantity <= 0) throw new PrintingError('PRINT_QUANTITY_INVALID', 'Etiket adedi pozitif tam sayı olmalı.');
+      current = { id: plan.id, package_code: plan.package_code, purchase_order_id: plan.purchase_order_id,
+        initial_quantity_base_int: quantity, target_quantity_base_int: plan.quantity_base_int,
+        supplier_lot_code: required(observation?.supplierLotCode, 'supplierLotCode'), weight_grams: null };
+    } else if (current && observation && (observation.quantityBaseInt !== undefined && observation.quantityBaseInt !== current.initial_quantity_base_int
+      || observation.supplierLotCode !== undefined && observation.supplierLotCode !== current.supplier_lot_code
+      || observation.planVersion !== undefined && observation.planVersion !== plan?.plan_version)) {
+      throw new PrintingError('PRINT_OBSERVATION_CONFLICT', 'Kabul edilmiş paketin kayıtlı adet/lot/plan bilgisi kullanılmalı.', 409);
+    }
     if (plan) {
       const product = JSON.parse(plan.product_snapshot_json);
+      const sourceItem = this.db.prepare('SELECT source_json FROM procurement_import_records WHERE import_id=? AND record_id=?').pluck().get(plan.import_id, plan.source_item_ref) as string | undefined;
+      const supplierCode = sourceItem ? JSON.parse(sourceItem).source_supplier_code || product.supplier_code : product.supplier_code;
       Object.assign(current, { sku: product.sku, title: product.title, name_tr: product.name_tr, name_en: product.name_en,
-        material: product.material, size: product.size, product_type: product.product_type, unit_weight_grams: product.mass_grams });
+        supplier_code: supplierCode, form_code: product.profile_type, material: product.material, size: product.size, product_type: product.product_type, unit_weight_grams: product.mass_grams });
     }
     if (current) return {
       subjectId: current.id, subjectCode: current.package_code,
-      payload: { Package_code: current.package_code, SKU: current.sku, Urun_adi: current.name_tr || current.name_en || current.title || current.sku,
+      payload: { Satin_alma_no: this.db.prepare('SELECT purchase_number FROM procurement_workflows WHERE purchase_order_id=?').pluck().get(current.purchase_order_id) || '', Package_code: current.package_code, SKU: current.sku, Urun_adi: current.name_tr || current.name_en || current.title || current.sku,
         ...(plan ? { Plan_version: plan.plan_version, Kaynak_koli: `${plan.source_group_ref} / ${plan.source_carton_id}`, Tur: current.product_type,
-          Satin_alma_no: this.db.prepare('SELECT purchase_number FROM procurement_workflows WHERE purchase_order_id=?').pluck().get(current.purchase_order_id),
-          Label_version: canonicalPayloadHash({ packageId: current.id, actual: current.initial_quantity_base_int, planned: current.target_quantity_base_int, plan: plan.plan_version }) } : {}),
-        Urun_kodu: "", Supplier_no: "", Malzeme: current.material || "", Tip: current.form_code || current.product_series || "",
+          Label_version: canonicalPayloadHash({ packageId: current.id, actual: current.initial_quantity_base_int, lot: current.supplier_lot_code, planned: current.target_quantity_base_int, plan: plan.plan_version }) } : {}),
+        Urun_kodu: current.supplier_code || "", Supplier_no: current.supplier_code || "", Malzeme: current.material || "", Tip: current.form_code || current.product_series || "",
         Olcu: current.size || "", Parti_Lot: current.supplier_lot_code, Paket_ici_adet: String(current.initial_quantity_base_int),
         Paket_no: "1 / 1", Toplam_paket: "1", Stok_sayisi: String(current.initial_quantity_base_int),
         Urun_agirligi: current.unit_weight_grams ? `${current.unit_weight_grams} g` : "", Kutu_agirligi: current.weight_grams ? `${current.weight_grams} g` : "" },
@@ -93,9 +109,7 @@ export class PrintingService {
 
   queueTemplateJob(input: { purpose: "GOODS_RECEIPT_PACKAGE" | "LOCATION"; subjectId: string; subjectCode: string; payload: Record<string, unknown>;
     template: TemplateSnapshot; operationId: string; actorId: string; printerName?: string | null; originalJobId?: string | null }) {
-    const planned = input.purpose === 'GOODS_RECEIPT_PACKAGE' && Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='procurement_package_plan'").get())
-      && Boolean(this.db.prepare('SELECT 1 FROM procurement_package_plan WHERE id=?').get(input.subjectId));
-    this.validateTemplate(input.template, input.purpose, planned);
+    this.validateTemplate(input.template, input.purpose);
     return this.insertJob({ ...input, subjectType: input.purpose === "LOCATION" ? "warehouse_location" : "warehouse_package" });
   }
 

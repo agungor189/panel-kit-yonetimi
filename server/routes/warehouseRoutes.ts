@@ -1183,16 +1183,20 @@ export function createWarehouseRouter({
     catch (error) { return handleServiceError(res, error); }
   });
   router.get("/admin/packages/:id/print-preview", authenticate("read:products"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:print_labels", "warehouse:receive"]), (req, res) => {
-    try { res.json({ success: true, data: { purpose: "GOODS_RECEIPT_PACKAGE", ...printingService.packageSnapshot(req.params.id) } }); }
+    try { res.json({ success: true, data: { purpose: "GOODS_RECEIPT_PACKAGE", ...printingService.packageSnapshot(req.params.id, req.query.planVersion ? {
+      planVersion: String(req.query.planVersion), supplierLotCode: String(req.query.supplierLotCode || ''),
+      ...(req.query.quantityBaseInt !== undefined ? { quantityBaseInt: Number(req.query.quantityBaseInt) } : {}),
+    } : undefined) } }); }
     catch (error) { return handleServiceError(res, error); }
   });
   router.post("/admin/packages/:id/print", authenticate("write:warehouse_status"), requireWarehouseUser, requireAnyWarehousePermission(["warehouse:print_labels", "warehouse:receive"]), (req, res) => {
     try {
       const template = req.body?.template_snapshot as TemplateSnapshot;
-      const snapshot = printingService.packageSnapshot(req.params.id);
-      const payload = { packageId: snapshot.subjectId, templateId: template?.id ?? null, templateVersion: template?.version ?? null,
+      const observation = req.body?.observation;
+      const payload = { packageId: req.params.id, observation: observation ?? null, templateId: template?.id ?? null, templateVersion: template?.version ?? null,
         templateContentHash: template?.contentHash ?? null, printerName: req.body?.printer_name ?? null };
       const outcome = commandExecutor.execute(commandRequest(req, res, "printing.goods-receipt-package.queue.v1", "warehouse:print_labels", payload), (context) => {
+        const snapshot = printingService.packageSnapshot(req.params.id, observation);
         const data = printingService.queueTemplateJob({ purpose: "GOODS_RECEIPT_PACKAGE", ...snapshot, template,
           operationId: operationIdFromRequest(req), actorId: actor(res).id, printerName: req.body?.printer_name });
         if (!data.logical_replay) context.addOutbox({ topic: "printing", eventType: "printing.job.queued.v1", aggregateType: "print_job", aggregateId: data.id, payload: { job_id: data.id, purpose: data.purpose } });

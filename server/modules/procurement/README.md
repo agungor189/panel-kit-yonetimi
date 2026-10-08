@@ -14,8 +14,10 @@ snapshots, purchase payments, and their integer cash postings.
 - Purchase lines preserve catalog version, original quote basis/quantity, native
   integer amounts, VAT basis/rate, and exact FX numerator/denominator/source/time.
 - Each freight, customs, cutting/labor, or other acquisition component has its own
-  source currency and immutable FX snapshot. Components are not added to the goods
-  supplier payable; that payable contains merchandise from the goods invoice only.
+  source currency and immutable FX snapshot. New manual components require an explicit `SUPPLIER` or `THIRD_PARTY` counterparty.
+  Supplier surcharges use the invoice currency and extend supplier payable once;
+  third-party costs never extend it. Both use the same existing LC allocation engine.
+  Neither cost entry records payment. Historical counterparty metadata stays unknown.
 - Every purchase explicitly snapshots either
   `VAT_EXCLUDED_FROM_INVENTORY_COST` or `VAT_INCLUDED_IN_INVENTORY_COST`.
   Net, VAT, and gross remain separate in both cases; the selected basis alone enters
@@ -108,7 +110,40 @@ previously placed legacy packages plus unreceived versioned plans. Summaries use
 remaining quantities, excluding empty/cancelled/missing packages; historical rows are
 retained. Finalized lines do not remain in pending plans, including shortage cases.
 
-Imported packages require an L-owned 100×100 mm template version with a single
-`{Package_code}` Code128 barcode. Existing legacy 100×150 `{SKU}` templates remain
-valid for legacy packages. This change does not author or publish an L template;
-until a compatible template is supplied by L, new-plan printing fails closed.
+New package print jobs require an L-owned **100×150 mm** immutable template with
+one `{Package_code}` Code128 barcode. Warehouse requests L's `package_identity`
+contract, backed by `dsdst-package-identity-100x150-v1`; renderer previews and P print
+jobs use the same contract. Historical print jobs/reprints keep their old snapshots,
+and location templates remain 100×50. Approved `RECEIPT_PENDING` plan packages can
+print before physical receipt: explicit lot and plan version are required; a count
+observation overrides the planned quantity for that label only. Changed quantity/lot
+produces a new immutable label payload version with the same package identity.
+Printing never accepts goods or creates stock/packages. Completed shortage packages
+cannot masquerade as pending stock. No production migration or printing is performed.
+
+## CSV source totals and manual expenses
+
+Synthetic example: `public/examples/procurement-import-v1.csv` (not an actual invoice).
+The v1 columns and PRODUCT/TÜR/BOM/LINE/PACKAGE_GROUP/PACKAGE_ITEM semantics remain.
+Only LINE merchandise prices/amounts enter the draft. EXPENSE rows remain immutable
+source evidence with no canonical expense ID, no expense-policy approval and no form
+prefill. Preview states “Giderler aktarılmadı, manuel girilecek”. Every expense,
+including supplier invoice surcharges, is entered manually in Satın Alma with its
+counterparty, source amount/currency and explicit VAT policy; LC allocation is then
+approved separately. Source `invoice_total_usd` is never replaced with merchandise.
+Source reconciliation still checks merchandise + source invoice expenses against
+that original total; the draft payable starts with merchandise only. Example:
+200.00 USD merchandise, 19.51 USD source expense, 219.51 USD original total. Import
+creates no expense; manually entering 19.51 USD as SUPPLIER extends payable to 219.51.
+
+Migration v99 adds nullable counterparty metadata to existing cost details. It does
+not infer historical counterparties or rewrite source invoice money or payments.
+Supplier payable is the immutable original amount plus explicit supplier surcharges;
+the existing payment command enforces that amount. Existing LC component IDs ensure
+one allocation per component, independently of counterparty.
+
+New goods receipt always sends `damagedQuantityBaseInt: 0`. P rejects positive damage
+or a DAMAGED package instead of converting it to accepted stock. Actual counts,
+shortage/excess approvals and mixed-carton child weighing remain. Return quarantine
+is a separate flow and is unchanged. Assembly pricing references hash actual BOM
+quantities, component FINAL sources and formula version, never catalog display versions.

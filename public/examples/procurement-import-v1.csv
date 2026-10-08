@@ -1,0 +1,9 @@
+﻿schema_version,record_type,record_id,invoice_number,invoice_date,supplier_name,currency,meta_json,parent_ref,sku,product_type,uom,name_tr,supplier_code,product_ref,quantity,unit_price,amount,pricing_basis,name_en,package_count,gross_weight_kg,net_weight_kg,purchase_line_ref,units_per_package,source_supplier_code
+dsdst.procurement.import.v1,PURCHASE,purchase-example,EXAMPLE-NOT-REAL,2026-10-01,Örnek Tedarikçi,USD,"{""goods_amount_usd"": ""200.00"", ""invoice_expenses_usd"": ""19.51"", ""invoice_total_usd"": ""219.51"", ""expected_cartons"": 4}",,,,,,,,,,,,,,,,,,
+dsdst.procurement.import.v1,PRODUCT,product-example,,,,,,purchase-example,EXAMPLE-PART,component,piece,Örnek Parça,EX-SUP-1,,,,,,,,,,,,
+dsdst.procurement.import.v1,LINE,line-example,,,,USD,,purchase-example,EXAMPLE-PART,,piece,,,product-example,100,2.00,200.00,BILLED,,,,,,,
+dsdst.procurement.import.v1,EXPENSE,expense-source-only,,,,USD,,purchase-example,,,,,,,,,19.51,,Invoice surcharge (source only; enter manually),,,,,,
+dsdst.procurement.import.v1,PACKAGE_GROUP,group-30,,,,,"{""mixed"":false}",purchase-example,,,,,,,,,,,,3,6,5,,,
+dsdst.procurement.import.v1,PACKAGE_GROUP,group-10,,,,,"{""mixed"":false}",purchase-example,,,,,,,,,,,,1,1,0.5,,,
+dsdst.procurement.import.v1,PACKAGE_ITEM,item-30,,,,,,group-30,EXAMPLE-PART,,piece,,,product-example,90,,,,,,,,line-example,30,EX-SUP-1
+dsdst.procurement.import.v1,PACKAGE_ITEM,item-10,,,,,,group-10,EXAMPLE-PART,,piece,,,product-example,10,,,,,,,,line-example,10,EX-SUP-1

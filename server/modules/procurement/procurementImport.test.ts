@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { parseProcurementImport, expandSourcePackages } from './procurementImport.js';
@@ -136,9 +137,12 @@ test('same-SKU prices use weighted FINAL sources; BOM uses component FINAL only 
   const bomCost = finalLandedCostSource(db, assembly.id)!;
   assert.equal(bomCost.numerator / bomCost.denominator, 12000);
   assert.equal(productPackages(db, assembly.id).bomTracked, true); assert.equal(productPackages(db, assembly.id).physicalCount, 0);
+  catalog.updateProduct(assembly.id, catalog.getProduct(assembly.id)!.catalog_version, { sku: 'ASSEMBLY', title: 'Renamed assembly', catalog_type: 'product', base_uom_code: 'piece', product_type: 'assembly' });
+  assert.equal(finalLandedCostSource(db, assembly.id)!.reference, bomCost.reference);
+  new ProductPricingService(db).applyMany({ approvals: [{ productId: assembly.id, approvedSalePrice: 120, expectedLandedCostSnapshotId: bomCost.reference, expectedLandedCostNumerator: bomCost.numerator, expectedLandedCostDenominator: bomCost.denominator, expectedPriceLocked: false, expectedSalePrice: 0 }], settings: { bufferPercentage: 0, profitPercentage: 0 }, reason: 'same-record rename and price', operationId: 'rename-price' });
   catalog.replaceBom(assembly.id, catalog.readBom(assembly.id).version, [{ componentId: part.id, quantity: 3 }]);
   assert.notEqual(finalLandedCostSource(db, assembly.id)!.reference, bomCost.reference);
-  assert.throws(() => new ProductPricingService(db).applyMany({ approvals: [{ productId: assembly.id, approvedSalePrice: 120, expectedLandedCostSnapshotId: bomCost.reference, expectedLandedCostNumerator: bomCost.numerator, expectedLandedCostDenominator: bomCost.denominator, expectedPriceLocked: false, expectedSalePrice: 0 }], settings: { bufferPercentage: 0, profitPercentage: 0 }, reason: 'fixture', operationId: 'stale' }), /changed after preview/);
+  assert.throws(() => new ProductPricingService(db).applyMany({ approvals: [{ productId: assembly.id, approvedSalePrice: 120, expectedLandedCostSnapshotId: bomCost.reference, expectedLandedCostNumerator: bomCost.numerator, expectedLandedCostDenominator: bomCost.denominator, expectedPriceLocked: false, expectedSalePrice: 120 }], settings: { bufferPercentage: 0, profitPercentage: 0 }, reason: 'fixture', operationId: 'stale' }), /changed after preview/);
   db.close();
 });
 
@@ -166,7 +170,7 @@ test('mixed carton creates two singly counted children, preserves source weight 
   assert.equal(productPackages(db, intent.productId).physicalCount, 1);
   const printing = new PrintingService(db), snapshot = printing.packageSnapshot(p.id);
   db.prepare("INSERT INTO users(id,username,password_hash,role,is_active) VALUES ('printer','printer','synthetic','admin',1)").run();
-  const template = { id: 'template-v2', name: 'Package', purpose: 'goods_receipt' as const, width: 100, height: 100, version: 2, contentHash: 'a'.repeat(64), elements: [{ type: 'barcode', value: '{Package_code}' }] };
+  const template = { id: 'template-v2', name: 'Package', purpose: 'goods_receipt' as const, width: 100, height: 150, version: 2, contentHash: 'a'.repeat(64), elements: [{ type: 'barcode', value: '{Package_code}' }] };
   const first = printing.queueTemplateJob({ purpose: 'GOODS_RECEIPT_PACKAGE', ...snapshot, template, operationId: 'print-one', actorId: 'printer' });
   assert.equal(printing.queueTemplateJob({ purpose: 'GOODS_RECEIPT_PACKAGE', ...snapshot, template, operationId: 'print-two', actorId: 'printer' }).id, first.id);
   assert.throws(() => printing.queueTemplateJob({ purpose: 'GOODS_RECEIPT_PACKAGE', ...snapshot, template: { ...template, elements: [{ type: 'barcode', value: '{SKU}' }] }, operationId: 'wrong-barcode', actorId: 'printer' }), /Package_code/);
@@ -185,4 +189,80 @@ test('clearing review codes does not remove derived-quantity review; new suggest
   catalog.createProduct({ sku: 'a', title: 'Already registered', catalog_type: 'product', base_uom_code: 'piece' });
   assert.throws(() => importer.preview(input), /zaten kullanılıyor|çelişiyor|çakışıyor/);
   db.close();
+});
+
+
+test('CSV expenses remain source evidence only, manual supplier and third-party costs affect payable and LC once', () => {
+  const { db, request, importer, execute, procurement } = setup();
+  const data: any[] = rows();
+  data[0].meta_json = JSON.stringify({ goods_amount_usd: 200, invoice_expenses_usd: 19.51, invoice_total_usd: 219.51 });
+  data.push({ schema_version: 'dsdst.procurement.import.v1', record_type: 'EXPENSE', record_id: 'fee', parent_ref: 'p', name_en: 'Source surcharge', amount: '19.51', currency: 'USD', review_codes: 'EXPENSE_POLICY_CONFIRM' });
+  const input = request(data);
+  assert.ok(!importer.preview(input).requirements.some(r => r.key.includes('EXPENSE_POLICY')));
+  const purchase: any = execute('source-only', input).result.body;
+  assert.equal(purchase.totalGrossMinor, 20000);
+  assert.equal(purchase.acquisitionCosts.length, 0);
+  const source: any = db.prepare("SELECT source_json,canonical_id FROM procurement_import_records WHERE record_id='fee'").get();
+  assert.equal(source.canonical_id, null);
+  assert.equal(JSON.parse(source.source_json).amount, '19.51');
+  const cost = { category: 'FREIGHT' as const, amountMinor: 1951, currency: 'USD', vatMode: 'EXCLUDED' as const, vatRateBps: 0 };
+  assert.throws(() => procurement.addAcquisitionCost(purchase.id, cost), /counterparty|muhatap/i);
+  const supplier = procurement.addAcquisitionCost(purchase.id, { ...cost, counterparty: 'SUPPLIER' } as any)!;
+  assert.equal(supplier.totalGrossMinor, 21951);
+  assert.equal(supplier.paidMinor, 0);
+  const thirdParty = procurement.addAcquisitionCost(purchase.id, { ...cost, amountMinor: 100, currency: 'TRY', counterparty: 'THIRD_PARTY' } as any)!;
+  assert.equal(thirdParty.totalGrossMinor, 21951);
+  assert.equal(thirdParty.outstandingMinor, 21951);
+  assert.equal(thirdParty.paymentStatus, 'UNPAID');
+  assert.equal(db.prepare('SELECT COUNT(*) FROM cash_transactions').pluck().get(), 0);
+  assert.throws(() => procurement.addAcquisitionCost(purchase.id, { ...cost, currency: 'TRY', counterparty: 'SUPPLIER' }), /para biriminde/);
+  assert.equal(procurement.getPurchase(purchase.id).acquisitionCosts.length, 2);
+  db.prepare("INSERT INTO cash_accounts(id,name,currency,opening_balance) VALUES ('source-usd','Fixture','USD',300)").run();
+  const payment = { cashAccountId: 'source-usd', currency: 'USD', paidAt: '2026-01-02T00:00:00Z' };
+  assert.throws(() => procurement.recordPayment(purchase.id, { ...payment, amountMinor: 22051 }), /outstanding/);
+  const paid = procurement.recordPayment(purchase.id, { ...payment, amountMinor: 21951 });
+  assert.equal(paid.paymentStatus, 'PAID'); assert.equal(paid.outstandingMinor, 0);
+  assert.equal(db.prepare('SELECT total_gross_minor FROM purchase_orders WHERE id=?').pluck().get(purchase.id), 20000);
+  const final = procurement.finalizeAcquisitionCosts(purchase.id, { allocations: thirdParty.acquisitionCosts.map((c: any) => ({ componentId: c.id, mode: 'ACCEPT_SUGGESTION' as const })) });
+  assert.equal(final.lots[0].landedCostTryMinor, 800000 + 78040 + 100);
+  assert.equal(JSON.parse((db.prepare("SELECT source_json FROM procurement_import_records WHERE record_id='p'").get() as any).source_json).meta.invoice_total_usd, 219.51);
+  db.close();
+});
+
+test('approved plan prints before receipt, corrected label version keeps identity and creates no stock', () => {
+  const { db, request, execute, procurement } = setup();
+  const data: any[] = rows(); data[1].supplier_code = 'SUP-FIXTURE';
+  const purchase: any = execute('plan-label', request(data)).result.body;
+  const printing = new PrintingService(db);
+  const plan = procurement.getPackagePlan(purchase.lines[0].id)!;
+  const p = plan.packages[0];
+  const options = { planVersion: plan.version, supplierLotCode: 'LOT-PRE', quantityBaseInt: p.quantityBaseInt };
+  assert.throws(() => printing.packageSnapshot(p.id, options), /approved|onay/i);
+  procurement.finalizeAcquisitionCosts(purchase.id, { allocations: [] }); procurement.approveForReceipt(purchase.id, 'tester');
+  const snapshot = printing.packageSnapshot(p.id, options);
+  assert.equal(snapshot.payload.Parti_Lot, 'LOT-PRE');
+  assert.equal(snapshot.payload.Supplier_no, 'SUP-FIXTURE');
+  assert.equal(snapshot.payload.Package_code, p.code);
+  const corrected = printing.packageSnapshot(p.id, { ...options, quantityBaseInt: 29 });
+  assert.equal(corrected.subjectId, snapshot.subjectId);
+  assert.notEqual(corrected.payload.Label_version, snapshot.payload.Label_version);
+  assert.equal(corrected.payload.Paket_ici_adet, '29');
+  db.prepare("INSERT INTO users(id,username,password_hash,role,is_active) VALUES ('printer','printer','synthetic','admin',1)").run();
+  const template = { id: 'package-100x150', name: 'Package', purpose: 'goods_receipt' as const, width: 100, height: 150, version: 1, contentHash: 'a'.repeat(64), elements: [{ type: 'barcode', value: '{Package_code}' }] };
+  const first = printing.queueTemplateJob({ purpose: 'GOODS_RECEIPT_PACKAGE', ...snapshot, template, operationId: 'planned-print', actorId: 'printer' });
+  const next = printing.queueTemplateJob({ purpose: 'GOODS_RECEIPT_PACKAGE', ...corrected, template, operationId: 'corrected-print', actorId: 'printer' });
+  assert.notEqual(next.id, first.id);
+  printing.reprint({ originalJobId: next.id, reason: 'LOST', operationId: 'reprint', actorId: 'printer' });
+  for (const table of ['warehouse_execution_packages','inventory_ledger_events','inventory_lots']) assert.equal(db.prepare(`SELECT COUNT(*) FROM ${table}`).pluck().get(), 0);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM procurement_package_plan').pluck().get(), 4);
+  db.close();
+});
+
+
+test('published synthetic CSV keeps merchandise, source invoice total and ignored expense distinct', () => {
+  const parsed = parseProcurementImport(readFileSync(new URL('../../../public/examples/procurement-import-v1.csv', import.meta.url), 'utf8'));
+  assert.equal(parsed.summary.goodsAmountMinor, 20000);
+  assert.equal(parsed.summary.sourceInvoiceTotalMinor, 21951);
+  assert.equal(parsed.summary.expenseAmountMinor, 1951);
+  assert.deepEqual(expandSourcePackages(parsed).map(p => p.quantity), ['30','30','30','10']);
 });

@@ -74,7 +74,7 @@ test("Panel workflow requires FINAL landed cost before exposing a Warehouse rece
   procurement.transitionWorkflow("po-final-gate", "IN_TRANSIT");
   assert.throws(() => procurement.approveForReceipt("po-final-gate", "buyer"), (error: any) => error.code === "FINAL_LANDED_COST_REQUIRED");
   const withFreight = procurement.addAcquisitionCost("po-final-gate", {
-    id: "freight-final", category: "FREIGHT", expenseType: "FREIGHT", amountMinor: 400, currency: "USD",
+    id: "freight-final", category: "FREIGHT", counterparty: "THIRD_PARTY", expenseType: "FREIGHT", amountMinor: 400, currency: "USD",
     vatMode: "EXCLUDED", vatRateBps: 0, occurredOn: "2026-09-20", description: "Ocean freight",
   });
   assert.equal(withFreight.workflowState, "COST_PENDING");
@@ -119,7 +119,7 @@ test("purchase value allocation suggestion is deterministic and manual override 
   const created = procurement.createPurchase(purchase("po-allocation", [
     line({ id: "line-a", quantity: "1", supplierUnitPriceMinor: 100 }),
     line({ id: "line-b", productId: "part-b", quantity: "1", supplierUnitPriceMinor: 100 }),
-  ], [{ id: "freight", category: "FREIGHT", amountMinor: 101, currency: "USD", vatMode: "EXCLUDED", vatRateBps: 0, notes: "shared" }]));
+  ], [{ id: "freight", category: "FREIGHT", counterparty: "THIRD_PARTY", amountMinor: 101, currency: "USD", vatMode: "EXCLUDED", vatRateBps: 0, notes: "shared" }]));
   assert.deepEqual(created.allocationSuggestions.map((entry) => ({ lineId: entry.lineId, amount: entry.amountTryMinor, adjustment: entry.roundingAdjustmentMinor })), [
     { lineId: "line-a", amount: 51, adjustment: 1 },
     { lineId: "line-b", amount: 50, adjustment: 0 },
@@ -241,8 +241,8 @@ test("third-party acquisition components retain independent currencies and never
   const { db, procurement, fx } = setup();
   fx.recordCurrentUsdTry({ rate: "40", source: "MANUAL", changedAt: "2026-09-20T09:00:00.000Z", actorId: "finance-owner" });
   const created = procurement.createPurchase(purchase("po-mixed-cost", [line({ quantity: "1", supplierUnitPriceMinor: 1_000 })], [
-    { id: "freight-usd", category: "FREIGHT", amountMinor: 100, currency: "USD", vatMode: "EXCLUDED", vatRateBps: 0 },
-    { id: "customs-try", category: "CUSTOMS", amountMinor: 500, currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 0 },
+    { id: "freight-usd", category: "FREIGHT", counterparty: "THIRD_PARTY", amountMinor: 100, currency: "USD", vatMode: "EXCLUDED", vatRateBps: 0 },
+    { id: "customs-try", category: "CUSTOMS", counterparty: "THIRD_PARTY", amountMinor: 500, currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 0 },
   ]));
   assert.equal(created.totalGrossMinor, 1_200);
   assert.equal(created.outstandingMinor, 1_200);
@@ -259,14 +259,14 @@ test("purchase VAT policy is explicit, immutable, and controls whether VAT enter
   delete missingPolicy.acquisitionCostVatPolicy;
   assert.throws(() => procurement.createPurchase(missingPolicy as PurchaseInput), /explicitly include or exclude VAT/i);
   const excluded = purchase("po-vat-policy-ex", [line({ quantity: "1", supplierUnitPriceMinor: 10_000, currency: "TRY" })], [
-    { id: "freight-ex", category: "FREIGHT", amountMinor: 1_000, currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 2_000 },
+    { id: "freight-ex", category: "FREIGHT", counterparty: "THIRD_PARTY", amountMinor: 1_000, currency: "TRY", vatMode: "EXCLUDED", vatRateBps: 2_000 },
   ]);
   excluded.acquisitionCostVatPolicy = "VAT_EXCLUDED_FROM_INVENTORY_COST";
   procurement.createPurchase(excluded);
   const excludedLot = procurement.finalizeAcquisitionCosts("po-vat-policy-ex", { allocations: [{ componentId: "freight-ex", mode: "ACCEPT_SUGGESTION" }] });
 
   const included = purchase("po-vat-policy-in", [line({ id: "line-in", quantity: "1", supplierUnitPriceMinor: 12_000, currency: "TRY", vatMode: "INCLUDED" })], [
-    { id: "freight-in", category: "FREIGHT", amountMinor: 1_200, currency: "TRY", vatMode: "INCLUDED", vatRateBps: 2_000 },
+    { id: "freight-in", category: "FREIGHT", counterparty: "THIRD_PARTY", amountMinor: 1_200, currency: "TRY", vatMode: "INCLUDED", vatRateBps: 2_000 },
   ]);
   included.acquisitionCostVatPolicy = "VAT_INCLUDED_IN_INVENTORY_COST";
   procurement.createPurchase(included);
