@@ -51,12 +51,15 @@ function setup() {
   new ExchangeRateService(db).recordCurrentUsdTry({rate:'40',source:'MANUAL',changedAt:'2026-01-01T00:00:00.000Z',actorId:'fixture'});
   const importer = new ProcurementImportService(db);
   const request = (rows: Array<Record<string, unknown>>): ImportRequest => {
-    const input: ImportRequest = {csv:csv(rows),supplierId:'supplier',policy:{vatMode:'EXCLUDED',vatRateBps:0,acquisitionCostVatPolicy:'VAT_EXCLUDED_FROM_INVENTORY_COST',includedCost:'NO_SEPARATE_CHARGE',stockCheck:'NO_PRIOR_RECEIPT',stockEvidence:'Synthetic empty DB'}};
+    const input: ImportRequest = {csv:csv(rows),supplierId:'supplier'};
     input.expectedPreviewHash = importer.preview(input).previewHash;
     return input;
   };
   const execute = (key: string, input: ImportRequest) => new CommandExecutor(db).execute<any>({operationId:key,commandType:'procurement.import.apply.v1',payload:input,
-    actor:{human:{id:'fixture'}},authorization:{decision:'ALLOW',capability:'procurement:write+catalog:write'}}, () => ({statusCode:201,body:importer.apply(input,'fixture') as any}));
+    actor:{human:{id:'fixture'}},authorization:{decision:'ALLOW',capability:'procurement:write+catalog:write'}}, () => {
+      const draft = importer.apply(input,'fixture');
+      return {statusCode:201,body:draft.costDecisionPending ? importer.completeDraft(draft.id,{vatMode:'EXCLUDED',vatRateBps:0,acquisitionCostVatPolicy:'VAT_EXCLUDED_FROM_INVENTORY_COST',includedCost:'NO_SEPARATE_CHARGE',stockCheck:'NO_PRIOR_RECEIPT',stockEvidence:'Synthetic empty DB'},'fixture') as any : draft};
+    });
   return {db,importer,request,execute};
 }
 

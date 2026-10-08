@@ -66,6 +66,16 @@ export function createProcurementV1Router({ db, authorizeProcurement, authorizeC
     try {
       const outcome = execute(commands, req, 'procurement:write+catalog:write', 'procurement.import.apply.v1', req.body, context => {
         const data = importer.apply(req.body, req.user!.id);
+        context.addOutbox({ topic: 'procurement', eventType: 'procurement.import.drafted.v1', aggregateType: 'procurement_import_draft', aggregateId: data.id, payload: { draftId: data.id } });
+        return { statusCode: 201, body: { success: true, contract: 'dsdst.procurement.import.v1', data } };
+      });
+      return sendOutcome(res, outcome);
+    } catch (error) { return sendError(error, res); }
+  });
+  router.post('/imports/drafts/:id/complete', authorizeProcurement, (req, res) => {
+    try {
+      const outcome = execute(commands, req, 'procurement:write', 'procurement.import.complete.v1', { draftId: req.params.id, policy: req.body }, context => {
+        const data = importer.completeDraft(req.params.id, req.body, req.user!.id);
         context.addOutbox({ topic: 'procurement', eventType: 'procurement.import.created.v1', aggregateType: 'purchase_order', aggregateId: data.id, payload: { purchaseId: data.id } });
         return { statusCode: 201, body: { success: true, contract: 'dsdst.procurement.import.v1', data } };
       });
@@ -101,7 +111,7 @@ export function createProcurementV1Router({ db, authorizeProcurement, authorizeC
 
   router.get("/suppliers", authorizeProcurement, (_req, res) => res.json({ success: true, contract: "dsdst.procurement-suppliers.v1", data: procurement.listSuppliers() }));
 
-  router.get("/purchases", authorizeProcurement, (_req, res) => res.json({ success: true, contract: "dsdst.procurement-list.v1", data: procurement.listPurchases() }));
+  router.get("/purchases", authorizeProcurement, (_req, res) => res.json({ success: true, contract: "dsdst.procurement-list.v1", data: [...importer.listDrafts(), ...procurement.listPurchases()] }));
 
   router.post("/purchases/csv-preview", authorizeProcurement, (req, res) => {
     try { return res.json({ success: true, contract: "dsdst.procurement-csv-preview.v1", data: procurement.previewCsv(req.body?.rows) }); }
@@ -131,7 +141,7 @@ export function createProcurementV1Router({ db, authorizeProcurement, authorizeC
 
   router.get("/purchases/:id", authorizeProcurement, (req, res) => {
     try {
-      const data = procurement.getPurchase(req.params.id);
+      const data = procurement.getPurchase(req.params.id) || importer.getDraft(req.params.id);
       if (!data) return res.status(404).json({ success: false, error: { code: "PURCHASE_NOT_FOUND", message: "Purchase was not found." } });
       return res.json({ success: true, contract: "dsdst.procurement.v1", data });
     } catch (error) { return sendError(error, res); }

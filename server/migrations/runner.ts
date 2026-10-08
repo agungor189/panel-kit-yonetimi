@@ -1,4 +1,5 @@
 import { PRINT_REVISION_SCHEMA_V100 } from "../db/printRevisionSchema.js";
+import { PROCUREMENT_IMPORT_DRAFT_SCHEMA_V101 } from "../db/procurementImportDraftSchema.js";
 import { PROCUREMENT_COUNTERPARTY_SCHEMA_V99 } from "../db/procurementCounterpartySchema.js";
 import { PROCUREMENT_IMPORT_SCHEMA_V98 } from "../db/procurementImportSchema.js";
 import Database from "better-sqlite3";
@@ -3124,9 +3125,10 @@ const migrations: Migration[] = [
   { version: 98, name: "add_procurement_import_source_and_package_plan", up(db) { db.exec(PROCUREMENT_IMPORT_SCHEMA_V98); } },
   { version: 99, name: "add_purchase_cost_counterparty", up(db) { db.exec(PROCUREMENT_COUNTERPARTY_SCHEMA_V99); } },
   { version: 100, name: "add_package_print_revision_fence", up(db) { db.exec(PRINT_REVISION_SCHEMA_V100); } },
+  { version: 101, name: "add_incomplete_procurement_import_drafts", up(db) { db.exec(PROCUREMENT_IMPORT_DRAFT_SCHEMA_V101); } },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 100;
+export const CURRENT_SCHEMA_VERSION = 101;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),

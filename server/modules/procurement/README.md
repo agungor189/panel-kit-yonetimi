@@ -84,13 +84,20 @@ previewed version under the single import approval. Later purchases may referenc
 existing SKUs without repeating PRODUCT or BOM rows.
 
 `/imports/apply` requires procurement and catalog capabilities, an operation
-identity, the current preview hash, one explicit tax policy and prior-stock
-evidence. It recomputes the automatic plan inside the same transaction as the
-catalog and purchase writes. The existing flat CSV path remains.
+identity and the current preview hash. It recomputes the automatic plan inside
+the same transaction as catalog writes and an immutable, **INCOMPLETE** purchase
+intent. Import does not accept VAT, FX, acquisition-cost policy or prior-stock
+evidence. The existing flat CSV path remains.
 The source text hash and supplier/invoice identity deduplicate imports independently
-of the filename and operation key. Catalog commands, purchase draft, aliases,
-source references, immutable package plan and command result commit together.
-Import does not call the legacy MasterInfo importer or post stock/cash/prices.
+of the filename and operation key. The source CSV and resolved product/line IDs
+are retained in the draft; no financial purchase, package plan, inventory, cash,
+expense or price entry is created yet. The list/detail endpoints expose this
+draft with null monetary totals, never invented zero costs or an implicit FX rate.
+`/imports/drafts/:id/complete` takes the later explicit tax/cost decisions and
+prior-stock evidence. It uses the existing purchase service to snapshot native
+amounts and FX, then writes v98 source records and the versioned package plan
+atomically. A missing FX source leaves the draft incomplete. FINAL cost and
+Warehouse receipt approval remain separate steps.
 
 Migration v98 is forward-only and adds immutable import provenance and package-plan
 tables, supplier-scoped catalog aliases, pricing-history source JSON and the
@@ -99,6 +106,8 @@ Existing products and history remain unchanged. Tests use synthetic in-memory
 databases and the supported v48/v53 upgrade fixtures. No live migration is implied.
 Rollback must preserve these tables and use an application compatible with v98;
 after business use, dropping source records or replaying imports is not rollback.
+Migration v101 adds immutable incomplete import-draft and completion records only;
+it does not backfill, reprice or modify applied migrations.
 
 Receipt intents gain optional `packagePlan` with a version, backend package IDs,
 per-package quantities, immutable catalog snapshots and source-carton references.

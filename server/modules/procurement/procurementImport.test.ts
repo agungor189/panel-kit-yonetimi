@@ -5,7 +5,7 @@ import { parseProcurementImport, expandSourcePackages } from './procurementImpor
 import Database from 'better-sqlite3';
 import { initializeDatabase } from '../../db/initialize.js';
 import { CatalogService } from '../catalog/catalogService.js';
-import { ProcurementImportService, type ImportRequest } from './procurementImportService.js';
+import { ProcurementImportService, type ImportRequest, type ImportCostDecision } from './procurementImportService.js';
 import { ProcurementService } from './procurementService.js';
 import { ExchangeRateService } from '../finance/exchangeRates.js';
 import { CommandExecutor } from '../commands/commandFoundation.js';
@@ -53,27 +53,50 @@ const setup = () => {
   procurement.registerSupplier({ id: 'supplier', name: 'Fixture', defaultCurrency: 'USD' });
   new ExchangeRateService(db).recordCurrentUsdTry({ rate: '40', source: 'MANUAL', changedAt: '2026-01-01T00:00:00.000Z', actorId: 'tester' });
   const request = (data = rows()): ImportRequest => {
-    const input: ImportRequest = { csv: fixtureCsv(data), supplierId: 'supplier', policy: { vatMode: 'EXCLUDED', vatRateBps: 0, acquisitionCostVatPolicy: 'VAT_EXCLUDED_FROM_INVENTORY_COST', includedCost: 'NO_SEPARATE_CHARGE', stockCheck: 'NO_PRIOR_RECEIPT', stockEvidence: 'Synthetic empty database' } };
+    const input: ImportRequest = { csv: fixtureCsv(data), supplierId: 'supplier' };
     input.expectedPreviewHash = importer.preview(input).previewHash;
     return input;
   };
-  const execute = (key: string, input: ImportRequest) => new CommandExecutor(db).execute<any>({ operationId: key, commandType: 'procurement.import.apply.v1', payload: input, actor: { human: { id: 'tester' } }, authorization: { decision: 'ALLOW', capability: 'procurement:write+catalog:write' } }, () => ({ statusCode: 201, body: importer.apply(input, 'tester') as any }));
-  return { db, procurement, importer, catalog, request, execute };
+  const decision: ImportCostDecision = { vatMode: 'EXCLUDED', vatRateBps: 0, acquisitionCostVatPolicy: 'VAT_EXCLUDED_FROM_INVENTORY_COST', includedCost: 'NO_SEPARATE_CHARGE', stockCheck: 'NO_PRIOR_RECEIPT', stockEvidence: 'Synthetic empty database' };
+  const execute = (key: string, input: ImportRequest) => new CommandExecutor(db).execute<any>({ operationId: key, commandType: 'procurement.import.apply.v1', payload: input, actor: { human: { id: 'tester' } }, authorization: { decision: 'ALLOW', capability: 'procurement:write+catalog:write' } }, () => {
+    const draft = importer.apply(input, 'tester');
+    return { statusCode: 201, body: draft.costDecisionPending ? importer.completeDraft(draft.id, decision, 'tester') as any : draft };
+  });
+  return { db, procurement, importer, catalog, request, execute, decision };
 };
+
+test('CSV apply creates only catalog and incomplete purchase intent; financial purchase waits for explicit cost decision', () => {
+  const { db, importer, request, decision } = setup();
+  const input = request();
+  const draft = importer.apply(input, 'tester');
+  assert.equal(draft.status, 'INCOMPLETE');
+  assert.equal(draft.totalGrossMinor, null);
+  assert.equal(draft.lines.length, 1);
+  assert.equal(importer.apply(input, 'tester').id, draft.id);
+  for (const table of ['purchase_orders','purchase_order_lines','procurement_imports','procurement_package_plan','inventory_ledger_events','cash_transactions'])
+    assert.equal(db.prepare(`SELECT COUNT(*) FROM ${table}`).pluck().get(), 0, table);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM products').pluck().get(), 1);
+  assert.equal(importer.listDrafts().length, 1);
+  assert.throws(() => importer.completeDraft(draft.id, { ...decision, stockEvidence: '' }, 'tester'), /DECISION REQUIRED/);
+  assert.throws(() => importer.completeDraft(draft.id, { ...decision, includedCost: '' } as any, 'tester'), /DECISION REQUIRED/);
+  assert.throws(() => importer.apply({ ...input, policy: decision } as any, 'tester'), /Maliyet kararları CSV importunda alınmaz/);
+  const purchase = importer.completeDraft(draft.id, decision, 'tester');
+  assert.equal(purchase.lines.length, 1);
+  assert.equal(importer.completeDraft(draft.id, decision, 'tester').id, purchase.id);
+  assert.equal(importer.listDrafts().length, 0);
+  db.close();
+});
 
 test('preview is read-only; import is atomic, invoice/source/operation replay-safe and preserves four packages', () => {
   const { db, importer, request, execute } = setup();
   const input = request();
   assert.equal(db.prepare('SELECT COUNT(*) FROM products').pluck().get(), 0);
-  const incomplete = { ...input, policy: { ...input.policy!, stockEvidence: '' } };
-  incomplete.expectedPreviewHash = importer.preview(incomplete).previewHash;
-  assert.throws(() => execute('incomplete', incomplete), /DECISION REQUIRED/);
   assert.equal(db.prepare('SELECT COUNT(*) FROM purchase_orders').pluck().get(), 0);
   const first = execute('import-1', input);
   assert.equal(execute('import-1', input).replayed, true);
   assert.equal(execute('import-2', input).result.body.id, first.result.body.id);
   assert.throws(() => execute('import-1', { ...input, supplierId: 'other' }), /different canonical payload/);
-  assert.throws(() => importer.apply({ ...input, csv: input.csv.replace('SYNTHETIC', 'SYNTHETIC') + '\r\n' }, 'tester'), /farklı onaylarla/);
+  assert.throws(() => importer.apply({ ...input, csv: input.csv.replace('Fixture part', 'Fixture renamed') }, 'tester'), /farklı içerikle/);
   assert.equal(db.prepare('SELECT COUNT(*) FROM purchase_orders').pluck().get(), 1);
   assert.equal(db.prepare('SELECT COUNT(*) FROM procurement_package_plan').pluck().get(), 4);
   assert.equal(db.prepare('SELECT COUNT(*) FROM inventory_ledger_events').pluck().get(), 0);
@@ -82,14 +105,16 @@ test('preview is read-only; import is atomic, invoice/source/operation replay-sa
   db.close();
 });
 
-test('failure after catalog creation rolls back catalog, aliases, purchases, plans and command records', () => {
-  const { db, request, importer, execute } = setup();
-  const input = request(); input.policy!.expenseTypes = {};
-  // Currency has no approved FX source. The failure occurs inside purchase normalization after catalog materialization.
+test('missing FX leaves an incomplete draft and blocks financial purchase completion', () => {
+  const { db, request, importer, decision } = setup();
+  const input = request();
   input.csv = input.csv.replaceAll('USD', 'EUR');
   input.expectedPreviewHash = importer.preview(input).previewHash;
-  assert.throws(() => execute('fail', input));
-  for (const table of ['products','purchase_orders','procurement_imports','procurement_package_plan','catalog_supplier_aliases']) assert.equal(db.prepare(`SELECT COUNT(*) FROM ${table}`).pluck().get(), 0, table);
+  const draft = importer.apply(input, 'tester');
+  assert.equal(draft.status, 'INCOMPLETE');
+  assert.throws(() => importer.completeDraft(draft.id, decision, 'tester'));
+  for (const table of ['purchase_orders','procurement_imports','procurement_package_plan']) assert.equal(db.prepare(`SELECT COUNT(*) FROM ${table}`).pluck().get(), 0, table);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM products').pluck().get(), 1);
   db.close();
 });
 
