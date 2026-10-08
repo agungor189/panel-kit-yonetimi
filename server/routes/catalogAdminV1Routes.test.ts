@@ -95,3 +95,32 @@ test("catalog product edit cannot bypass FINAL Landed Cost pricing approval", as
   assert.equal((await response.json() as any).error.code, "PRICING_FORMULA_APPROVAL_REQUIRED");
   assert.equal(db.prepare("SELECT sale_price FROM products WHERE id=?").pluck().get(product.id), 0);
 });
+
+test("catalog channel edit preserves visibility but cannot bypass authoritative pricing", async () => {
+  db.prepare(`INSERT INTO product_platforms (id,product_id,platform_name,stock,price,is_listed)
+    VALUES ('platform-cap-30','cap-30','Website',0,125,0)`).run();
+  const bypass = await fetch(`${baseUrl}/api/catalog-admin/v1/products/${product.id}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json", "x-operation-id": "catalog-platform-price-bypass-cap-30" },
+    body: JSON.stringify({
+      expected_catalog_version: 2,
+      product: { ...product, title: "30 mm cap v2" },
+      operational: { platforms: [{ name: "Website", price: 999, is_listed: true }] },
+    }),
+  });
+  assert.equal(bypass.status, 409);
+  assert.equal((await bypass.json() as any).error.code, "PLATFORM_PRICE_PRICING_FLOW_REQUIRED");
+  assert.deepEqual(db.prepare("SELECT price,is_listed FROM product_platforms WHERE id='platform-cap-30'").get(), { price: 125, is_listed: 0 });
+
+  const visibility = await fetch(`${baseUrl}/api/catalog-admin/v1/products/${product.id}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json", "x-operation-id": "catalog-platform-visibility-cap-30" },
+    body: JSON.stringify({
+      expected_catalog_version: 2,
+      product: { ...product, title: "30 mm cap v2" },
+      operational: { platforms: [{ name: "Website", price: 125, is_listed: true }] },
+    }),
+  });
+  assert.equal(visibility.status, 200);
+  assert.deepEqual(db.prepare("SELECT price,is_listed FROM product_platforms WHERE id='platform-cap-30'").get(), { price: 125, is_listed: 1 });
+});

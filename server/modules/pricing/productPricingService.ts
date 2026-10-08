@@ -11,6 +11,16 @@ export type ProductPricingSettings = {
   roundingIncrement: 1 | 5 | 10;
 };
 
+export type ProductPricingApproval = {
+  productId: string;
+  approvedSalePrice: number;
+  expectedLandedCostSnapshotId: string;
+  expectedLandedCostNumerator: number;
+  expectedLandedCostDenominator: number;
+  expectedSalePrice: number;
+  expectedPriceLocked: boolean;
+};
+
 export class ProductPricingValidationError extends Error {
   constructor(public readonly code: string, message: string, public readonly statusCode = 400) {
     super(message);
@@ -56,21 +66,60 @@ export class ProductPricingService {
     return { productId, ...finalLandedPricingDecision(landedCostTry, settings.bufferPercentage, settings.profitPercentage, settings.fixedTry, settings.roundingIncrement), settings };
   }
 
-  applyMany(input: { productIds: string[]; settings: Partial<ProductPricingSettings>; actorId?: string | null; reason: string; operationId: string }) {
+  applyMany(input: { approvals: ProductPricingApproval[]; settings: Partial<ProductPricingSettings>; actorId?: string | null; reason: string; operationId: string }) {
     const settings = normalizeProductPricingSettings(input.settings);
-    const uniqueIds = [...new Set(input.productIds.map(String).filter(Boolean))];
+    if (!Array.isArray(input.approvals) || input.approvals.length === 0) {
+      throw new ProductPricingValidationError("PRICING_PREVIEW_REQUIRED", "An approved pricing preview is required.", 409);
+    }
+    const productIds = input.approvals.map((approval) => String(approval?.productId || "").trim());
+    if (productIds.some((id) => !id) || new Set(productIds).size !== productIds.length) {
+      throw new ProductPricingValidationError("PRICING_PREVIEW_INVALID", "Pricing preview products must be unique and valid.");
+    }
     const result = { updatedCount: 0, skippedLockedCount: 0, skippedMissingCount: 0, skippedMissingLandedCostCount: 0, skippedNonPositiveCount: 0, activatedCount: 0 };
     return this.db.transaction(() => {
-      for (const productId of uniqueIds) {
+      const validated = input.approvals.map((approval) => {
+        const productId = String(approval.productId);
+        const current = this.readProduct(productId);
+        if (!current) {
+          throw new ProductPricingValidationError("PRICING_PREVIEW_STALE", "A product from the approved preview no longer exists.", 409);
+        }
+        const expectedSnapshotId = String(approval.expectedLandedCostSnapshotId || "");
+        const expectedNumerator = Number(approval.expectedLandedCostNumerator);
+        const expectedDenominator = Number(approval.expectedLandedCostDenominator);
+        const expectedSalePrice = Number(approval.expectedSalePrice);
+        const expectedPriceLocked = Boolean(approval.expectedPriceLocked);
+        if (!expectedSnapshotId || !Number.isFinite(expectedNumerator) || !Number.isFinite(expectedDenominator)
+          || expectedDenominator <= 0 || !Number.isFinite(expectedSalePrice)) {
+          throw new ProductPricingValidationError("PRICING_PREVIEW_INVALID", "Pricing preview snapshot is incomplete.", 409);
+        }
+        const stale = expectedSnapshotId !== String(current.acquisition_cost_snapshot_id || "")
+          || expectedNumerator !== Number(current.cost_try_numerator)
+          || expectedDenominator !== Number(current.cost_try_denominator)
+          || expectedSalePrice !== Number(current.sale_price || 0)
+          || expectedPriceLocked !== (Number(current.price_locked) === 1);
+        if (stale) {
+          throw new ProductPricingValidationError(
+            "PRICING_PREVIEW_STALE",
+            "FINAL Landed Cost, price lock or current sale price changed after preview. Create a new preview.",
+            409,
+          );
+        }
         const preview = this.preview(productId, settings);
         if (!preview.willUpdate || preview.newSalePrice === null) {
-          if (preview.skipReason === "LOCKED") result.skippedLockedCount++;
-          else if (preview.skipReason === "MISSING_PRODUCT") result.skippedMissingCount++;
-          else if (preview.skipReason === "NON_POSITIVE_PRICE") result.skippedNonPositiveCount++;
-          else result.skippedMissingLandedCostCount++;
-          continue;
+          throw new ProductPricingValidationError("PRICING_PREVIEW_STALE", "The product is no longer eligible for the approved pricing preview.", 409);
         }
-        const current = this.readProduct(productId)!;
+        if (!Number.isFinite(Number(approval.approvedSalePrice)) || Number(approval.approvedSalePrice) !== preview.newSalePrice) {
+          throw new ProductPricingValidationError(
+            "PRICING_PREVIEW_MISMATCH",
+            "Approved sale price does not match the price recalculated from current FINAL Landed Cost.",
+            409,
+          );
+        }
+        return { approval, current, preview };
+      });
+
+      for (const { approval, current, preview } of validated) {
+        const productId = String(approval.productId);
         this.db.prepare(`INSERT INTO pricing_history (
           id,product_id,purchase_price_usd,purchase_cost,sale_price,buffer_percentage,profit_percentage,
           exchange_rate_used,price_locked,changed_by,change_reason,fixed_price_adjustment_try,price_rounding_increment
@@ -86,8 +135,7 @@ export class ProductPricingService {
           settings.fixedTry, settings.roundingIncrement, productId,
         );
         if (changed.changes !== 1) {
-          result.skippedLockedCount++;
-          continue;
+          throw new ProductPricingValidationError("PRICING_PREVIEW_STALE", "Price lock changed after preview. Create a new preview.", 409);
         }
         this.db.prepare("UPDATE product_platforms SET price=? WHERE product_id=?").run(preview.newSalePrice, productId);
         const activated = new CatalogService(this.db).activateProcurementProductIfReady(productId);
@@ -104,7 +152,7 @@ export class ProductPricingService {
   }
 
   private readProduct(productId: string) {
-    return this.db.prepare(`SELECT p.*,lc.cost_try_numerator,lc.cost_try_denominator,k.id AS published_kit_id
+    return this.db.prepare(`SELECT p.*,lc.acquisition_cost_snapshot_id,lc.cost_try_numerator,lc.cost_try_denominator,k.id AS published_kit_id
       FROM products p
       LEFT JOIN current_product_landed_costs lc ON lc.product_id=p.id
       LEFT JOIN published_kits k ON k.product_id=p.id

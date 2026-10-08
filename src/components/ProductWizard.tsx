@@ -20,9 +20,18 @@ interface ProductWizardProps {
   onClose: () => void;
 }
 
+type PricingPreviewState = {
+  salePrice: number;
+  landedCostSnapshotId: string;
+  landedCostNumerator: number;
+  landedCostDenominator: number;
+  currentSalePrice: number;
+  priceLocked: boolean;
+};
+
 export default function ProductWizard({ productId, settings, onClose }: ProductWizardProps) {
   const [loading, setLoading] = useState(false);
-  const [pricingPreview, setPricingPreview] = useState<number | null>(null);
+  const [pricingPreview, setPricingPreview] = useState<PricingPreviewState | null>(null);
   const [pricingApproved, setPricingApproved] = useState(false);
   const { activeRate } = useCurrency();
   const catalogMutation = useRef(createRetryOperation('catalog-product-wizard')).current;
@@ -135,13 +144,26 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
       Number(formData.fixed_price_adjustment_try) || 0,
       Number(formData.price_rounding_increment) as 1 | 5 | 10,
     );
-    setPricingPreview(preview && preview > 0 ? preview : null);
+    const landedCostSnapshotId = String(formData.landed_cost_snapshot_id || '');
+    const landedCostNumerator = Number(formData.landed_cost_numerator);
+    const landedCostDenominator = Number(formData.landed_cost_denominator);
+    setPricingPreview(preview && preview > 0 && landedCostSnapshotId
+      && Number.isFinite(landedCostNumerator) && Number.isFinite(landedCostDenominator) && landedCostDenominator > 0
+      ? {
+          salePrice: preview,
+          landedCostSnapshotId,
+          landedCostNumerator,
+          landedCostDenominator,
+          currentSalePrice: Number(formData.sale_price || 0),
+          priceLocked: Boolean(formData.price_locked),
+        }
+      : null);
     setPricingApproved(false);
   };
 
   const approveSalePrice = () => {
     if (pricingPreview === null) return;
-    setFormData((prev: any) => ({ ...prev, sale_price: pricingPreview }));
+    setFormData((prev: any) => ({ ...prev, sale_price: pricingPreview.salePrice }));
     setPricingApproved(true);
   };
 
@@ -237,6 +259,13 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
         profit_percentage: Number(formData.profit_percentage) || 0,
         fixed_price_adjustment_try: Number(formData.fixed_price_adjustment_try) || 0,
         price_rounding_increment: Number(formData.price_rounding_increment) || 1,
+        pricing_preview: pricingPreview ? {
+          landedCostSnapshotId: pricingPreview.landedCostSnapshotId,
+          landedCostNumerator: pricingPreview.landedCostNumerator,
+          landedCostDenominator: pricingPreview.landedCostDenominator,
+          salePrice: pricingPreview.currentSalePrice,
+          priceLocked: pricingPreview.priceLocked,
+        } : undefined,
       } : {}),
     };
 
@@ -680,7 +709,7 @@ export default function ProductWizard({ productId, settings, onClose }: ProductW
                 {formData.landed_cost_try == null && <span className="text-sm font-bold text-amber-700">FINAL Landed Cost bekleniyor</span>}
                 {pricingPreview !== null && (
                   <>
-                    <span className="text-sm font-bold text-text-main">Önizleme: ₺{pricingPreview.toFixed(2)}</span>
+                    <span className="text-sm font-bold text-text-main">Önizleme: ₺{pricingPreview.salePrice.toFixed(2)}</span>
                     <Button type="button" onClick={approveSalePrice} disabled={pricingApproved}>
                       {pricingApproved ? 'Onaylandı' : 'Onayla ve Uygula'}
                     </Button>

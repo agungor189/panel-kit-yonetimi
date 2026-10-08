@@ -62,6 +62,21 @@ const setup = (onGoodsReceiptException?: (event: { receiptId: string }) => void 
   return { db, procurement, warehouse: new WarehouseExecutionService(db, { onGoodsReceiptException }) };
 };
 
+const pricingApproval = (db: Database.Database, productId: string, approvedSalePrice: number) => {
+  const row = db.prepare(`SELECT p.sale_price,p.price_locked,lc.acquisition_cost_snapshot_id,
+    lc.cost_try_numerator,lc.cost_try_denominator FROM products p
+    JOIN current_product_landed_costs lc ON lc.product_id=p.id WHERE p.id=?`).get(productId) as any;
+  return {
+    productId,
+    approvedSalePrice,
+    expectedLandedCostSnapshotId: row.acquisition_cost_snapshot_id,
+    expectedLandedCostNumerator: row.cost_try_numerator,
+    expectedLandedCostDenominator: row.cost_try_denominator,
+    expectedSalePrice: row.sale_price,
+    expectedPriceLocked: Boolean(row.price_locked),
+  };
+};
+
 const costed = (procurement: ProcurementService, productId: string, id: string, quantity: number) => {
   procurement.createPurchase({
     id: `purchase-${id}`,
@@ -170,7 +185,7 @@ test("new procurement CSV product activates only after receipt and later approve
     { status: "Passive", is_sellable: 0, central_stock: 500, procurement_activation_pending: 1 });
   assert.equal(db.prepare("SELECT SUM(quantity_delta_base_int) FROM inventory_ledger_events WHERE product_id=? AND event_type='RECEIPT'").pluck().get(product.id), 500);
   const priced = new ProductPricingService(db).applyMany({
-    productIds: [product.id], settings: { bufferPercentage: 20, profitPercentage: 50, fixedTry: 3, roundingIncrement: 5 },
+    approvals: [pricingApproval(db, product.id, 10)], settings: { bufferPercentage: 20, profitPercentage: 50, fixedTry: 3, roundingIncrement: 5 },
     actorId: "pricing-owner", reason: "test-approved-price", operationId: "price-after-receipt",
   });
   assert.deepEqual({ updated: priced.updatedCount, activated: priced.activatedCount }, { updated: 1, activated: 1 });
@@ -199,7 +214,7 @@ test("approved positive price before receipt waits for authoritative physical st
   const product = db.prepare("SELECT id FROM products WHERE sku='CSV-PRICE-FIRST'").get() as any;
   const lot = procurement.finalizeAcquisitionCosts("purchase-csv-price-first", { allocations: [] }).lots[0];
   const priced = new ProductPricingService(db).applyMany({
-    productIds: [product.id], settings: { bufferPercentage: 0, profitPercentage: 0, fixedTry: 0, roundingIncrement: 1 },
+    approvals: [pricingApproval(db, product.id, 10)], settings: { bufferPercentage: 0, profitPercentage: 0, fixedTry: 0, roundingIncrement: 1 },
     actorId: "pricing-owner", reason: "test-price-before-receipt", operationId: "price-before-receipt",
   });
   assert.deepEqual({ updated: priced.updatedCount, activated: priced.activatedCount }, { updated: 1, activated: 0 });

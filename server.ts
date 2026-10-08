@@ -2567,7 +2567,15 @@ async function startServer() {
         authorization: { decision: 'ALLOW', capability: 'catalog:write' },
       }, () => {
         const result = new ProductPricingService(db).applyMany({
-          productIds: updates.map((update: any) => update?.id), settings: settings ?? {},
+          approvals: updates.map((update: any) => ({
+            productId: update?.id,
+            approvedSalePrice: update?.approvedSalePrice ?? update?.newSalePrice,
+            expectedLandedCostSnapshotId: update?.expectedLandedCostSnapshotId,
+            expectedLandedCostNumerator: update?.expectedLandedCostNumerator,
+            expectedLandedCostDenominator: update?.expectedLandedCostDenominator,
+            expectedSalePrice: update?.expectedSalePrice,
+            expectedPriceLocked: update?.expectedPriceLocked,
+          })), settings: settings ?? {},
           actorId: req.user?.id ?? null, reason: 'bulk-pricing', operationId,
         });
         logActivity('BULK_PRICING_UPDATED', 'product', 'bulk-pricing', { ...result, settings }, req.user?.id);

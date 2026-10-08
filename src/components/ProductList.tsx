@@ -383,7 +383,7 @@ export default function ProductList({ onProductClick }: ProductListProps) {
         <PricingSettingsModal
           onClose={() => setShowPricingModal(false)}
           onRefresh={loadProducts}
-          products={products}
+          products={filteredProducts}
         />
       )}
       <PageHeader

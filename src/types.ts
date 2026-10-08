@@ -41,6 +41,8 @@ export interface Product {
   purchase_price_usd: number;
   purchase_cost: number;
   landed_cost_try?: number | null;
+  landed_cost_numerator?: number | null;
+  landed_cost_denominator?: number | null;
   landed_cost_snapshot_id?: string | null;
   landed_cost_purchase_id?: string | null;
   procurement_status?: 'DRAFT' | 'ORDERED' | 'IN_TRANSIT' | 'COST_PENDING' | 'RECEIPT_PENDING' | 'COMPLETED' | null;

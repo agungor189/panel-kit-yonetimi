@@ -159,6 +159,12 @@ const persistOperationalMetadata = (
       409,
     );
   }
+  if (pricingApproved && Number(before.price_locked) === 1) {
+    throw new ProductPricingValidationError("PRICE_LOCKED", "Locked prices cannot be changed.", 409);
+  }
+  if (pricingApproved && Boolean(value("price_locked")) !== (Number(before.price_locked) === 1)) {
+    throw new ProductPricingValidationError("PRICE_LOCK_STATE_CHANGE_REQUIRES_SEPARATE_COMMAND", "Change the price lock in a separate save before pricing.", 409);
+  }
 
   db.prepare(`
     UPDATE products
@@ -229,7 +235,7 @@ const persistOperationalMetadata = (
 
   if (Array.isArray(operational.platforms)) {
     const findPlatform = db.prepare(`
-      SELECT id
+      SELECT id,price
       FROM product_platforms
       WHERE product_id=? AND platform_name=?
       LIMIT 1
@@ -237,7 +243,7 @@ const persistOperationalMetadata = (
 
     const updatePlatform = db.prepare(`
       UPDATE product_platforms
-      SET price=?,is_listed=?
+      SET is_listed=?
       WHERE id=?
     `);
 
@@ -259,24 +265,29 @@ const persistOperationalMetadata = (
         );
       }
 
-      const price = nonNegativeNumber(
-        platform?.price,
-        `platforms.${platformName}.price`,
-        previousSalePrice,
-      );
-
       const listed = platform?.is_listed === true ? 1 : 0;
       const existing = findPlatform.get(productId, platformName) as any;
+      const authoritativePrice = existing ? Number(existing.price || 0) : previousSalePrice;
+      if (hasOwn(platform, "price")) {
+        const submittedPrice = nonNegativeNumber(platform.price, `platforms.${platformName}.price`, authoritativePrice);
+        if (!pricingApproved && submittedPrice !== authoritativePrice) {
+          throw new ProductPricingValidationError(
+            "PLATFORM_PRICE_PRICING_FLOW_REQUIRED",
+            "Channel prices can only change through the approved FINAL Landed Cost pricing flow.",
+            409,
+          );
+        }
+      }
 
       if (existing) {
-        updatePlatform.run(price, listed, existing.id);
+        updatePlatform.run(listed, existing.id);
       } else {
         insertPlatform.run(
           randomUUID(),
           productId,
           platformName,
           0,
-          price,
+          previousSalePrice,
           listed,
         );
       }
@@ -291,18 +302,20 @@ const persistOperationalMetadata = (
       fixedTry: operational.fixed_price_adjustment_try ?? 0,
       roundingIncrement: operational.price_rounding_increment ?? 1,
     };
-    const preview = pricing.preview(productId, settings);
-    if (!preview.willUpdate || preview.newSalePrice === null) {
-      const code = preview.skipReason === "LOCKED" ? "PRICE_LOCKED" : "FINAL_LANDED_COST_REQUIRED";
-      throw new ProductPricingValidationError(code, preview.skipReason === "LOCKED"
-        ? "Locked prices cannot be changed."
-        : "A positive price requires FINAL Landed Cost and valid pricing settings.", 409);
-    }
-    if (hasOwn(operational, "sale_price") && Number(operational.sale_price) !== preview.newSalePrice) {
-      throw new ProductPricingValidationError("PRICING_PREVIEW_MISMATCH", "Submitted sale price does not match the authoritative pricing engine.", 409);
+    const approval = operational.pricing_preview;
+    if (!approval || typeof approval !== "object" || Array.isArray(approval)) {
+      throw new ProductPricingValidationError("PRICING_PREVIEW_REQUIRED", "An approved pricing preview snapshot is required.", 409);
     }
     const result = pricing.applyMany({
-      productIds: [productId],
+      approvals: [{
+        productId,
+        approvedSalePrice: operational.sale_price,
+        expectedLandedCostSnapshotId: approval.landedCostSnapshotId,
+        expectedLandedCostNumerator: approval.landedCostNumerator,
+        expectedLandedCostDenominator: approval.landedCostDenominator,
+        expectedSalePrice: approval.salePrice,
+        expectedPriceLocked: approval.priceLocked,
+      }],
       settings,
       actorId,
       reason: "product-edit",

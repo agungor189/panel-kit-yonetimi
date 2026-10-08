@@ -2,7 +2,14 @@ import React, { useState } from 'react';
 import { X, Check, Calculator, AlertTriangle, RefreshCw } from 'lucide-react';
 import { api, createRetryOperation } from '../lib/api';
 import { useCurrency } from '../CurrencyContext';
-import { finalLandedPricingDecision } from '../../shared/finalLandedPricing';
+import { buildFinalLandedPricingPreview, paginateFinalLandedPricingPreview } from '../../shared/finalLandedPricing';
+
+const skipReasonLabels: Record<string, string> = {
+  MISSING_LANDED_COST: 'FINAL Landed Cost eksik',
+  LOCKED: 'Fiyat kilitli',
+  KIT: 'Kit yayın akışı gerekli',
+  NON_POSITIVE_PRICE: 'Pozitif fiyat üretilemedi',
+};
 
 export default function PricingSettingsModal({ 
   onClose, 
@@ -22,6 +29,7 @@ export default function PricingSettingsModal({
 
   const [previewData, setPreviewData] = useState<any[]>([]);
   const [showPreview, setShowPreview] = useState(false);
+  const [previewPage, setPreviewPage] = useState(1);
   const [saving, setSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [confirmUpdate, setConfirmUpdate] = useState<{ updates: any[], missingOnly: boolean } | null>(null);
@@ -30,24 +38,22 @@ export default function PricingSettingsModal({
     setShowPreview(false);
     setPreviewData([]);
     setConfirmUpdate(null);
+    setPreviewPage(1);
   };
 
   const handlePreview = () => {
-    let hasFailures = false;
-    const data = products.map(p => {
-      if (p.price_locked) {
-        return { ...p, newSalePrice: null, willUpdate: false, skipReason: 'LOCKED' };
-      }
-      const decision = finalLandedPricingDecision(p.landed_cost_try, bufferPercentage, profitPercentage, fixedTry, roundingIncrement);
-      if (!decision.willUpdate) {
-        hasFailures = true;
-      }
-      return { ...p, ...decision };
+    const data = buildFinalLandedPricingPreview(products, {
+      bufferPercentage,
+      profitPercentage,
+      fixedTry,
+      roundingIncrement,
     });
+    const hasFailures = data.some((product) => !product.willUpdate);
     setPreviewData(data);
     setShowPreview(true);
+    setPreviewPage(1);
     if (hasFailures) {
-       setErrorMessage("FINAL Landed Cost bulunmayan ürünler fiyatlandırmaya dahil edilmedi.");
+       setErrorMessage("Atlanan ürünler nedenleriyle önizleme tablosunda gösteriliyor.");
     } else {
        setErrorMessage("");
     }
@@ -64,7 +70,15 @@ export default function PricingSettingsModal({
       if (onlyMissing && p.sale_price > 0) return false;
       return true;
     }).map(p => {
-      return { id: p.id, newSalePrice: p.newSalePrice };
+      return {
+        id: p.id,
+        approvedSalePrice: p.newSalePrice,
+        expectedLandedCostSnapshotId: p.landed_cost_snapshot_id,
+        expectedLandedCostNumerator: p.landed_cost_numerator,
+        expectedLandedCostDenominator: p.landed_cost_denominator,
+        expectedSalePrice: Number(p.sale_price || 0),
+        expectedPriceLocked: Boolean(p.price_locked),
+      };
     });
 
     if (dataToUpdate.length === 0) {
@@ -113,7 +127,7 @@ export default function PricingSettingsModal({
             </div>
             <div>
               <h2 className="text-xl font-bold text-gray-900">Toplu Fiyat Yönetimi</h2>
-              <p className="text-xs text-gray-500">FINAL Landed Cost + Buffer + Kâr</p>
+              <p className="text-xs text-gray-500">Filtre kapsamı: {products.length} ürün · FINAL Landed Cost + Buffer + Kâr</p>
             </div>
           </div>
           <button onClick={onClose} className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-xl transition-colors">
@@ -243,7 +257,7 @@ export default function PricingSettingsModal({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {previewData.slice(0, 50).map(p => {
+                    {paginateFinalLandedPricingPreview(previewData, previewPage).rows.map(p => {
                       const diff = p.newSalePrice === null ? null : p.newSalePrice - (p.sale_price || 0);
                       return (
                         <tr key={p.id} className={p.willUpdate ? 'bg-white' : 'bg-gray-50 opacity-60'}>
@@ -259,7 +273,7 @@ export default function PricingSettingsModal({
                             ) : '-'}
                           </td>
                           <td className="px-4 py-3 text-center">
-                            {!p.willUpdate && <span className="text-xs bg-gray-200 text-gray-600 px-2 py-1 rounded-md font-bold">{p.skipReason === 'MISSING_LANDED_COST' ? 'Fiyatlandırmaya dahil edilmedi' : 'Kilitli / Atlandı'}</span>}
+                            {!p.willUpdate && <span className="text-xs bg-gray-200 text-gray-600 px-2 py-1 rounded-md font-bold">{skipReasonLabels[p.skipReason as string] || 'Fiyatlandırmaya dahil edilmedi'}</span>}
                             {p.willUpdate && <span className="text-xs bg-blue-100 text-blue-600 px-2 py-1 rounded-md font-bold">Güncellenecek</span>}
                           </td>
                         </tr>
@@ -268,8 +282,12 @@ export default function PricingSettingsModal({
                   </tbody>
                 </table>
                 {previewData.length > 50 && (
-                  <div className="p-4 text-center text-sm text-gray-500 bg-gray-50 border-t border-gray-100">
-                    Sadece ilk 50 ürün gösteriliyor... (Toplam {previewData.length} ürün)
+                  <div className="p-4 flex items-center justify-between gap-3 text-sm text-gray-600 bg-gray-50 border-t border-gray-100">
+                    <button type="button" disabled={previewPage === 1} onClick={() => setPreviewPage(page => Math.max(1, page - 1))}
+                      className="px-3 py-1.5 rounded-lg border bg-white font-bold disabled:opacity-40">Önceki</button>
+                    <span>Sayfa {previewPage} / {Math.ceil(previewData.length / 50)} · Toplam {previewData.length} ürün</span>
+                    <button type="button" disabled={previewPage >= Math.ceil(previewData.length / 50)} onClick={() => setPreviewPage(page => Math.min(Math.ceil(previewData.length / 50), page + 1))}
+                      className="px-3 py-1.5 rounded-lg border bg-white font-bold disabled:opacity-40">Sonraki</button>
                   </div>
                 )}
               </div>
