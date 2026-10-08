@@ -42,6 +42,12 @@ export const createRetryOperation = (prefix: string) => {
   };
 };
 
+const isReadOnlyProcurementPreview = (endpoint: string) => (
+  endpoint === "/procurement/v1/imports/preview"
+  || endpoint === "/procurement/v1/purchases/csv-preview"
+  || /^\/procurement\/v1\/purchases\/[^/]+\/cost-preview$/.test(endpoint)
+);
+
 const requiresOperationId = (method: "POST" | "PUT" | "PATCH", endpoint: string) => (
   (method === "POST" && endpoint === "/sales")
   || (method === "POST" && endpoint === "/catalog-admin/v1/products")
@@ -50,7 +56,7 @@ const requiresOperationId = (method: "POST" | "PUT" | "PATCH", endpoint: string)
   || (method === "POST" && /^\/returns\/v1\/(?:sales\/[^/]+|[^/]+\/refunds)$/.test(endpoint))
   || (method === "PUT" && /^\/catalog-admin\/v1\/products\/[^/]+$/.test(endpoint))
   || ((method === "PUT" || method === "PATCH") && /^\/sales\/[^/]+(?:\/status)?$/.test(endpoint))
-  || (method === "POST" && endpoint.startsWith("/procurement/v1/"))
+  || (method === "POST" && endpoint.startsWith("/procurement/v1/") && !isReadOnlyProcurementPreview(endpoint))
 );
 
 const mutationHeaders = (method: "POST" | "PUT" | "PATCH", endpoint: string, options: MutationOptions = {}) => {

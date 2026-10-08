@@ -163,7 +163,7 @@ export default function Procurement() {
     if (probe.meta.fields?.includes('schema_version') || probe.meta.fields?.includes('record_type')) { setUnifiedCsv(text); setCsvPreview([]); return; }
     setUnifiedCsv('');
     Papa.parse(file, { header: true, skipEmptyLines: true, complete: async (result) => {
-      const response = await api.post('/procurement/v1/purchases/csv-preview', { rows: result.data }, op('purchase-csv-preview'));
+      const response = await api.post('/procurement/v1/purchases/csv-preview', { rows: result.data });
       setCsvPreview(response.data || []);
     }});
   };
