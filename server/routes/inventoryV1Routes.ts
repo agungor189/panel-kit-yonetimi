@@ -4,6 +4,7 @@ import { CommandExecutor, CommandFoundationError } from "../modules/commands/com
 import { InventoryService, InventoryValidationError } from "../modules/inventory/inventoryService.js";
 import { ProfileCutInventoryService } from "../modules/inventory/profileCutInventoryService.js";
 import { ShipmentService, ShipmentValidationError } from "../modules/shipping/shipmentService.js";
+import { productPackages } from '../modules/warehouse/productPackages.js';
 
 type Dependencies = {
   db: Database.Database;
@@ -30,6 +31,10 @@ const sendError = (error: unknown, res: express.Response) => {
 
 export function createInventoryV1Router(dependencies: Dependencies) {
   const router = express.Router();
+  router.get('/products/:id/packages', dependencies.authorizeRead, (req, res) => {
+    try { return res.json({ success: true, contract: 'dsdst.product-packages.v1', data: productPackages(dependencies.db, req.params.id) }); }
+    catch (error) { return sendError(error, res); }
+  });
   const inventory = new InventoryService(dependencies.db);
   const profileCuts = new ProfileCutInventoryService(dependencies.db);
   const shipping = new ShipmentService(dependencies.db);

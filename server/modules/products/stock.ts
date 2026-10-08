@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { finalLandedCostSource } from '../pricing/finalLandedCostSource.js';
 
 const cleanText = (value: unknown) => typeof value === "string" ? value.trim() : "";
 
@@ -62,23 +63,22 @@ export function createProductStockModule(db: Database.Database) {
     }
 
     let availableStock = Number.POSITIVE_INFINITY;
-    let unitPurchaseCost = 0;
     let unitWeight = 0;
     const normalizedComponents = components.map((component) => {
       const quantityPerUnit = Math.max(Number(component.quantity_per_unit) || 0, 0);
       const componentStock = stockQuantity(component.central_stock);
       const componentAvailable = quantityPerUnit > 0 ? Math.floor(componentStock / quantityPerUnit) : 0;
       availableStock = Math.min(availableStock, componentAvailable);
-      unitPurchaseCost += (Number(component.purchase_cost) || 0) * quantityPerUnit;
       unitWeight += (Number(component.weight_grams) || 0) * quantityPerUnit;
       return { ...component, quantity_per_unit: quantityPerUnit, available_for_parent: componentAvailable };
     });
     if (!Number.isFinite(availableStock)) availableStock = 0;
+    const finalCost = finalLandedCostSource(db, product.id);
     return {
       hasBom: true,
       available_stock: Math.max(Math.floor(availableStock), 0),
       physical_stock: physicalStock,
-      unit_purchase_cost: unitPurchaseCost || (Number(product?.purchase_cost) || 0),
+      unit_purchase_cost: finalCost ? finalCost.numerator / finalCost.denominator / 100 : null,
       unit_weight: unitWeight || (Number(product?.weight_grams ?? product?.weight) || 0),
       components: normalizedComponents,
     };
@@ -141,4 +141,3 @@ export function createProductStockModule(db: Database.Database) {
 
   return { getProductBomComponents, getProductStockProfile, getProductBomUsage, hydrateProductStock };
 }
-

@@ -259,6 +259,42 @@ const productSelect = `
 `;
 
 export class CatalogService {
+  supplierAlias(supplierId: string, alias: string): string | null {
+    return (this.db.prepare('SELECT product_id FROM catalog_supplier_aliases WHERE supplier_id=? AND alias=? COLLATE NOCASE').get(supplierId, alias.trim()) as any)?.product_id ?? null;
+  }
+
+  confirmSupplierAlias(supplierId: string, alias: string, productId: string, sourceRef: string) {
+    const existing = this.supplierAlias(supplierId, alias);
+    if (existing && existing !== productId) throw new CatalogValidationError('Supplier alias already points to another SKU.', 'ALIAS_CONFLICT', 409);
+    if (!existing) this.db.prepare('INSERT INTO catalog_supplier_aliases(supplier_id,alias,product_id,source_ref) VALUES (?,?,?,?)').run(supplierId, alias.trim(), productId, sourceRef);
+  }
+
+  readBom(productId: string) {
+    const lines = this.db.prepare('SELECT component_product_id AS componentId,quantity_per_unit AS quantity FROM product_bom WHERE parent_product_id=? ORDER BY component_product_id').all(productId) as Array<{ componentId: string; quantity: number }>;
+    return { lines, version: createHash('sha256').update(JSON.stringify(lines)).digest('hex') };
+  }
+
+  replaceBom(productId: string, expectedVersion: string, lines: Array<{ componentId: string; quantity: number }>) {
+    return this.db.transaction(() => {
+      if (this.readBom(productId).version !== expectedVersion) throw new CatalogValidationError('BOM changed after preview.', 'BOM_VERSION_CONFLICT', 409);
+      if (this.getProduct(productId)?.product_type !== 'assembly' || !lines.length) throw new CatalogValidationError('BOM requires an assembly and components.');
+      const ids = new Set<string>();
+      for (const line of lines) {
+        if (ids.has(line.componentId) || line.componentId === productId || !Number.isSafeInteger(line.quantity) || line.quantity <= 0 || this.getProduct(line.componentId)?.product_type !== 'component') throw new CatalogValidationError('Invalid, duplicate or cyclic BOM component.');
+        ids.add(line.componentId);
+        const reaches = (id: string, visited = new Set<string>()): boolean => {
+          if (id === productId) return true;
+          if (visited.has(id)) return false;
+          visited.add(id);
+          return this.readBom(id).lines.some(child => reaches(child.componentId, visited));
+        };
+        if (reaches(line.componentId)) throw new CatalogValidationError('BOM cycle.');
+      }
+      this.db.prepare('DELETE FROM product_bom WHERE parent_product_id=?').run(productId);
+      for (const line of lines) this.db.prepare('INSERT INTO product_bom(id,parent_product_id,component_product_id,quantity_per_unit,component_role) VALUES (?,?,?,?,?)').run(randomUUID(), productId, line.componentId, line.quantity, 'component');
+      return this.readBom(productId);
+    }).immediate();
+  }
   constructor(private readonly db: Database.Database) {}
 
   listProducts(type?: CatalogType): CatalogProduct[] {
@@ -387,7 +423,13 @@ export class CatalogService {
       if (current.status !== "Passive" || Number(current.is_sellable) !== 0) {
         throw new CatalogValidationError("Procurement-created product activation state is invalid.", "PROCUREMENT_ACTIVATION_CONFLICT", 409);
       }
-      if (Number(current.central_stock) <= 0 || Number(current.sale_price) <= 0) return false;
+      if (Number(current.central_stock) <= 0) return false;
+      if (current.product_type === 'component') {
+        this.db.prepare("UPDATE products SET procurement_activation_pending=0 WHERE id=? AND procurement_activation_pending=1").run(productId);
+        this.captureVersion(productId, Number(current.catalog_version) + 1);
+        return false; // Physical readiness never turns a component into a sellable product.
+      }
+      if (current.product_type === 'assembly' || Number(current.sale_price) <= 0) return false;
       if (current.product_type === "kit") {
         throw new CatalogValidationError("Published KIT products cannot use procurement activation.", "KIT_PUBLICATION_REQUIRED", 409);
       }

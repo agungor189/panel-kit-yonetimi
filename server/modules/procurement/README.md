@@ -68,3 +68,47 @@ manifest, backup, dry run and reconciliation; the migration itself performs no r
 
 V2-07 goods receipt references these immutable cost snapshots; it does not update
 or recalculate them.
+
+## Versioned single-file import and package projection
+
+`POST /api/procurement/v1/imports/preview` parses `dsdst.procurement.import.v1`
+without writes. `/imports/apply` requires procurement and catalog capabilities,
+an operation identity, the current preview hash, explicit catalog/BOM/source
+approvals, tax policy and prior-stock evidence. The existing flat CSV path remains.
+The source text hash and supplier/invoice identity deduplicate imports independently
+of the filename and operation key. Catalog commands, purchase draft, aliases,
+source references, immutable package plan and command result commit together.
+Import does not call the legacy MasterInfo importer or post stock/cash/prices.
+
+Migration v98 is forward-only and adds immutable import provenance and package-plan
+tables, supplier-scoped catalog aliases, pricing-history source JSON and the
+component-specific activation guard. It performs no business repair/backfill.
+Existing products and history remain unchanged. Tests use synthetic in-memory
+databases and the supported v48/v53 upgrade fixtures. No live migration is implied.
+Rollback must preserve these tables and use an application compatible with v98;
+after business use, dropping source records or replaying imports is not rollback.
+
+Receipt intents gain optional `packagePlan` with a version, backend package IDs,
+per-package quantities, immutable catalog snapshots and source-carton references.
+Mixed cartons produce single-SKU children sharing a source identity; parent gross
+weight is not copied to children. Warehouse records measured child weight and split
+confirmation. A final receipt submits all observed packages for one original cost
+snapshot; incorrect IDs, line bindings and versions fail closed. Direct Inventory
+receipt cannot bypass the imported plan. Reprint/scan never posts stock.
+
+Pricing reads the purchase's total FINAL cost divided by its total base quantity.
+Multi-line references hash every contributing immutable snapshot. Assembly pricing
+uses the canonical product BOM and component FINAL sources only. BOM/source changes
+invalidate approval; receipt still uses original per-line snapshots. Buffers, margin,
+fixed TRY, rounding, locks and channel publication remain in Pricing/Products.
+
+`GET /api/inventory/v1/products/:id/packages` is an authenticated, read-only projection
+requested lazily by the existing product-detail panel. It reads actual execution and
+previously placed legacy packages plus unreceived versioned plans. Summaries use
+remaining quantities, excluding empty/cancelled/missing packages; historical rows are
+retained. Finalized lines do not remain in pending plans, including shortage cases.
+
+Imported packages require an L-owned 100×100 mm template version with a single
+`{Package_code}` Code128 barcode. Existing legacy 100×150 `{SKU}` templates remain
+valid for legacy packages. This change does not author or publish an L template;
+until a compatible template is supplied by L, new-plan printing fails closed.

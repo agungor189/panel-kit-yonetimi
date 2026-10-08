@@ -1,3 +1,4 @@
+import { withFinalLandedCost } from './server/modules/pricing/finalLandedCostSource.js';
 import "dotenv/config";
 import { webcrypto } from "node:crypto";
 if (!(globalThis as any).crypto) (globalThis as any).crypto = webcrypto;
@@ -2406,7 +2407,7 @@ async function startServer() {
       WHERE ${catalogVisibilityWhere(includeComponents)}
       ORDER BY p.created_at DESC
     `).all() as any[]).map((product) => ({
-      ...decorateProductProcurement(hydrateProductStock(product, includeBom)),
+      ...decorateProductProcurement(withFinalLandedCost(db, hydrateProductStock(product, includeBom))),
       catalog_type: product.product_type === "kit" ? "KIT" : product.catalog_type,
     }));
     res.json(products);
@@ -2426,7 +2427,7 @@ async function startServer() {
     const reserveLocations = (db.prepare("SELECT location FROM product_reserve_locations WHERE product_id = ? ORDER BY sort_order, created_at").all(req.params.id) as Array<{ location: string }>).map((row) => row.location);
 
     res.json({
-      ...decorateProductProcurement(hydrateProductStock(product, true)),
+      ...decorateProductProcurement(withFinalLandedCost(db, hydrateProductStock(product, true))),
       catalog_type: product.product_type === "kit" ? "KIT" : product.catalog_type,
       images, platforms, logistics, reserve_locations: reserveLocations,
       bom_usage: getProductBomUsage(req.params.id),
@@ -5844,6 +5845,7 @@ async function startServer() {
     createProcurementV1Router({
       db,
       authorizeProcurement: auth.requireCapability("procurement:write"),
+      authorizeCatalog: auth.requireCapability("catalog:write"),
       authorizeCostApproval: auth.requireCapability("acquisition-cost:approve"),
       authorizePayment: auth.requireCapability("finance:write"),
       authorizeFx: auth.requireCapability("fx:write"),

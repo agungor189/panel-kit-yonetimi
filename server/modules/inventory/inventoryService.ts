@@ -61,7 +61,7 @@ export class InventoryService {
     operationId: string;
     acceptedQuantityBaseInt?: number;
     lotId?: string;
-  }) {
+  }, options: { validatedWarehousePlan?: boolean } = {}) {
     const receiptId = text(input.receiptId, "receiptId");
     const costSnapshotId = text(input.costSnapshotId, "costSnapshotId");
     const operationId = text(input.operationId, "operationId");
@@ -76,6 +76,10 @@ export class InventoryService {
         FROM acquisition_lot_cost_snapshots l JOIN purchase_orders p ON p.id=l.purchase_order_id
         LEFT JOIN procurement_workflows w ON w.purchase_order_id=p.id WHERE l.id=?`).get(costSnapshotId) as any;
       if (!snapshot) throw new InventoryValidationError("COST_SNAPSHOT_NOT_FOUND", "The acquisition-cost snapshot was not found.", 404);
+      if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='procurement_package_plan'").get()
+        && this.db.prepare('SELECT 1 FROM procurement_package_plan WHERE purchase_line_id=?').get(snapshot.purchase_line_id)
+        && !options.validatedWarehousePlan) throw new InventoryValidationError('PACKAGE_PLAN_REQUIRED', 'Imported lines must use the validated Warehouse package receipt command.', 409);
+      if ((this.db.prepare('SELECT product_type FROM products WHERE id=?').get(snapshot.product_id) as any)?.product_type === 'assembly') throw new InventoryValidationError('ASSEMBLY_RECEIPT_FORBIDDEN', 'Assembly stock is derived from its BOM.', 409);
       const affectedSku = this.db.prepare("SELECT COALESCE(NULLIF(sku,''),id) FROM products WHERE id=?").pluck().get(snapshot.product_id) as string;
       this.reconciliationGuard.assertAllowed("SKU", affectedSku,
         (message) => new InventoryValidationError("RECONCILIATION_SCOPE_BLOCKED", message, 409));

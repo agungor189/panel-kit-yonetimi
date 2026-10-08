@@ -1,3 +1,4 @@
+import { ProductPackages } from './products/ProductPackages';
 import { useState, useEffect } from 'react';
 import {
   ArrowLeft,
@@ -413,6 +414,7 @@ export default function ProductDetail({ productId, onBack, onEdit }: ProductDeta
               </div>
            </Card>
 
+           <ProductPackages key={productId} productId={productId}/>
            <Card>
               <div className="p-6 border-b border-border-color flex items-center space-x-2">
                 <History className="w-4 h-4 text-text-muted" />

@@ -6,6 +6,9 @@ import { CommandExecutor, CommandFoundationError } from "../modules/commands/com
 import { ExchangeRateService, ExchangeRateValidationError } from "../modules/finance/exchangeRates.js";
 import { MoneyValidationError } from "../modules/finance/money.js";
 import { ProcurementService, ProcurementValidationError } from "../modules/procurement/procurementService.js";
+import { ProcurementImportService } from '../modules/procurement/procurementImportService.js';
+import { ImportValidationError } from '../modules/procurement/procurementImport.js';
+import { CatalogValidationError } from '../modules/catalog/catalogService.js';
 import { persistUpload, removeStoredUpload } from "../services/uploadSecurity.js";
 
 type Dependencies = {
@@ -14,6 +17,7 @@ type Dependencies = {
   authorizeCostApproval: RequestHandler;
   authorizePayment: RequestHandler;
   authorizeFx: RequestHandler;
+  authorizeCatalog?: RequestHandler;
   uploadsDir?: string;
 };
 
@@ -36,6 +40,7 @@ const sendOutcome = (res: express.Response, outcome: ReturnType<CommandExecutor[
 );
 
 const sendError = (error: unknown, res: express.Response) => {
+  if (error instanceof ImportValidationError || error instanceof CatalogValidationError) return res.status(error.statusCode).json({ success: false, error: { code: error.code, message: error.message } });
   if (error instanceof CommandFoundationError) return res.status(error.statusCode).json({ success: false, error: { code: error.code, message: error.message } });
   if (error instanceof ProcurementValidationError) return res.status(error.statusCode).json({ success: false, error: { code: error.code, message: error.message } });
   if (error instanceof ExchangeRateValidationError || error instanceof MoneyValidationError) {
@@ -47,11 +52,26 @@ const sendError = (error: unknown, res: express.Response) => {
   throw error;
 };
 
-export function createProcurementV1Router({ db, authorizeProcurement, authorizeCostApproval, authorizePayment, authorizeFx, uploadsDir }: Dependencies) {
+export function createProcurementV1Router({ db, authorizeProcurement, authorizeCostApproval, authorizePayment, authorizeFx, authorizeCatalog, uploadsDir }: Dependencies) {
   const router = express.Router();
   const procurement = new ProcurementService(db);
   const fx = new ExchangeRateService(db);
   const commands = new CommandExecutor(db);
+  const importer = new ProcurementImportService(db);
+  router.post('/imports/preview', authorizeProcurement, (req, res) => {
+    try { return res.json({ success: true, contract: 'dsdst.procurement.import.v1', data: importer.preview(req.body) }); }
+    catch (error) { return sendError(error, res); }
+  });
+  router.post('/imports/apply', authorizeProcurement, authorizeCatalog || ((_req, res) => { res.status(403).json({ error: { code: 'CATALOG_AUTHORIZATION_REQUIRED' } }); }), (req, res) => {
+    try {
+      const outcome = execute(commands, req, 'procurement:write+catalog:write', 'procurement.import.apply.v1', req.body, context => {
+        const data = importer.apply(req.body, req.user!.id);
+        context.addOutbox({ topic: 'procurement', eventType: 'procurement.import.created.v1', aggregateType: 'purchase_order', aggregateId: data.id, payload: { purchaseId: data.id } });
+        return { statusCode: 201, body: { success: true, contract: 'dsdst.procurement.import.v1', data } };
+      });
+      return sendOutcome(res, outcome);
+    } catch (error) { return sendError(error, res); }
+  });
   const documentUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
 
   router.get("/fx/usd-try", (_req, res) => res.json({ success: true, contract: "dsdst.fx-current.v1", data: fx.getCurrentUsdTry() }));

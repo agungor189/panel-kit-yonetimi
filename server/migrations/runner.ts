@@ -1,3 +1,4 @@
+import { PROCUREMENT_IMPORT_SCHEMA_V98 } from "../db/procurementImportSchema.js";
 import Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -3118,9 +3119,10 @@ const migrations: Migration[] = [
       db.exec(PRICING_ACTIVATION_SCHEMA_V97);
     },
   },
+  { version: 98, name: "add_procurement_import_source_and_package_plan", up(db) { db.exec(PROCUREMENT_IMPORT_SCHEMA_V98); } },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 97;
+export const CURRENT_SCHEMA_VERSION = 98;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),

@@ -29,11 +29,11 @@ export type TemplateSnapshot = {
 export class PrintingService {
   constructor(private readonly db: Database.Database) {}
 
-  private validateTemplate(template: TemplateSnapshot, purpose: Exclude<PrintPurpose, "SHIPPING">) {
+  private validateTemplate(template: TemplateSnapshot, purpose: Exclude<PrintPurpose, "SHIPPING">, plannedPackage = false) {
     if (!template || typeof template !== "object" || !Array.isArray(template.elements)) throw new PrintingError("TEMPLATE_SNAPSHOT_REQUIRED", "An immutable L template snapshot is required.");
     const expectedPurpose = purpose === "GOODS_RECEIPT_PACKAGE" ? "goods_receipt" : "location";
-    const expectedSize = purpose === "GOODS_RECEIPT_PACKAGE" ? [100, 150] : [100, 50];
-    const expectedBarcode = purpose === "GOODS_RECEIPT_PACKAGE" ? "{SKU}" : "{Lokasyon}";
+    const expectedSize = purpose === "GOODS_RECEIPT_PACKAGE" ? (plannedPackage ? [100, 100] : [100, 150]) : [100, 50];
+    const expectedBarcode = purpose === "GOODS_RECEIPT_PACKAGE" ? (plannedPackage ? "{Package_code}" : "{SKU}") : "{Lokasyon}";
     if (template.purpose !== expectedPurpose || template.width !== expectedSize[0] || template.height !== expectedSize[1]) {
       throw new PrintingError("TEMPLATE_CONTRACT_MISMATCH", `${purpose} template must be ${expectedSize.join("x")} mm.`);
     }
@@ -48,15 +48,25 @@ export class PrintingService {
 
   packageSnapshot(packageIdValue: string) {
     const packageId = required(packageIdValue, "packageId", 200);
-    const current = this.db.prepare(`SELECT ep.*,p.sku,p.title,p.name_tr,p.name_en,p.material,p.form_code,p.product_series,p.size,p.weight_grams
+    const current = this.db.prepare(`SELECT ep.*,p.sku,p.title,p.name_tr,p.name_en,p.material,p.form_code,p.product_series,p.size,p.weight_grams AS unit_weight_grams,p.product_type
       FROM warehouse_execution_packages ep JOIN products p ON p.id=ep.product_id WHERE ep.id=? OR ep.package_code=?`).get(packageId, packageId) as any;
+    const plan = current && this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='procurement_package_plan'").get()
+      ? this.db.prepare('SELECT source_carton_id,source_group_ref,plan_version,product_snapshot_json FROM procurement_package_plan WHERE id=?').get(current.id) as any : null;
+    if (plan) {
+      const product = JSON.parse(plan.product_snapshot_json);
+      Object.assign(current, { sku: product.sku, title: product.title, name_tr: product.name_tr, name_en: product.name_en,
+        material: product.material, size: product.size, product_type: product.product_type, unit_weight_grams: product.mass_grams });
+    }
     if (current) return {
       subjectId: current.id, subjectCode: current.package_code,
       payload: { Package_code: current.package_code, SKU: current.sku, Urun_adi: current.name_tr || current.name_en || current.title || current.sku,
+        ...(plan ? { Plan_version: plan.plan_version, Kaynak_koli: `${plan.source_group_ref} / ${plan.source_carton_id}`, Tur: current.product_type,
+          Satin_alma_no: this.db.prepare('SELECT purchase_number FROM procurement_workflows WHERE purchase_order_id=?').pluck().get(current.purchase_order_id),
+          Label_version: canonicalPayloadHash({ packageId: current.id, actual: current.initial_quantity_base_int, planned: current.target_quantity_base_int, plan: plan.plan_version }) } : {}),
         Urun_kodu: "", Supplier_no: "", Malzeme: current.material || "", Tip: current.form_code || current.product_series || "",
         Olcu: current.size || "", Parti_Lot: current.supplier_lot_code, Paket_ici_adet: String(current.initial_quantity_base_int),
         Paket_no: "1 / 1", Toplam_paket: "1", Stok_sayisi: String(current.initial_quantity_base_int),
-        Urun_agirligi: current.weight_grams ? `${current.weight_grams} g` : "", Kutu_agirligi: current.weight_grams ? `${current.weight_grams} g` : "" },
+        Urun_agirligi: current.unit_weight_grams ? `${current.unit_weight_grams} g` : "", Kutu_agirligi: current.weight_grams ? `${current.weight_grams} g` : "" },
     };
     const legacy = this.db.prepare(`SELECT wp.*,l.sku_snapshot,l.product_name_snapshot,l.lot_number,l.supplier_no_snapshot,l.material_snapshot,
       l.form_snapshot,l.series_snapshot,l.size_snapshot,l.unit_weight_g_snapshot,l.package_weight_kg_snapshot
@@ -83,7 +93,9 @@ export class PrintingService {
 
   queueTemplateJob(input: { purpose: "GOODS_RECEIPT_PACKAGE" | "LOCATION"; subjectId: string; subjectCode: string; payload: Record<string, unknown>;
     template: TemplateSnapshot; operationId: string; actorId: string; printerName?: string | null; originalJobId?: string | null }) {
-    this.validateTemplate(input.template, input.purpose);
+    const planned = input.purpose === 'GOODS_RECEIPT_PACKAGE' && Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='procurement_package_plan'").get())
+      && Boolean(this.db.prepare('SELECT 1 FROM procurement_package_plan WHERE id=?').get(input.subjectId));
+    this.validateTemplate(input.template, input.purpose, planned);
     return this.insertJob({ ...input, subjectType: input.purpose === "LOCATION" ? "warehouse_location" : "warehouse_package" });
   }
 

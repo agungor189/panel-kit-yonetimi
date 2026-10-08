@@ -51,6 +51,7 @@ type ReceiptPackageInput = {
   targetQuantityBaseInt?: number;
   weightGrams?: number;
   disposition?: PackageDisposition;
+  splitConfirmed?: boolean;
 };
 
 export class WarehouseExecutionError extends Error {
@@ -354,6 +355,7 @@ export class WarehouseExecutionService {
     stageIndex: number;
     isFinal: boolean;
     costSnapshotId: string;
+    planVersion?: string;
     supplierLotCode: string;
     acceptedQuantityBaseInt: number;
     damagedQuantityBaseInt: number;
@@ -405,6 +407,17 @@ export class WarehouseExecutionService {
       if (snapshot.workflow_state !== "RECEIPT_PENDING") {
         throw new WarehouseExecutionError("PANEL_RECEIPT_APPROVAL_REQUIRED", "Panel receipt approval is required before Warehouse can start goods receipt.", 409);
       }
+      const plan = new ProcurementService(this.db).getPackagePlan(snapshot.purchase_line_id);
+      if (plan) {
+        if (input.planVersion !== plan.version) throw new WarehouseExecutionError('PACKAGE_PLAN_STALE', 'Paket planı sürümü uyuşmuyor.', 409);
+        if (new Set(packages.map(p => p.id)).size !== packages.length) throw new WarehouseExecutionError('DUPLICATE_PLAN_PACKAGE', 'Paket bir kez kabul edilebilir.', 409);
+        for (const p of packages) {
+          const planned = plan.packages.find(item => item.id === p.id);
+          if (!planned || planned.code !== p.code || p.targetQuantityBaseInt !== planned.quantityBaseInt) throw new WarehouseExecutionError('PACKAGE_PLAN_LINE_MISMATCH', 'Paket/alış satırı/maliyet bağı uyuşmuyor.', 409);
+          const source = input.packages.find(item => item.id === p.id)!;
+          if (planned.mixed && (source.splitConfirmed !== true || !source.weightGrams)) throw new WarehouseExecutionError('MIXED_PACKAGE_SPLIT_REQUIRED', 'Karışık kaynak koli tek SKU paketlere ayrılıp tartılmalı.', 409);
+        }
+      }
       if (this.db.prepare("SELECT 1 FROM warehouse_goods_receipts WHERE acquisition_cost_snapshot_id=?").get(snapshotId)) {
         throw new WarehouseExecutionError("RECEIPT_ALREADY_FINALIZED", "This cost snapshot already has a final goods receipt.", 409);
       }
@@ -436,7 +449,7 @@ export class WarehouseExecutionService {
           operationId,
           acceptedQuantityBaseInt: accepted,
           lotId: inventoryLotId,
-        });
+        }, { validatedWarehousePlan: Boolean(plan) });
       }
       const status = accepted === 0 ? "QUARANTINE_ONLY" : variance === 0 && damaged === 0 ? "ACCEPTED" : "ACCEPTED_WITH_VARIANCE";
       this.db.prepare(`INSERT INTO warehouse_goods_receipts (
@@ -558,6 +571,10 @@ export class WarehouseExecutionService {
   identifyPackage(input: { packageId: string; labelIdentity: string }) {
     const packageId = requiredText(input.packageId, "packageId");
     const identity = requiredText(input.labelIdentity, "labelIdentity");
+    if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='procurement_package_plan'").get()) {
+      const planned = this.db.prepare('SELECT package_code FROM procurement_package_plan WHERE id=? OR package_code=?').get(packageId, packageId) as any;
+      if (planned && identity !== planned.package_code) throw new WarehouseExecutionError('PACKAGE_BARCODE_REQUIRED', 'Barkod benzersiz paket kimliği olmalı.', 409);
+    }
     const pkg = this.packageRow(packageId);
     if (pkg.disposition === "ACCEPTED" && pkg.status === "RECEIVED") {
       this.db.prepare("UPDATE warehouse_execution_packages SET label_identity=?,status='LABELED',updated_at=CURRENT_TIMESTAMP WHERE id=?")
@@ -570,10 +587,14 @@ export class WarehouseExecutionService {
 
   getPackage(packageIdValue: string) {
     const row = this.packageRow(requiredText(packageIdValue, "packageId"));
+    const plan = new ProcurementService(this.db).getPackagePlan(row.purchase_line_id);
+    const planned = plan?.packages.find(p => p.id === row.id);
     const currentLocationCode = row.current_slot_id
       ? (this.db.prepare("SELECT code FROM warehouse_location_slots WHERE id=?").pluck().get(row.current_slot_id) as string | undefined) ?? null
       : null;
     return {
+      ...(planned ? { sku: planned.sku, productTitle: planned.title, productType: planned.productType, size: planned.size,
+        sourceCartonId: planned.sourceCartonId, sourceGroupRef: planned.sourceGroupRef, planVersion: plan!.version } : {}),
       id: row.id, code: row.package_code, originType: row.origin_type, receiptId: row.receipt_id,
       returnReceiptId: row.return_receipt_id, returnReceiptInventoryAllocationId: row.return_receipt_inventory_allocation_id,
       originInventoryLotId: row.origin_inventory_lot_id, inventoryLotId: row.inventory_lot_id,

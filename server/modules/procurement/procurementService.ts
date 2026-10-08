@@ -678,6 +678,7 @@ export class ProcurementService {
       : []).map((row) => [row.component_id, row]));
     return {
       id: header.id,
+      sourcePacking: this.hasTable('procurement_import_records') ? (this.db.prepare(`SELECT r.source_json FROM procurement_import_records r JOIN procurement_imports i ON i.id=r.import_id WHERE i.purchase_order_id=? AND r.record_type IN ('PACKAGE_GROUP','PACKAGE_ITEM') ORDER BY r.record_id`).all(purchaseId) as any[]).map(r => JSON.parse(r.source_json)) : [],
       purchaseNumber: workflow?.purchase_number || header.id,
       orderDate: workflow?.order_date || header.created_at,
       workflowState: workflow?.state || (header.status === "APPROVED" ? "COST_PENDING" : "DRAFT"),
@@ -899,6 +900,19 @@ export class ProcurementService {
     });
   }
 
+  getPackagePlan(lineId: string) {
+    if (!this.hasTable('procurement_package_plan')) return null;
+    const rows = this.db.prepare(`SELECT pp.*,p.sku,p.title,p.product_type,p.size
+      FROM procurement_package_plan pp JOIN products p ON p.id=pp.product_id
+      WHERE pp.purchase_line_id=? ORDER BY pp.source_group_ref,pp.carton_index,pp.id`).all(lineId) as any[];
+    if (!rows.length) return null;
+    return { version: rows[0].plan_version, packages: rows.map(r => ({ id: r.id, code: r.package_code, quantityBaseInt: r.quantity_base_int,
+      sourceCartonId: r.source_carton_id, sourceGroupRef: r.source_group_ref, sourceItemRef: r.source_item_ref,
+      mixed: Boolean(r.mixed), grossWeightKgEstimate: r.gross_weight_kg_estimate,
+      sku: JSON.parse(r.product_snapshot_json).sku, title: JSON.parse(r.product_snapshot_json).title,
+      productType: JSON.parse(r.product_snapshot_json).product_type, size: JSON.parse(r.product_snapshot_json).size })) };
+  }
+
   listReceiptReady() {
     const packingColumns = this.hasTable("purchase_line_packing_snapshots")
       ? `,pk.supplier_no,pk.total_quantity,pk.box_count,pk.units_per_box,pk.box_weight_grams,pk.total_weight_grams,pk.part_weight_milligrams`
@@ -916,6 +930,7 @@ export class ProcurementService {
       LEFT JOIN inventory_lots il ON il.acquisition_cost_snapshot_id=s.id
       WHERE w.state='RECEIPT_PENDING' AND s.state='COSTED_PENDING_RECEIPT' AND p.status='APPROVED' AND r.id IS NULL AND il.id IS NULL
       ORDER BY w.order_date,w.purchase_number,l.line_index`).all() as any[]).map((row) => ({
+        packagePlan: this.getPackagePlan(row.purchase_line_id),
         costSnapshotId: row.cost_snapshot_id, purchaseOrderId: row.purchase_order_id, purchaseLineId: row.purchase_line_id,
         productId: row.product_id, purchaseNumber: row.purchase_number, orderDate: row.order_date,
         supplierName: row.supplier_name_snapshot, sku: row.product_sku_snapshot, productTitle: row.product_title_snapshot,

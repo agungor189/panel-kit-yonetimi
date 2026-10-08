@@ -18,9 +18,8 @@ test("product stock module preserves central and BOM-derived availability", () =
   const parent = db.prepare("SELECT * FROM products WHERE id = 'parent'").get();
   const hydrated = stock.hydrateProductStock(parent, true);
   assert.equal(hydrated.available_stock, 4);
-  assert.equal(hydrated.purchase_cost, 4);
+  assert.equal(hydrated.purchase_cost, null, 'Legacy component purchase_cost is not a FINAL acquisition source');
   assert.equal(hydrated.weight_grams, 200);
   assert.equal(hydrated.bom_components.length, 1);
   db.close();
 });
-

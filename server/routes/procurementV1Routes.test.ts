@@ -33,6 +33,12 @@ const post = (path: string, operationId: string, body: unknown) => fetch(`${base
   method: "POST", headers: { "content-type": "application/json", "x-operation-id": operationId }, body: JSON.stringify(body),
 });
 
+test('import apply fails closed without a catalog capability middleware', async () => {
+  const response = await post('/imports/apply', 'unauthorized-import', { csv: 'untrusted' });
+  assert.equal(response.status, 403);
+  assert.equal((await response.json() as any).error.code, 'CATALOG_AUTHORIZATION_REQUIRED');
+});
+
 test("procurement API requires operation identity and replays exact mutation results", async () => {
   assert.equal((await post("/fx/usd-try", "fx-40", { rate: "40", source: "MANUAL", changedAt: "2026-09-20T09:00:00.000Z" })).status, 201);
   assert.equal((await post("/suppliers", "supplier-create", { id: "supplier", name: "Supplier", defaultCurrency: "USD" })).status, 201);

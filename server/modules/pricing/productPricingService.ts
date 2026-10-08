@@ -1,3 +1,4 @@
+import { finalLandedCostSource } from './finalLandedCostSource.js';
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { finalLandedPricingDecision } from "../../../shared/finalLandedPricing.js";
@@ -122,11 +123,12 @@ export class ProductPricingService {
         const productId = String(approval.productId);
         this.db.prepare(`INSERT INTO pricing_history (
           id,product_id,purchase_price_usd,purchase_cost,sale_price,buffer_percentage,profit_percentage,
-          exchange_rate_used,price_locked,changed_by,change_reason,fixed_price_adjustment_try,price_rounding_increment
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+          exchange_rate_used,price_locked,changed_by,change_reason,fixed_price_adjustment_try,price_rounding_increment,final_cost_source_json
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
           randomUUID(), productId, current.purchase_price_usd, current.purchase_cost, current.sale_price,
           current.buffer_percentage, current.profit_percentage, current.exchange_rate_used, current.price_locked,
           input.actorId ?? null, input.reason, current.fixed_price_adjustment_try ?? 0, current.price_rounding_increment ?? 1,
+          JSON.stringify(finalLandedCostSource(this.db, productId)),
         );
         const changed = this.db.prepare(`UPDATE products SET sale_price=?,buffer_percentage=?,profit_percentage=?,
           fixed_price_adjustment_try=?,price_rounding_increment=?,updated_at=CURRENT_TIMESTAMP
@@ -152,10 +154,13 @@ export class ProductPricingService {
   }
 
   private readProduct(productId: string) {
-    return this.db.prepare(`SELECT p.*,lc.acquisition_cost_snapshot_id,lc.cost_try_numerator,lc.cost_try_denominator,k.id AS published_kit_id
+    const product = this.db.prepare(`SELECT p.*,lc.acquisition_cost_snapshot_id,lc.cost_try_numerator,lc.cost_try_denominator,k.id AS published_kit_id
       FROM products p
       LEFT JOIN current_product_landed_costs lc ON lc.product_id=p.id
       LEFT JOIN published_kits k ON k.product_id=p.id
       WHERE p.id=?`).get(productId) as any;
+    if (!product) return null;
+    const cost = finalLandedCostSource(this.db, productId);
+    return { ...product, acquisition_cost_snapshot_id: cost?.reference ?? null, cost_try_numerator: cost?.numerator ?? null, cost_try_denominator: cost?.denominator ?? null };
   }
 }
