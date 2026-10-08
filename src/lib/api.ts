@@ -46,6 +46,7 @@ const isReadOnlyProcurementPreview = (endpoint: string) => (
   endpoint === "/procurement/v1/imports/preview"
   || endpoint === "/procurement/v1/purchases/csv-preview"
   || /^\/procurement\/v1\/purchases\/[^/]+\/cost-preview$/.test(endpoint)
+  || /^\/procurement\/v1\/imports\/drafts\/[^/]+\/cost-preview$/.test(endpoint)
 );
 
 const requiresOperationId = (method: "POST" | "PUT" | "PATCH", endpoint: string) => (

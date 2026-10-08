@@ -79,9 +79,18 @@ test('import draft cost mutations replay safely and FINAL conversion remains exp
   assert.equal(update.data.draftCosts[0].amountMinor,200);
   const removed = await (await post(`/imports/drafts/${draft.id}/costs/${item.id}/remove`,'draft-cost-remove',{expectedVersion:2})).json() as any;
   assert.equal(removed.data.draftCosts.length,0);
-  const final = await (await post(`/imports/drafts/${draft.id}/finalize`,'draft-finalize',{
+  const decision = {
     vatMode:'EXCLUDED',vatRateBps:0,acquisitionCostVatPolicy:'VAT_EXCLUDED_FROM_INVENTORY_COST',
     includedCost:'NO_SEPARATE_CHARGE',stockCheck:'NO_PRIOR_RECEIPT',stockEvidence:'Synthetic empty DB',costDecisions:[],
+  };
+  const before = db.prepare('SELECT COUNT(*) FROM purchase_orders').pluck().get() as number;
+  const preview = await (await post(`/imports/drafts/${draft.id}/cost-preview`,'',decision)).json() as any;
+  assert.equal(preview.data.readOnly,true);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM purchase_orders').pluck().get(),before);
+  const unapproved = await post(`/imports/drafts/${draft.id}/finalize`,'draft-unapproved',decision);
+  assert.equal(unapproved.status,409);
+  const final = await (await post(`/imports/drafts/${draft.id}/finalize`,'draft-finalize',{
+    ...decision,expectedPreviewHash:preview.data.previewHash,approvePreview:true,
   })).json() as any;
   assert.equal(final.data.status,'APPROVED');
   assert.equal(db.prepare('SELECT COUNT(*) FROM inventory_ledger_events').pluck().get(),0);

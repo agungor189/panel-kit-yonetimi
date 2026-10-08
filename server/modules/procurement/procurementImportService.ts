@@ -18,7 +18,9 @@ export type ImportCostDecision = {
   includedCost: 'NO_SEPARATE_CHARGE'; stockCheck: 'NO_PRIOR_RECEIPT'; stockEvidence: string;
   costDecisions?: Array<{ costId: string; category: PurchaseCostInput['category']; counterparty: 'SUPPLIER' | 'THIRD_PARTY'; vatMode: 'INCLUDED' | 'EXCLUDED'; vatRateBps: number }>;
   approveProportionalAllocation?: boolean;
+  expectedPreviewHash?: string; approvePreview?: boolean;
 };
+class PreviewRollback extends Error { constructor(readonly result: any) { super('Read-only preview rollback'); } }
 export type DraftCostInput = { title: string; amountMinor: number; currency: 'USD' | 'TRY'; description?: string };
 
 const draftText = (value: unknown, field: string, max: number) => {
@@ -46,6 +48,20 @@ const APPROVED_MISSING_SKUS = new Map([
   ['PRODUCT-X003', 'PCI-R150-SVF'], ['PRODUCT-X004', 'FAST-M8X10'], ['PRODUCT-X005', 'FAST-M8X16'],
 ]);
 const skuKey = (sku: string) => sku.trim().toLocaleUpperCase('en-US');
+const verifiedSourceFields = (row: ImportRow, products: ImportRow[]) => {
+  if (!['PRODUCT-X001','PRODUCT-X002','PRODUCT-X003'].includes(row.record_id) ||
+    APPROVED_MISSING_SKUS.get(row.record_id) !== row.suggested_sku || !row.supplier_code || !row.name_en || row.profile_type !== 'Yuvarlak') return {};
+  const suffix = row.supplier_code.match(/-(E60|D48)$/)?.[1];
+  const proposed = row.meta?.proposed_fields;
+  if (!suffix || !proposed || typeof proposed !== 'object') return {};
+  const peers = products.filter(other => other !== row && other.supplier_code?.endsWith(`-${suffix}`) &&
+    other.material === proposed.material && other.size === proposed.size && other.profile_type === row.profile_type);
+  // A proposal is not a catalog fact by itself. Require corroboration by at least
+  // two MasterInfo products with the same supplier-code size family.
+  if (peers.length < 2 || proposed.material !== 'Premium Cast Iron' ||
+    proposed.size !== (suffix === 'E60' ? '2 inç - 60.3mm' : '1.5 inç - 48.3mm')) return {};
+  return { material: proposed.material as string, size: proposed.size as string };
+};
 type ResolvedProduct = {
   ref: string; row: number; source: ImportRow; sku: string; current: ReturnType<CatalogService['getProduct']>;
   proposed: CatalogProductInput; action: 'KEEP' | 'CREATE'; bomVersion: string | null;
@@ -106,9 +122,10 @@ export class ProcurementImportService {
         if (r.product_type && current.product_type !== r.product_type) problem(r, `SKU ${sku} katalog türüyle çelişiyor (${current.product_type || 'boş'} / ${r.product_type}).`);
         if (r.uom && current.base_uom.code !== r.uom) problem(r, `SKU ${sku} katalog birimiyle çelişiyor.`);
       }
+      const verified = verifiedSourceFields(r,parsed.products);
       const proposed: CatalogProductInput = { sku, title: r.name_tr || r.name_en || sku, catalog_type: 'product', base_uom_code: (r.uom || 'piece') as UomCode,
         product_type: r.product_type as CatalogProductInput['product_type'], name_tr: r.name_tr || undefined, name_en: r.name_en || undefined,
-        material: r.material || undefined, size: r.size || undefined, profile_type: r.profile_type || undefined, supplier_code: r.supplier_code || undefined,
+        material: r.material || verified.material, size: r.size || verified.size, profile_type: r.profile_type || undefined, supplier_code: r.supplier_code || undefined,
         // Source fractions are preserved verbatim in source rows, not rounded into catalog grams.
         mass_grams: r.unit_weight_g && Number.isInteger(Number(r.unit_weight_g)) ? Number(r.unit_weight_g) : undefined };
       return { ref: r.record_id, row: r.row, source: r, sku, current, proposed, action: current ? 'KEEP' : 'CREATE', bomVersion: current ? this.catalog.readBom(current.id).version : null };
@@ -192,6 +209,15 @@ export class ProcurementImportService {
           if (p.source.record_type !== 'PRODUCT') fail(p.source, 'PRODUCT olmadan yeni kart oluşturulamaz.');
           product = this.catalog.createProduct({ ...p.proposed, status: 'Passive', is_sellable: false }, p.proposed.product_type === 'assembly' ? {} : { activationProvenance: 'PROCUREMENT_CSV_FIRST_RECEIPT' });
         } else if (!product) fail(p.source, 'Kayıtlı SKU bulunamadı.');
+        else if (['PRODUCT-X001','PRODUCT-X002','PRODUCT-X003'].includes(p.ref) && p.proposed.material && p.proposed.size) {
+          const missing = { material:!product.material ? p.proposed.material : undefined,
+            size:!product.size ? p.proposed.size : undefined,
+            profile_type:!product.tube_type_code ? p.proposed.profile_type : undefined,
+            name_en:!product.name_en ? p.proposed.name_en : undefined,
+            supplier_code:!product.supplier_code ? p.proposed.supplier_code : undefined };
+          if (Object.values(missing).some(Boolean)) product = this.catalog.updateProduct(product.id,product.catalog_version,
+            { sku:product.sku,title:product.title,catalog_type:product.catalog_type,base_uom_code:product.base_uom.code,...missing });
+        }
         ids.set(p.ref, product!.id);
       }
       for (const alias of preview.aliases) this.catalog.confirmSupplierAlias(input.supplierId, alias.alias, ids.get(alias.ref)!, `${draftId}:${alias.ref}`);
@@ -396,12 +422,51 @@ export class ProcurementImportService {
     }).immediate();
   }
 
+  previewDraftCost(draftId: string, decision: ImportCostDecision, actorId: string) {
+    const { expectedPreviewHash: _expected, approvePreview: _approved, ...policy } = decision || {} as ImportCostDecision;
+    const draft = this.db.prepare('SELECT source_hash FROM procurement_import_drafts WHERE id=?').get(draftId) as { source_hash: string } | undefined;
+    if (!draft) throw new ProcurementValidationError('PURCHASE_NOT_FOUND','Satın alma taslağı bulunamadı.',404);
+    try {
+      this.db.transaction(() => {
+        const costs = this.activeDraftCosts(draftId);
+        if (costs.length && policy.approveProportionalAllocation !== true)
+          throw new ProcurementValidationError('ALLOCATION_APPROVAL_REQUIRED','Ek maliyet dağıtım onayı gerekli.',409);
+        const purchase = this.completeDraft(draftId,policy,actorId);
+        const engine = new ProcurementService(this.db).previewAcquisitionCosts(purchase.id,{
+          allocations: costs.map(cost => ({ componentId:cost.id,mode:'ACCEPT_SUGGESTION' as const })),
+        });
+        const snapshots = {
+          lines: purchase.lines.map((line: any) => ({ lineId:line.id,observationId:line.fx.observationId,numerator:line.fx.numerator,denominator:line.fx.denominator })),
+          costs: purchase.acquisitionCosts.map((cost: any) => ({ costId:cost.id,observationId:cost.fx.observationId,numerator:cost.fx.numerator,denominator:cost.fx.denominator })),
+        };
+        const rate = snapshots.lines[0];
+        const usdEquivalent = (tryMinor: number) => rate && rate.numerator > 0 && rate.denominator > 0
+          ? roundRatio(tryMinor,rate.denominator,rate.numerator) : null;
+        const result = { readOnly:true,formulaVersion:engine.formulaVersion,lines:engine.lines,totals:engine.totals,
+          usdTotals: { merchandiseUsdMinor:usdEquivalent(engine.totals.merchandiseTryMinor),
+            additionalUsdMinor:usdEquivalent(engine.totals.allocatedExpensesTryMinor),
+            estimatedTotalUsdMinor:usdEquivalent(engine.totals.landedCostTryMinor),fxObservationId:rate?.observationId ?? null },
+          warnings:engine.warnings,fxSnapshots:snapshots };
+        throw new PreviewRollback({ ...result,previewHash:canonicalPayloadHash({ draftId,sourceHash:draft.source_hash,
+          costs:costs.map(cost => ({ id:cost.id,version:cost.version })),policy,result }) });
+      }).immediate();
+    } catch (error) { if (error instanceof PreviewRollback) return error.result; throw error; }
+  }
+
   finalizeDraft(draftId: string, decision: ImportCostDecision, actorId: string) {
     return this.db.transaction(() => {
+      if (decision?.approvePreview !== true || !decision.expectedPreviewHash)
+        throw new ProcurementValidationError('COST_PREVIEW_APPROVAL_REQUIRED','FINAL maliyet önizlemesi açıkça onaylanmalı.',409);
+      const preview = this.previewDraftCost(draftId,decision,actorId);
+      if (preview.previewHash !== decision.expectedPreviewHash)
+        throw new ProcurementValidationError('COST_PREVIEW_STALE','Maliyet veya kur değişti; önizlemeyi yenileyin.',409);
+      if (preview.warnings.length)
+        throw new ProcurementValidationError('COST_PREVIEW_UNALLOCATED','Dağıtılmamış gider varken FINAL maliyet kesinleştirilemez.',409);
+      const { expectedPreviewHash: _expected, approvePreview: _approved, ...policy } = decision;
       const costs = this.activeDraftCosts(draftId);
-      if (costs.length && decision.approveProportionalAllocation !== true)
+      if (costs.length && policy.approveProportionalAllocation !== true)
         throw new ProcurementValidationError('ALLOCATION_APPROVAL_REQUIRED', 'Ek maliyetleri alış bedeli oranında dağıtma onayı gerekli.', 409);
-      const purchase = this.completeDraft(draftId,decision,actorId);
+      const purchase = this.completeDraft(draftId,policy,actorId);
       if (purchase.status === 'APPROVED') return purchase;
       return new ProcurementService(this.db).finalizeAcquisitionCosts(purchase.id, {
         allocations: costs.map(cost => ({ componentId: cost.id, mode: 'ACCEPT_SUGGESTION' as const })),

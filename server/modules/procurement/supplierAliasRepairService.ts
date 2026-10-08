@@ -5,7 +5,7 @@ import { ProcurementValidationError } from './procurementService.js';
 import { parseProcurementImport, type ImportRow } from './procurementImport.js';
 
 const key = (value: string) => value.trim().toLocaleUpperCase('en-US');
-const packingDescription = /\bin\s*(?:no|number)\s*:?\s*\d+\s*box\b/i;
+const packingDescription = /(?:^|[^\p{L}])[iı]n\s*(?:no|number)\s*:?\s*\d+\s*box\b/iu;
 const required = (value: unknown, field: string, max = 300) => {
   const text = typeof value === 'string' ? value.trim() : '';
   if (!text || text.length > max || /[\u0000-\u001f\u007f]/.test(text)) throw new ProcurementValidationError('ALIAS_REPAIR_EVIDENCE_REQUIRED', `${field} gerekli.`);

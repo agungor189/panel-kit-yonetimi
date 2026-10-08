@@ -119,6 +119,14 @@ and optional description. Currency conversion in the draft is a read-only estima
 from the accepted FX observation. Tax, counterparty, prior-stock evidence and
 allocation approval remain mandatory at FINAL cost conversion, which uses the
 existing ProcurementService engine atomically.
+The alias repair recognizes both `in number` and Turkish dotless-ı `ın number`
+Packing List suffixes. For the three approved PCI SKU identities, missing Premium
+material/size is filled only when at least two MasterInfo products with the same
+supplier-code size family corroborate `meta_json.proposed_fields`; the English name,
+supplier number and profile type remain direct source fields. No speculative
+Turkish name is synthesized. Before FINAL, the draft uses the existing LC preview
+calculator in a rolled-back transaction and requires an unchanged preview hash
+and explicit approval. Preview creates no persisted purchase, plan, cost or stock.
 
 Receipt intents gain optional `packagePlan` with a version, backend package IDs,
 per-package quantities, immutable catalog snapshots and source-carton references.

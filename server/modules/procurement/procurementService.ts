@@ -728,12 +728,13 @@ export class ProcurementService {
         productId: row.product_id,
         product: (() => {
           const sourceLine = linesByCanonicalId.get(row.id);
-          const sourceProduct = productsBySourceRef.get(sourceLine?.product_ref) || catalogSnapshots.get(row.catalog_version_ref_snapshot) || sourceLine || {};
+          const sourceProduct = productsBySourceRef.get(sourceLine?.product_ref) || sourceLine || {};
+          const catalogProduct = catalogSnapshots.get(row.catalog_version_ref_snapshot) || {};
           return { sku: row.product_sku_snapshot, title: row.product_title_snapshot, catalogVersionRef: row.catalog_version_ref_snapshot,
-            supplierCode: sourceProduct.supplier_code || null,
-            nameTr: sourceProduct.name_tr || null, nameEn: sourceProduct.name_en || null,
-            size: sourceProduct.size || null, material: sourceProduct.material || null,
-            profileType: sourceProduct.profile_type || null, productType: sourceProduct.product_type || null };
+            supplierCode: sourceProduct.supplier_code || catalogProduct.supplier_code || null,
+            nameTr: sourceProduct.name_tr || catalogProduct.name_tr || null, nameEn: sourceProduct.name_en || catalogProduct.name_en || null,
+            size: sourceProduct.size || catalogProduct.size || null, material: sourceProduct.material || catalogProduct.material || null,
+            profileType: sourceProduct.profile_type || catalogProduct.tube_type_code || null, productType: sourceProduct.product_type || catalogProduct.product_type || null };
         })(),
         sourceLineAmountMinor: linesByCanonicalId.has(row.id) ? Number(decimal(linesByCanonicalId.get(row.id).amount, linesByCanonicalId.get(row.id), 'amount', 2)) : null,
         plannedPackages: (() => {

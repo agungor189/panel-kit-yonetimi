@@ -92,7 +92,7 @@ test('packing-list box descriptions remain source evidence, never supplier alias
   const { db, importer, request, catalog, procurement, decision } = setup();
   const data: any[] = rows();
   data[1].supplier_code = 'MASTER-42';
-  data[2].source_supplier_code = 'in no:4 box';
+  data[2].source_supplier_code = 'CS25-Round H1 ın number 2 box';
   data[5].source_supplier_code = 'in no:4 box';
   const input = request(data);
   const preview = importer.preview(input);
@@ -103,29 +103,71 @@ test('packing-list box descriptions remain source evidence, never supplier alias
   assert.equal(catalog.supplierAlias('supplier','in no:4 box'),null);
   assert.equal(draft.lines[0].plannedPackages.count,4);
   const source = db.prepare('SELECT source_csv FROM procurement_import_drafts WHERE id=?').get(draft.id) as any;
-  assert.match(source.source_csv,/in no:4 box/);
-  const approved = importer.finalizeDraft(draft.id,{ ...decision, approveProportionalAllocation:true },'tester');
+  assert.match(source.source_csv,/CS25-Round H1 ın number 2 box/);
+  const labelDecision = { ...decision, approveProportionalAllocation:true };
+  const approved = importer.finalizeDraft(draft.id,{ ...labelDecision,approvePreview:true,
+    expectedPreviewHash:importer.previewDraftCost(draft.id,labelDecision,'tester').previewHash },'tester');
   procurement.approveForReceipt(approved.id,'tester');
   const labelPlan = db.prepare('SELECT id,plan_version FROM procurement_package_plan WHERE purchase_order_id=? LIMIT 1').get(approved.id) as any;
   const label = new PrintingService(db).packageSnapshot(labelPlan.id,{ planVersion:labelPlan.plan_version,supplierLotCode:'FIXTURE-LOT' });
   assert.equal(label.payload.Supplier_no,'MASTER-42');
   // Model a legacy bad import without modifying applied migrations or a live DB.
   catalog.confirmSupplierAlias('supplier','in no:4 box',productId,`${draft.id}:a`);
+  catalog.confirmSupplierAlias('supplier','CS25-Round H1 ın number 2 box',productId,`${draft.id}:a`);
   const repair = new SupplierAliasRepairService(db);
   const plan = repair.preview('supplier');
-  assert.deepEqual(plan.candidates.map(item => item.alias),['in no:4 box']);
+  assert.deepEqual(plan.candidates.map(item => item.alias),['CS25-Round H1 ın number 2 box','in no:4 box']);
   assert.equal(plan.retainedAliasCount,1);
   assert.throws(() => repair.apply('supplier',{ expectedManifestHash:'wrong',backupReference:'backup',backupSha256:'a'.repeat(64),approvalReference:'approval',reason:'packing alias' },'tester'),/manifesti/);
   const corrected = repair.apply('supplier',{ expectedManifestHash:plan.manifestHash,backupReference:'isolated-backup',backupSha256:'a'.repeat(64),approvalReference:'approved-repair',reason:'packing alias' },'tester');
-  assert.equal(corrected.corrected.length,1);
+  assert.equal(corrected.corrected.length,2);
   assert.equal(catalog.supplierAlias('supplier','in no:4 box'),null);
+  assert.equal(catalog.supplierAlias('supplier','CS25-Round H1 ın number 2 box'),null);
   assert.equal(catalog.supplierAlias('supplier','MASTER-42'),productId);
-  assert.equal(db.prepare('SELECT COUNT(*) FROM catalog_supplier_aliases').pluck().get(),2);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM catalog_supplier_aliases').pluck().get(),3);
   const reversal = repair.previewCompensation('supplier','in no:4 box');
   repair.compensate('supplier','in no:4 box',{ expectedManifestHash:reversal.manifestHash,expectedProductId:productId,
     backupReference:'isolated-backup',backupSha256:'b'.repeat(64),approvalReference:'approved-compensation',reason:'reversal test' },'tester');
   assert.equal(catalog.supplierAlias('supplier','in no:4 box'),productId);
   db.close();
+});
+
+test('three approved PCI identities fill only peer-corroborated proposal fields on their own catalog cards', () => {
+  const targets = [
+    ['PRODUCT-X001','PCI-R200-4W','A116-E60','2 inç - 60.3mm','Cast Iron Round Tube Clamp - 4 Way'],
+    ['PRODUCT-X002','PCI-R200-5W','A176-E60','2 inç - 60.3mm','Cast Iron Round Tube Clamp - 5 Way'],
+    ['PRODUCT-X003','PCI-R150-SVF','A173-D48','1.5 inç - 48.3mm','Cast Iron Round Tube Clamp'],
+  ];
+  for (const [ref,sku,supplierCode,size,nameEn] of targets) {
+    const { db, importer, request, catalog } = setup();
+    const data:any[] = rows();
+    Object.assign(data[1],{ record_id:ref,sku:'',suggested_sku:sku,supplier_code:supplierCode,
+      material:'',size:'',profile_type:'Yuvarlak',name_en:nameEn,product_type:'simple',
+      meta_json:JSON.stringify({ proposed_fields:{ material:'Premium Cast Iron',size,name_tr:'Unverified translation' } }) });
+    for (const index of [2,5,6]) Object.assign(data[index],{ product_ref:ref,sku:'' });
+    const suffix = supplierCode.split('-').at(-1);
+    for (let index=0;index<2;index++) data.push({ schema_version:'dsdst.procurement.import.v1',record_type:'PRODUCT',record_id:`peer-${index}`,
+      parent_ref:'p',sku:`PEER-${index}`,supplier_code:`A10${index}-${suffix}`,name_en:`Peer ${index}`,
+      material:'Premium Cast Iron',size,profile_type:'Yuvarlak',product_type:'component',uom:'piece' });
+    if (sku === 'PCI-R200-4W') {
+      const existing = catalog.createProduct({ sku,title:nameEn,catalog_type:'product',base_uom_code:'piece',product_type:'simple' });
+      db.prepare('UPDATE products SET sale_price=12345 WHERE id=?').run(existing.id); // isolated fixture: prove catalog enrichment leaves pricing intact
+    }
+    const input = request(data), preview = importer.preview(input);
+    assert.equal(preview.blockingErrors.length,0);
+    const proposal = preview.products.find(product => product.ref === ref)!;
+    assert.equal(proposal.proposed.material,'Premium Cast Iron');
+    assert.equal(proposal.proposed.size,size);
+    assert.equal(proposal.proposed.name_tr,undefined);
+    const draft = importer.apply(input,'tester');
+    const card = catalog.getProduct(draft.lines[0].productId)!;
+    assert.equal(card.sku,sku); assert.equal(card.supplier_code,supplierCode);
+    assert.equal(card.material,'Premium Cast Iron'); assert.equal(card.tube_type_code,'Yuvarlak'); assert.equal(card.size,size);
+    assert.equal(card.name_en,nameEn); assert.equal(card.name_tr,null);
+    assert.equal(draft.lines[0].quote.supplierUnitPriceMinor,200);
+    if (sku === 'PCI-R200-4W') assert.equal(db.prepare('SELECT sale_price FROM products WHERE id=?').pluck().get(card.id),12345);
+    db.close();
+  }
 });
 
 test('draft costs are editable without tax/FX decisions and FINAL conversion uses the existing LC engine once', () => {
@@ -143,15 +185,38 @@ test('draft costs are editable without tax/FX decisions and FINAL conversion use
   assert.equal(deleted.draftCosts.length,1);
   assert.equal(deleted.additionalCostsUsdMinor,1500);
   assert.equal(db.prepare('SELECT COUNT(*) FROM procurement_import_draft_cost_revisions').pluck().get(),4);
-  assert.throws(() => importer.finalizeDraft(draft.id,{...decision,approveProportionalAllocation:true},'tester'),/Her ek maliyet/);
-  const final = importer.finalizeDraft(draft.id,{...decision,approveProportionalAllocation:true,
-    costDecisions:[{costId:freight.id,category:'FREIGHT',counterparty:'THIRD_PARTY',vatMode:'EXCLUDED',vatRateBps:0}]},'tester');
+  assert.throws(() => importer.previewDraftCost(draft.id,{...decision,approveProportionalAllocation:true},'tester'),/Her ek maliyet/);
+  const finalDecision = {...decision,approveProportionalAllocation:true,
+    costDecisions:[{costId:freight.id,category:'FREIGHT' as const,counterparty:'THIRD_PARTY' as const,vatMode:'EXCLUDED' as const,vatRateBps:0}]};
+  assert.throws(() => importer.finalizeDraft(draft.id,finalDecision,'tester'),/önizlemesi/);
+  const preview = importer.previewDraftCost(draft.id,finalDecision,'tester');
+  assert.equal(preview.readOnly,true);
+  assert.equal(preview.totals.landedCostTryMinor,860000);
+  assert.equal(preview.usdTotals.estimatedTotalUsdMinor,21500);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM purchase_orders').pluck().get(),0);
+  assert.throws(() => importer.finalizeDraft(draft.id,{...finalDecision,approvePreview:true,expectedPreviewHash:'stale'},'tester'),/yenileyin/);
+  const final = importer.finalizeDraft(draft.id,{...finalDecision,approvePreview:true,
+    expectedPreviewHash:preview.previewHash},'tester');
   assert.equal(final.status,'APPROVED');
   assert.equal(final.acquisitionCosts.length,1);
   assert.equal(final.lots[0].landedCostTryMinor,860000);
+  assert.equal(final.lots[0].landedCostTryMinor,preview.lines[0].totalCostTryMinor);
   assert.equal(db.prepare('SELECT COUNT(*) FROM procurement_package_plan').pluck().get(),4);
   assert.equal(db.prepare('SELECT COUNT(*) FROM inventory_ledger_events').pluck().get(),0);
   assert.throws(() => importer.deleteDraftCost(draft.id,freight.id,2,'tester','too-late'),/kesinleştirilmiş/);
+  db.close();
+});
+
+test('a changed accepted FX observation invalidates a previously approved FINAL preview', () => {
+  const { db,importer,request,decision } = setup();
+  const draft = importer.apply(request(),'tester');
+  const prior = importer.previewDraftCost(draft.id,decision,'tester');
+  new ExchangeRateService(db).recordCurrentUsdTry({ rate:'41',source:'MANUAL',changedAt:'2026-01-02T00:00:00.000Z',actorId:'tester' });
+  assert.throws(() => importer.finalizeDraft(draft.id,{...decision,approvePreview:true,expectedPreviewHash:prior.previewHash},'tester'),/yenileyin/);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM purchase_orders').pluck().get(),0);
+  const current = importer.previewDraftCost(draft.id,decision,'tester');
+  assert.notEqual(current.previewHash,prior.previewHash);
+  assert.equal(current.totals.landedCostTryMinor,820000);
   db.close();
 });
 

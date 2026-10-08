@@ -142,6 +142,11 @@ export function createProcurementV1Router({ db, authorizeProcurement, authorizeC
       return sendOutcome(res,outcome);
     } catch (error) { return sendError(error,res); }
   });
+  router.post('/imports/drafts/:id/cost-preview', authorizeCostApproval, (req, res) => {
+    try { return res.json({ success:true,contract:'dsdst.procurement.import-draft-cost-preview.v1',
+      data:importer.previewDraftCost(req.params.id,req.body,req.user!.id) }); }
+    catch (error) { return sendError(error,res); }
+  });
   router.post('/imports/drafts/:id/finalize', authorizeCostApproval, (req, res) => {
     try {
       const outcome = execute(commands, req, 'acquisition-cost:approve', 'procurement.import-draft.finalize.v1', { draftId: req.params.id, decision: req.body }, context => {
