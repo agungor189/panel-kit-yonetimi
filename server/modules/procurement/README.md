@@ -74,9 +74,19 @@ or recalculate them.
 ## Versioned single-file import and package projection
 
 `POST /api/procurement/v1/imports/preview` parses `dsdst.procurement.import.v1`
-without writes. `/imports/apply` requires procurement and catalog capabilities,
-an operation identity, the current preview hash, explicit catalog/BOM/source
-approvals, tax policy and prior-stock evidence. The existing flat CSV path remains.
+without writes. SKU matches are automatic: an exact existing SKU is kept, a new
+PRODUCT SKU creates a passive card, and the five explicitly approved missing
+MasterInfo identities may use their fixed suggested SKUs. Ambiguous identity,
+supplier alias, UOM or product type conflicts block apply with source-row errors.
+Only unique verified supplier aliases are recorded; generic repeated descriptions
+remain in source evidence. Identical BOMs are left intact; changed BOMs use their
+previewed version under the single import approval. Later purchases may reference
+existing SKUs without repeating PRODUCT or BOM rows.
+
+`/imports/apply` requires procurement and catalog capabilities, an operation
+identity, the current preview hash, one explicit tax policy and prior-stock
+evidence. It recomputes the automatic plan inside the same transaction as the
+catalog and purchase writes. The existing flat CSV path remains.
 The source text hash and supplier/invoice identity deduplicate imports independently
 of the filename and operation key. Catalog commands, purchase draft, aliases,
 source references, immutable package plan and command result commit together.

@@ -4,13 +4,24 @@ import { CatalogService, type CatalogProductInput } from '../catalog/catalogServ
 import { canonicalPayloadHash } from '../commands/commandFoundation.js';
 import { normalizeBaseQuantity, type UomCode } from '../catalog/uom.js';
 import { ProcurementService, ProcurementValidationError, type PurchaseInput } from './procurementService.js';
-import { parseProcurementImport, expandSourcePackages, decimal, fail, type ImportRow } from './procurementImport.js';
+import { parseProcurementImport, expandSourcePackages, decimal, fail, ImportValidationError, type ImportRow } from './procurementImport.js';
 
 type Choice = { action: 'KEEP' | 'UPDATE' | 'CREATE'; productId?: string; fields?: CatalogProductInput };
 export type ImportRequest = {
   csv: string; supplierId: string; choices?: Record<string, Choice>; confirmations?: string[];
   expectedPreviewHash?: string;
   policy?: { vatMode: 'INCLUDED' | 'EXCLUDED'; vatRateBps: number; acquisitionCostVatPolicy: PurchaseInput['acquisitionCostVatPolicy']; includedCost: 'NO_SEPARATE_CHARGE'; stockCheck: 'NO_PRIOR_RECEIPT'; stockEvidence: string; expenseTypes?: Record<string, any> };
+};
+
+// These five identities were explicitly approved for source rows without a MasterInfo SKU.
+const APPROVED_MISSING_SKUS = new Map([
+  ['PRODUCT-X001', 'PCI-R200-4W'], ['PRODUCT-X002', 'PCI-R200-5W'],
+  ['PRODUCT-X003', 'PCI-R150-SVF'], ['PRODUCT-X004', 'FAST-M8X10'], ['PRODUCT-X005', 'FAST-M8X16'],
+]);
+const skuKey = (sku: string) => sku.trim().toLocaleUpperCase('en-US');
+type ResolvedProduct = {
+  ref: string; row: number; source: ImportRow; sku: string; current: ReturnType<CatalogService['getProduct']>;
+  proposed: CatalogProductInput; action: 'KEEP' | 'CREATE'; bomVersion: string | null;
 };
 
 export class ProcurementImportService {
@@ -21,58 +32,119 @@ export class ProcurementImportService {
     const parsed = parseProcurementImport(input.csv);
     const supplier = this.db.prepare('SELECT id,name FROM procurement_suppliers WHERE id=? AND active=1').get(input.supplierId) as any;
     if (!supplier) fail(parsed.header, 'Önce kayıtlı tedarikçiyi seçin.');
-    const definitions = [...parsed.products];
-    for (const line of parsed.lines.filter(r => !r.product_ref)) if (!definitions.some(r => r.record_id === `sku:${line.sku}`)) definitions.push({ ...line, record_id: `sku:${line.sku}` } as ImportRow);
-    const required = new Map<string, { key: string; row: number; sku: string; message: string }>();
-    const review = (r: ImportRow, code: string, message: string) => required.set(`${r.record_id}:${code}`, { key: `${r.record_id}:${code}`, row: r.row, sku: r.sku || r.suggested_sku || '', message });
-    if (supplier.name.trim().toLocaleUpperCase('en-US') !== parsed.header.supplier_name.trim().toLocaleUpperCase('en-US')) review(parsed.header, 'SUPPLIER_CONFIRM', `Kaynak tedarikçi ${parsed.header.supplier_name} → kayıtlı ${supplier.name} eşleştirmesini onaylayın.`);
-    for (const r of parsed.rows) {
-      for (const code of (r.record_type === 'EXPENSE' ? [] : (r.review_codes || '').split(';').filter(code => code && code !== 'EXPENSE_POLICY_CONFIRM'))) review(r, code, `${code} · ${r.notes || r.name_en || r.record_id}`);
-      if (r.record_type === 'LINE' && r.pricing_basis === 'INCLUDED_IN_PRICE') review(r, 'INCLUDED_COST_POLICY_CONFIRM', 'Fiyata dahil içerik: ayrı bedel eklenmeyecek; LC dağıtımı ayrıca onaylanır.');
-      if (r.meta.quantity_derived_from || r.meta.quantity_derived || Object.hasOwn(r.meta, 'original_total_qty_cell_value') && String(r.meta.original_total_qty_cell_value ?? '').trim() === '') review(r, 'DERIVED_QUANTITY_CONFIRM', 'Kaynakta boş toplam miktarın koli içeriğinden türetilmesini onaylayın.');
+    const blockingErrors: string[] = [];
+    const problem = (r: ImportRow, message: string) => blockingErrors.push(`Satır ${r.row} · ${r.record_id} · ${r.source_file || 'CSV'}:${r.source_row || r.row} · ${message}`);
+    if (skuKey(supplier.name) !== skuKey(parsed.header.supplier_name)) problem(parsed.header, `Kaynak tedarikçi ${parsed.header.supplier_name} kayıtlı ${supplier.name} ile uyuşmuyor.`);
+    const catalogBySku = new Map<string, NonNullable<ReturnType<CatalogService['getProduct']>>>();
+    const ambiguousCatalogSkus = new Set<string>();
+    for (const product of this.catalog.listProducts()) {
+      const key = skuKey(product.sku);
+      if (catalogBySku.has(key) && catalogBySku.get(key)!.id !== product.id) ambiguousCatalogSkus.add(key);
+      else catalogBySku.set(key, product);
     }
-    review(parsed.header, 'EXISTING_STOCK_CHECK', 'Bu fatura/parti daha önce fiziksel kabul veya başlangıç stokuna alınmadı; kanıt açıklaması gerekli.');
-
-    const products = definitions.map(r => {
-      const choice = input.choices?.[r.record_id];
-      const exact = r.sku ? this.db.prepare('SELECT id FROM products WHERE upper(sku)=upper(?)').get(r.sku) as any : null;
-      const current = this.catalog.getProduct(choice?.productId || exact?.id || '') || null;
-      if (choice?.action === 'CREATE' && choice.fields?.sku && this.db.prepare('SELECT 1 FROM products WHERE upper(sku)=upper(?)').get(choice.fields.sku.trim())) fail(r, 'Önerilen yeni SKU katalogda zaten kullanılıyor.');
-      if (r.sku && current && current.sku !== r.sku) fail(r, 'SKU farklı ürüne eşleştirilemez.');
-      if (choice?.action === 'CREATE' && current) fail(r, 'Yeni SKU mevcut katalogla çakışıyor.');
-      if (!current || !r.sku) review(r, 'NEW_PRODUCT_CONFIRM', 'Mevcut ürüne eşleştirin veya yeni ürün alanlarını açıkça onaylayın.');
-      const proposed: any = JSON.parse(JSON.stringify({ sku: r.sku || r.suggested_sku || '', title: r.name_tr || r.name_en || r.sku || '', catalog_type: 'product', base_uom_code: r.uom || 'piece',
-        product_type: r.product_type, name_tr: r.name_tr || undefined, name_en: r.name_en || undefined, material: r.material || undefined, size: r.size || undefined, profile_type: r.profile_type || undefined, supplier_code: r.supplier_code || undefined,
-        mass_grams: r.unit_weight_g && Number.isInteger(Number(r.unit_weight_g)) ? Number(r.unit_weight_g) : undefined }));
-      // Fractional source measurements remain in source records, never silently rounded into integer catalog mass.
-      if (r.unit_weight_g && !Number.isInteger(Number(r.unit_weight_g))) review(r, 'CATALOG_WEIGHT_CONFIRM', `Kaynak ağırlığı ${r.unit_weight_g} g; tamsayı katalog ağırlığını ayrıca seçebilir veya katalog alanını boş tutabilirsiniz.`);
-      for (const item of parsed.rows.filter(x => x.record_type !== 'BOM' && (x.product_ref === r.record_id || (!x.product_ref && x.sku === r.sku)))) {
-        const alias = item.source_supplier_code;
-        if (!alias) continue;
-        const bound = this.catalog.supplierAlias(input.supplierId, alias);
-        if (bound && current && bound !== current.id) fail(item, 'Tedarikçi alias başka ürüne bağlı.');
-        if (!bound && alias !== (current?.supplier_code || r.supplier_code)) review(item, 'ALIAS_CONFIRM', `${alias} → ${current?.sku || proposed.sku} tedarikçi eşleşmesini onaylayın.`);
+    for (const product of this.db.prepare('SELECT id,sku FROM products WHERE sku IS NOT NULL').all() as Array<{ id: string; sku: string }>) {
+      if (catalogBySku.get(skuKey(product.sku))?.id !== product.id) ambiguousCatalogSkus.add(skuKey(product.sku));
+    }
+    const catalogBySupplierCode = new Map<string, string>();
+    for (const product of catalogBySku.values()) if (product.supplier_code) {
+      const key = skuKey(product.supplier_code);
+      if (!catalogBySupplierCode.has(key)) catalogBySupplierCode.set(key, product.id);
+      else if (catalogBySupplierCode.get(key) !== product.id) catalogBySupplierCode.set(key, 'AMBIGUOUS');
+    }
+    const existingAliases = new Map((this.db.prepare('SELECT alias,product_id FROM catalog_supplier_aliases WHERE supplier_id=?').all(input.supplierId) as Array<{ alias: string; product_id: string }>).map(a => [skuKey(a.alias), a.product_id]));
+    const definitions = [...parsed.products];
+    const skuToRef = new Map<string, string>();
+    for (const r of definitions) {
+      const approved = APPROVED_MISSING_SKUS.get(r.record_id);
+      const sku = r.sku?.trim() || (approved && r.suggested_sku === approved ? approved : '');
+      if (!sku) { problem(r, 'MasterInfo SKU yok; yalnız açıkça kabul edilmiş beş önerilen SKU otomatik atanabilir.'); continue; }
+      const key = skuKey(sku);
+      if (skuToRef.has(key)) problem(r, `SKU ${sku} birden fazla PRODUCT kaydında bulunuyor.`);
+      else skuToRef.set(key, r.record_id);
+    }
+    for (const line of parsed.lines.filter(r => !r.product_ref)) {
+      if (!skuToRef.has(skuKey(line.sku))) {
+        if (!catalogBySku.has(skuKey(line.sku))) problem(line, `PRODUCT içermeyen SKU ${line.sku} katalogda yok.`);
+        else { definitions.push({ ...line, record_id: `sku:${line.sku}` } as ImportRow); skuToRef.set(skuKey(line.sku), `sku:${line.sku}`); }
       }
-      return { ref: r.record_id, row: r.row, source: r, current, proposed, choice: choice || null, bomVersion: current ? this.catalog.readBom(current.id).version : null };
+    }
+    const products: ResolvedProduct[] = definitions.map(r => {
+      const sku = r.sku?.trim() || (APPROVED_MISSING_SKUS.get(r.record_id) === r.suggested_sku ? r.suggested_sku : '');
+      const current = catalogBySku.get(skuKey(sku)) || null;
+      if (ambiguousCatalogSkus.has(skuKey(sku))) problem(r, `SKU ${sku} katalogda tek ve sürümlü ürün olarak çözülemedi (çift veya versiyonsuz kayıt).`);
+      if (!current && r.record_type === 'PRODUCT' && (!r.uom || !r.product_type || !(r.name_tr || r.name_en))) problem(r, 'Yeni ürün için MasterInfo tür, birim ve ürün adı zorunlu.');
+      if (current && r.record_type === 'PRODUCT') {
+        if (r.product_type && current.product_type !== r.product_type) problem(r, `SKU ${sku} katalog türüyle çelişiyor (${current.product_type || 'boş'} / ${r.product_type}).`);
+        if (r.uom && current.base_uom.code !== r.uom) problem(r, `SKU ${sku} katalog birimiyle çelişiyor.`);
+      }
+      const proposed: CatalogProductInput = { sku, title: r.name_tr || r.name_en || sku, catalog_type: 'product', base_uom_code: (r.uom || 'piece') as UomCode,
+        product_type: r.product_type as CatalogProductInput['product_type'], name_tr: r.name_tr || undefined, name_en: r.name_en || undefined,
+        material: r.material || undefined, size: r.size || undefined, profile_type: r.profile_type || undefined, supplier_code: r.supplier_code || undefined,
+        // Source fractions are preserved verbatim in source rows, not rounded into catalog grams.
+        mass_grams: r.unit_weight_g && Number.isInteger(Number(r.unit_weight_g)) ? Number(r.unit_weight_g) : undefined };
+      return { ref: r.record_id, row: r.row, source: r, sku, current, proposed, action: current ? 'KEEP' : 'CREATE', bomVersion: current ? this.catalog.readBom(current.id).version : null };
     });
+    const byRef = new Map(products.map(product => [product.ref, product]));
+    const aliasesByKey = new Map<string, { alias: string; refs: Set<string>; rows: ImportRow[]; canonical: boolean }>();
+    const offerAlias = (alias: string, ref: string, row: ImportRow, canonical = false) => {
+      if (!alias?.trim() || !byRef.has(ref)) return;
+      const key = skuKey(alias);
+      const entry = aliasesByKey.get(key) || { alias: alias.trim(), refs: new Set<string>(), rows: [], canonical: false };
+      entry.refs.add(ref); entry.rows.push(row); entry.canonical ||= canonical;
+      aliasesByKey.set(key, entry);
+    };
+    for (const product of products) if (product.source.record_type === 'PRODUCT') {
+      offerAlias(product.source.supplier_code, product.ref, product.source, true);
+      offerAlias(product.source.source_supplier_code, product.ref, product.source);
+    }
+    for (const row of parsed.rows) if (row.record_type !== 'BOM' && row.source_supplier_code) {
+      const ref = row.product_ref || skuToRef.get(skuKey(row.sku));
+      if (ref) offerAlias(row.source_supplier_code, ref, row);
+    }
+    const aliases: Array<{ alias: string; ref: string }> = [];
+    const skippedAliases: string[] = [];
+    for (const [key, entry] of aliasesByKey) {
+      if (entry.refs.size > 1) {
+        if (entry.canonical || existingAliases.has(key)) for (const row of entry.rows) problem(row, `Tedarik no ${entry.alias} birden fazla SKU'ya bağlı.`);
+        else skippedAliases.push(entry.alias); // Generic packing descriptions are not verified supplier numbers.
+        continue;
+      }
+      const ref = [...entry.refs][0], product = byRef.get(ref)!;
+      const owner = existingAliases.get(key) || catalogBySupplierCode.get(key);
+      if (owner && owner !== product.current?.id) problem(entry.rows[0], `Tedarik no ${entry.alias} başka katalog ürününe bağlı.`);
+      else aliases.push({ alias: entry.alias, ref });
+    }
     const bom = [...new Set(parsed.bom.map(r => r.parent_ref))].map(parentRef => {
-      const p = products.find(p => p.ref === parentRef)!;
+      const p = byRef.get(parentRef);
+      if (!p) { problem(parsed.bom.find(r => r.parent_ref === parentRef)!, 'BOM parent ürünü çözülemedi.'); return null; }
       const current = p.current ? this.catalog.readBom(p.current.id) : { lines: [], version: this.catalog.readBom('').version };
       const incoming = parsed.bom.filter(r => r.parent_ref === parentRef).map(r => ({ componentRef: r.component_ref, quantity: Number(r.quantity_per_unit) }));
-      review(parsed.bom.find(r => r.parent_ref === parentRef)!, 'BOM_DIFF_CONFIRM', 'Bu assembly reçetesinin mevcut/önerilen farkını onaylayın. Diğer reçeteler korunur.');
-      return { parentRef, current, incoming };
-    });
-    const requirements = [...required.values()];
+      for (const item of incoming) {
+        const component = byRef.get(item.componentRef);
+        if (!component || component.current?.product_type && component.current.product_type !== 'component') problem(parsed.bom.find(r => r.component_ref === item.componentRef)!, 'BOM bileşeni katalogda component olarak çözülemedi.');
+      }
+      const incomingExisting = incoming.map(item => ({ componentId: byRef.get(item.componentRef)?.current?.id, quantity: item.quantity }));
+      const unchanged = p.current && incomingExisting.every(item => item.componentId) &&
+        JSON.stringify([...incomingExisting].sort((a,b) => String(a.componentId).localeCompare(String(b.componentId)))) === JSON.stringify(current.lines);
+      return { parentRef, current, incoming, action: unchanged ? 'KEEP' as const : 'REPLACE' as const };
+    }).filter((item): item is NonNullable<typeof item> => item !== null);
+    const summary = { existingSkuCount: products.filter(p => p.action === 'KEEP').length, newSkuCount: products.filter(p => p.action === 'CREATE').length,
+      purchaseLineCount: parsed.lines.length, billedLineCount: parsed.lines.filter(l => l.pricing_basis === 'BILLED').length,
+      includedLineCount: parsed.lines.filter(l => l.pricing_basis === 'INCLUDED_IN_PRICE').length, bomCount: bom.length,
+      bomRelationCount: parsed.bom.length, bomChangeCount: bom.filter(b => b.action === 'REPLACE').length, aliasCount: aliases.length };
     const identity = this.db.prepare('SELECT purchase_order_id,source_hash FROM procurement_imports WHERE source_hash=? OR (supplier_id=? AND invoice_number=?)').get(parsed.sourceHash, input.supplierId, parsed.header.invoice_number.trim()) as any;
-    const previewHash = canonicalPayloadHash(JSON.parse(JSON.stringify({ source: parsed.sourceHash, supplierId: supplier.id, products, bom, policy: input.policy || null, requirements })));
-    return { parsed, supplier, products, bom, requirements, previewHash, existingPurchaseId: identity?.purchase_order_id || null,
-      unresolved: requirements.filter(r => !input.confirmations?.includes(r.key)), packagePreview: expandSourcePackages(parsed) };
+    const previewHash = canonicalPayloadHash({ source: parsed.sourceHash, supplierId: supplier.id,
+      products: products.map(p => ({ ref: p.ref, sku: p.sku, action: p.action, id: p.current?.id ?? null, version: p.current?.catalog_version_ref ?? null })),
+      bom: bom.map(b => ({ ref: b.parentRef, action: b.action, version: b.current.version, incoming: b.incoming })),
+      aliases, policy: input.policy || null, blockingErrors });
+    return { parsed, supplier, products, bom, aliases, skippedAliases, summary, blockingErrors, previewHash,
+      existingPurchaseId: identity?.purchase_order_id || null, packagePreview: expandSourcePackages(parsed) };
   }
 
   apply(input: ImportRequest, actorId: string) {
     return this.db.transaction(() => {
       const parsed = parseProcurementImport(input.csv);
-      const approvalHash = canonicalPayloadHash({ sourceHash: parsed.sourceHash, supplierId: input.supplierId, choices: input.choices || {}, confirmations: [...(input.confirmations || [])].sort(), policy: input.policy || null });
+      const approvalHash = canonicalPayloadHash({ sourceHash: parsed.sourceHash, supplierId: input.supplierId, policy: input.policy || null });
       const existing = this.db.prepare('SELECT * FROM procurement_imports WHERE source_hash=? OR (supplier_id=? AND invoice_number=?)').get(parsed.sourceHash, input.supplierId, parsed.header.invoice_number.trim()) as any;
       if (existing) {
         if (existing.approval_hash !== approvalHash) throw new ProcurementValidationError('IMPORT_IDENTITY_CONFLICT', 'Bu kaynak/fatura farklı onaylarla zaten kayıtlı.', 409);
@@ -82,30 +154,21 @@ export class ProcurementImportService {
       if (this.db.prepare('SELECT 1 FROM purchase_orders WHERE supplier_id=? AND upper(trim(invoice_number))=upper(?)').get(input.supplierId, parsed.header.invoice_number.trim())) throw new ProcurementValidationError('INVOICE_ALREADY_EXISTS', 'Fatura daha önce kaydedilmiş; ikinci taslak veya stok girişi engellendi.', 409);
       const preview = this.preview(input);
       if (preview.previewHash !== input.expectedPreviewHash) throw new ProcurementValidationError('IMPORT_PREVIEW_STALE', 'Katalog, BOM veya kararlar değişti. Önizlemeyi yenileyin.', 409);
-      if (preview.unresolved.length) fail(parsed.header, 'Çözülmemiş kaynak onayları var.');
+      if (preview.blockingErrors.length) throw new ImportValidationError(preview.blockingErrors.join('\n'));
       const policy = input.policy;
       if (!policy || !['INCLUDED','EXCLUDED'].includes(policy.vatMode) || !Number.isInteger(policy.vatRateBps) || policy.vatRateBps < 0 || policy.vatRateBps > 10000 || !['VAT_EXCLUDED_FROM_INVENTORY_COST','VAT_INCLUDED_IN_INVENTORY_COST'].includes(policy.acquisitionCostVatPolicy) || policy.stockCheck !== 'NO_PRIOR_RECEIPT' || !policy.stockEvidence?.trim() || parsed.lines.some(r => r.pricing_basis === 'INCLUDED_IN_PRICE') && policy.includedCost !== 'NO_SEPARATE_CHARGE') fail(parsed.header, 'DECISION REQUIRED: vergi, dahil maliyet ve önceki stok kontrolü açıkça tamamlanmalı.');
       const importId = randomUUID(), purchaseId = randomUUID(), createdAt = new Date().toISOString();
       const ids = new Map<string, string>();
       for (const p of preview.products) {
-        const choice = input.choices?.[p.ref];
-        if (!choice || !['KEEP','UPDATE','CREATE'].includes(choice.action)) fail(p.source, 'Ürün eşleştirme/değişiklik kararı gerekli.');
         let product = p.current;
-        if (choice.action === 'CREATE') {
+        if (p.action === 'CREATE') {
           if (p.source.record_type !== 'PRODUCT') fail(p.source, 'PRODUCT olmadan yeni kart oluşturulamaz.');
-          if (!choice.fields) fail(p.source, 'Yeni ürün alanlarının onayı gerekli.');
-          const { id: _id, ...fields } = choice.fields!;
-          if (p.source.sku && fields.sku !== p.source.sku) fail(p.source, 'Kaynak SKU değiştirilemez.');
-          product = this.catalog.createProduct({ ...fields, status: 'Passive', is_sellable: false }, fields.product_type === 'assembly' ? {} : { activationProvenance: 'PROCUREMENT_CSV_FIRST_RECEIPT' });
-        } else if (!product) fail(p.source, 'Kayıtlı SKU bulunamadı. PRODUCT olmadan yeni kart yaratılamaz.');
-        else if (choice.action === 'UPDATE') {
-          if (!choice.fields || choice.fields.sku !== product.sku) fail(p.source, 'Onaylı güncelleme alanları/SKU geçersiz.');
-          product = this.catalog.updateProduct(product.id, product.catalog_version, { ...choice.fields!, status: product.status, is_sellable: product.is_sellable });
-        }
+          product = this.catalog.createProduct({ ...p.proposed, status: 'Passive', is_sellable: false }, p.proposed.product_type === 'assembly' ? {} : { activationProvenance: 'PROCUREMENT_CSV_FIRST_RECEIPT' });
+        } else if (!product) fail(p.source, 'Kayıtlı SKU bulunamadı.');
         ids.set(p.ref, product!.id);
-        for (const r of parsed.rows.filter(r => r.record_type !== 'BOM' && (r.product_ref === p.ref || (!r.product_ref && r.sku === product!.sku)))) if (r.source_supplier_code) this.catalog.confirmSupplierAlias(input.supplierId, r.source_supplier_code, product!.id, `${importId}:${r.record_id}`);
       }
-      for (const b of preview.bom) this.catalog.replaceBom(ids.get(b.parentRef)!, b.current.version, b.incoming.map(c => ({ componentId: ids.get(c.componentRef)!, quantity: c.quantity })));
+      for (const alias of preview.aliases) this.catalog.confirmSupplierAlias(input.supplierId, alias.alias, ids.get(alias.ref)!, `${importId}:${alias.ref}`);
+      for (const b of preview.bom) if (b.action === 'REPLACE') this.catalog.replaceBom(ids.get(b.parentRef)!, b.current.version, b.incoming.map(c => ({ componentId: ids.get(c.componentRef)!, quantity: c.quantity })));
       const lineIds = new Map(parsed.lines.map(r => [r.record_id, randomUUID()]));
 
       const purchase = new ProcurementService(this.db).createPurchase({ id: purchaseId, supplierId: input.supplierId, invoiceNumber: parsed.header.invoice_number.trim(), invoiceDate: parsed.header.invoice_date,
@@ -118,7 +181,7 @@ export class ProcurementImportService {
           return { id: lineIds.get(r.record_id), productId, quantity: r.quantity, quoteBasis: r.uom as any, supplierUnitPriceMinor: Number(decimal(r.unit_price, r, 'unit_price', 2)), currency: r.currency, vatMode: policy!.vatMode, vatRateBps: policy!.vatRateBps };
         }),
         acquisitionCosts: [] });
-      this.db.prepare('INSERT INTO procurement_imports VALUES (?,?,?,?,?,?,?,?,?,?)').run(importId, parsed.sourceHash, parsed.version, input.supplierId, parsed.header.invoice_number.trim(), purchaseId, approvalHash, JSON.stringify({ choices: input.choices, confirmations: input.confirmations, policy, previewHash: preview.previewHash }), actorId, createdAt);
+      this.db.prepare('INSERT INTO procurement_imports VALUES (?,?,?,?,?,?,?,?,?,?)').run(importId, parsed.sourceHash, parsed.version, input.supplierId, parsed.header.invoice_number.trim(), purchaseId, approvalHash, JSON.stringify({ autoMatched: preview.products.map(p => ({ ref: p.ref, sku: p.sku, action: p.action })), aliases: preview.aliases, policy, previewHash: preview.previewHash }), actorId, createdAt);
       for (const r of parsed.rows) this.db.prepare('INSERT INTO procurement_import_records VALUES (?,?,?,?,?)').run(importId, r.record_id, r.record_type, JSON.stringify(r), ids.get(r.record_id) || lineIds.get(r.record_id) || (r.record_type === 'PURCHASE' ? purchaseId : null));
       const cartons = new Map<string, string>();
       for (const p of preview.packagePreview) {

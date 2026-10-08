@@ -53,9 +53,8 @@ const setup = () => {
   procurement.registerSupplier({ id: 'supplier', name: 'Fixture', defaultCurrency: 'USD' });
   new ExchangeRateService(db).recordCurrentUsdTry({ rate: '40', source: 'MANUAL', changedAt: '2026-01-01T00:00:00.000Z', actorId: 'tester' });
   const request = (data = rows()): ImportRequest => {
-    const input: ImportRequest = { csv: fixtureCsv(data), supplierId: 'supplier', choices: {}, confirmations: [], policy: { vatMode: 'EXCLUDED', vatRateBps: 0, acquisitionCostVatPolicy: 'VAT_EXCLUDED_FROM_INVENTORY_COST', includedCost: 'NO_SEPARATE_CHARGE', stockCheck: 'NO_PRIOR_RECEIPT', stockEvidence: 'Synthetic empty database', expenseTypes: {} } };
-    for (const p of importer.preview(input).products) input.choices![p.ref] = { action: 'CREATE', fields: p.proposed };
-    const preview = importer.preview(input); input.confirmations = preview.requirements.map(r => r.key); input.expectedPreviewHash = preview.previewHash;
+    const input: ImportRequest = { csv: fixtureCsv(data), supplierId: 'supplier', policy: { vatMode: 'EXCLUDED', vatRateBps: 0, acquisitionCostVatPolicy: 'VAT_EXCLUDED_FROM_INVENTORY_COST', includedCost: 'NO_SEPARATE_CHARGE', stockCheck: 'NO_PRIOR_RECEIPT', stockEvidence: 'Synthetic empty database' } };
+    input.expectedPreviewHash = importer.preview(input).previewHash;
     return input;
   };
   const execute = (key: string, input: ImportRequest) => new CommandExecutor(db).execute<any>({ operationId: key, commandType: 'procurement.import.apply.v1', payload: input, actor: { human: { id: 'tester' } }, authorization: { decision: 'ALLOW', capability: 'procurement:write+catalog:write' } }, () => ({ statusCode: 201, body: importer.apply(input, 'tester') as any }));
@@ -66,14 +65,15 @@ test('preview is read-only; import is atomic, invoice/source/operation replay-sa
   const { db, importer, request, execute } = setup();
   const input = request();
   assert.equal(db.prepare('SELECT COUNT(*) FROM products').pluck().get(), 0);
-  const incomplete = { ...input, confirmations: [] };
-  assert.throws(() => execute('incomplete', incomplete), /onay/);
+  const incomplete = { ...input, policy: { ...input.policy!, stockEvidence: '' } };
+  incomplete.expectedPreviewHash = importer.preview(incomplete).previewHash;
+  assert.throws(() => execute('incomplete', incomplete), /DECISION REQUIRED/);
   assert.equal(db.prepare('SELECT COUNT(*) FROM purchase_orders').pluck().get(), 0);
   const first = execute('import-1', input);
   assert.equal(execute('import-1', input).replayed, true);
   assert.equal(execute('import-2', input).result.body.id, first.result.body.id);
   assert.throws(() => execute('import-1', { ...input, supplierId: 'other' }), /different canonical payload/);
-  assert.throws(() => importer.apply({ ...input, csv: input.csv.replace('SYNTHETIC', 'SYNTHETIC') + '\r\n' }, 'tester'), /zaten kayıtlı/);
+  assert.throws(() => importer.apply({ ...input, csv: input.csv.replace('SYNTHETIC', 'SYNTHETIC') + '\r\n' }, 'tester'), /farklı onaylarla/);
   assert.equal(db.prepare('SELECT COUNT(*) FROM purchase_orders').pluck().get(), 1);
   assert.equal(db.prepare('SELECT COUNT(*) FROM procurement_package_plan').pluck().get(), 4);
   assert.equal(db.prepare('SELECT COUNT(*) FROM inventory_ledger_events').pluck().get(), 0);
@@ -87,7 +87,7 @@ test('failure after catalog creation rolls back catalog, aliases, purchases, pla
   const input = request(); input.policy!.expenseTypes = {};
   // Currency has no approved FX source. The failure occurs inside purchase normalization after catalog materialization.
   input.csv = input.csv.replaceAll('USD', 'EUR');
-  const preview = importer.preview(input); input.confirmations = preview.requirements.map(r => r.key); input.expectedPreviewHash = preview.previewHash;
+  input.expectedPreviewHash = importer.preview(input).previewHash;
   assert.throws(() => execute('fail', input));
   for (const table of ['products','purchase_orders','procurement_imports','procurement_package_plan','catalog_supplier_aliases']) assert.equal(db.prepare(`SELECT COUNT(*) FROM ${table}`).pluck().get(), 0, table);
   db.close();
@@ -178,16 +178,22 @@ test('mixed carton creates two singly counted children, preserves source weight 
   db.close();
 });
 
-test('clearing review codes does not remove derived-quantity review; new suggested SKU collisions are rejected', () => {
-  const { db, request, importer, catalog } = setup();
-  const data: any[] = rows();
-  data[2].meta_json = '{"quantity_derived_from":"E7","original_total_qty":" "}';
-  data[2].review_codes = '';
-  const input = request(data);
-  assert.ok(importer.preview(input).requirements.some(r => r.key === 'l:DERIVED_QUANTITY_CONFIRM'));
-  assert.ok(importer.preview({ ...input, csv: input.csv.replace('"Fixture"', '"Different supplier"') }).requirements.some(r => r.key === 'p:SUPPLIER_CONFIRM'));
-  catalog.createProduct({ sku: 'a', title: 'Already registered', catalog_type: 'product', base_uom_code: 'piece' });
-  assert.throws(() => importer.preview(input), /zaten kullanılıyor|çelişiyor|çakışıyor/);
+test('automatic SKU matching keeps existing cards, checks supplier identity and rejects mismatched catalog types', () => {
+  const { db, request, importer, catalog, execute } = setup();
+  const existing = catalog.createProduct({ sku: 'A', title: 'Existing title', catalog_type: 'product', base_uom_code: 'piece', product_type: 'component' });
+  const input = request();
+  const preview = importer.preview(input);
+  assert.equal(preview.summary.existingSkuCount, 1);
+  assert.equal(preview.products[0].action, 'KEEP');
+  assert.equal(preview.blockingErrors.length, 0);
+  execute('existing', input);
+  assert.equal(catalog.getProduct(existing.id)!.title, 'Existing title');
+  assert.equal(catalog.getProduct(existing.id)!.catalog_version, existing.catalog_version);
+  const changedSupplier = importer.preview({ ...input, csv: input.csv.replace('"Fixture"', '"Different supplier"') });
+  assert.ok(changedSupplier.blockingErrors.some(message => message.includes('tedarikçi')));
+  catalog.updateProduct(existing.id, existing.catalog_version, { sku: 'A', title: 'Existing title', catalog_type: 'product', base_uom_code: 'piece', product_type: 'simple' });
+  const typeMismatch = importer.preview(input);
+  assert.ok(typeMismatch.blockingErrors.some(message => message.includes('türüyle çelişiyor')));
   db.close();
 });
 
@@ -198,7 +204,7 @@ test('CSV expenses remain source evidence only, manual supplier and third-party 
   data[0].meta_json = JSON.stringify({ goods_amount_usd: 200, invoice_expenses_usd: 19.51, invoice_total_usd: 219.51 });
   data.push({ schema_version: 'dsdst.procurement.import.v1', record_type: 'EXPENSE', record_id: 'fee', parent_ref: 'p', name_en: 'Source surcharge', amount: '19.51', currency: 'USD', review_codes: 'EXPENSE_POLICY_CONFIRM' });
   const input = request(data);
-  assert.ok(!importer.preview(input).requirements.some(r => r.key.includes('EXPENSE_POLICY')));
+  assert.equal(importer.preview(input).blockingErrors.length, 0);
   const purchase: any = execute('source-only', input).result.body;
   assert.equal(purchase.totalGrossMinor, 20000);
   assert.equal(purchase.acquisitionCosts.length, 0);

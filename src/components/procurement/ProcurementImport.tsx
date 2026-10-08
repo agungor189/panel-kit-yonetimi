@@ -2,26 +2,28 @@ import { useState } from 'react';
 import { api } from '../../lib/api';
 import { Button, Card, Input, Select } from '../ui';
 
-export function ProcurementImport({ csv, supplierId, products, onCreated }: { csv: string; supplierId: string; products: Array<{ id: string; sku: string }>; onCreated: (id: string) => void }) {
+export function ProcurementImport({ csv, supplierId, onCreated }: { csv: string; supplierId: string; onCreated: (id: string) => void }) {
   const [preview, setPreview] = useState<any>(null);
-  const [choices, setChoices] = useState<Record<string, any>>({});
-  const [confirmations, setConfirmations] = useState<string[]>([]);
-  const [policy, setPolicy] = useState<any>({ vatMode: '', vatRateBps: '', acquisitionCostVatPolicy: '', includedCost: '', stockCheck: '', stockEvidence: '' });
   const [reviewed, setReviewed] = useState(false);
+  const [vatMode, setVatMode] = useState('');
+  const [vatRateBps, setVatRateBps] = useState('');
+  const [vatPolicy, setVatPolicy] = useState('');
+  const [stockEvidence, setStockEvidence] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState<{ payload: string; operationId: string } | null>(null);
-  const editChoice = (ref: string, choice: any) => { setChoices(v => ({ ...v, [ref]: choice })); setReviewed(false); };
-  const editPolicy = (next: any) => { setPolicy(next); setReviewed(false); };
-  const payload = () => ({ csv, supplierId, choices, confirmations, policy });
+  const policyReady = Boolean(vatMode && vatRateBps !== '' && vatPolicy && stockEvidence.trim());
+  const policy = () => ({ vatMode, vatRateBps: vatRateBps === '' ? null : Number(vatRateBps), acquisitionCostVatPolicy: vatPolicy,
+    includedCost: 'NO_SEPARATE_CHARGE', stockCheck: 'NO_PRIOR_RECEIPT', stockEvidence: stockEvidence.trim() });
+  const payload = () => ({ csv, supplierId, policy: policy() });
+  const change = (setter: (value: string) => void, value: string) => { setter(value); setReviewed(false); };
   const inspect = async () => {
-    setBusy(true); setError('');
-    try {
-      const result = await api.post('/procurement/v1/imports/preview', payload());
-      setPreview(result.data); setReviewed(true);
-    } catch (e: any) { setError(e.message); } finally { setBusy(false); }
+    setBusy(true); setError(''); setReviewed(false);
+    try { const result = await api.post('/procurement/v1/imports/preview', payload()); setPreview(result.data); setReviewed(true); }
+    catch (e: any) { setPreview(null); setError(e.message); } finally { setBusy(false); }
   };
   const apply = async () => {
+    if (!preview || !policyReady || preview.blockingErrors.length) return;
     setBusy(true); setError('');
     const body = { ...payload(), expectedPreviewHash: preview.previewHash };
     const serialized = JSON.stringify(body);
@@ -31,43 +33,36 @@ export function ProcurementImport({ csv, supplierId, products, onCreated }: { cs
     catch (e: any) { setError(e.message); } finally { setBusy(false); }
   };
   return <Card padding="lg" className="space-y-4">
-    <h3 className="font-black">Tek CSV · Önizle → Eşleştirme ve değişiklik onayı → Taslak</h3>
-    <p className="text-sm">Önizleme stok veya satın alma oluşturmaz. Vergi, kur ve maliyet kesinleştirmesi ayrıca gereklidir.</p>
-    {error && <p role="alert" className="text-danger">{error}</p>}
-    <Button disabled={busy || !supplierId} onClick={inspect}>{preview ? 'Kararlarla Önizlemeyi Yenile' : 'CSV Önizle'}</Button>
+    <h3 className="font-black">Tek CSV · Otomatik eşleştirme ve satın alma taslağı</h3>
+    <p className="text-sm">Önizleme ürün, alış, BOM ve paketleri doğrular; stok veya gider oluşturmaz. Eksik kimlikler ve çakışmalar aktarımı durdurur.</p>
+    {error && <p role="alert" className="whitespace-pre-line text-danger">{error}</p>}
+    <div className="grid gap-3 md:grid-cols-2">
+      <label className="text-sm">Fatura vergisi<Select value={vatMode} onChange={e => change(setVatMode, e.target.value)}><option value="">Vergi dahil mi?</option><option value="EXCLUDED">Hariç</option><option value="INCLUDED">Dahil</option></Select></label>
+      <label className="text-sm">Vergi oranı (baz puan; %1 = 100)<Input type="number" min="0" max="10000" value={vatRateBps} onChange={e => change(setVatRateBps, e.target.value)}/></label>
+      <label className="text-sm">Stok maliyetinde vergi politikası<Select value={vatPolicy} onChange={e => change(setVatPolicy, e.target.value)}><option value="">Politikayı seçin</option><option value="VAT_EXCLUDED_FROM_INVENTORY_COST">Vergi maliyete dahil değil</option><option value="VAT_INCLUDED_IN_INVENTORY_COST">Vergi maliyete dahil</option></Select></label>
+      <label className="text-sm">Bu partinin daha önce kabul edilmediğine ilişkin kanıt<Input value={stockEvidence} onChange={e => change(setStockEvidence, e.target.value)} placeholder="Önceki stok/ithalat kontrolü açıklaması"/></label>
+    </div>
+    <Button disabled={busy || !supplierId} onClick={inspect}>{preview ? 'Önizlemeyi Yenile' : 'CSV Önizle'}</Button>
     {preview && <>
-      <p>{preview.parsed.header.invoice_number} · {preview.parsed.summary.records} kayıt · {preview.parsed.summary.sourceCartons} kaynak koli → {preview.parsed.summary.warehousePackages} depo paketi · Ürün {(preview.parsed.summary.goodsAmountMinor / 100).toFixed(2)} · Kaynak fatura genel toplamı {preview.parsed.summary.sourceInvoiceTotalMinor == null ? '—' : (preview.parsed.summary.sourceInvoiceTotalMinor / 100).toFixed(2)} {preview.parsed.header.currency}</p>
-      {preview.existingPurchaseId && <p className="text-amber-700">Bu fatura daha önce kaydedilmiş. Aynı onaylarla tekrar mevcut taslağı döndürür.</p>}
-      <details><summary className="cursor-pointer font-bold">Ürün eşleştirmeleri ve katalog farkları ({preview.products.length})</summary>
-        <div className="space-y-3">{preview.products.map((p: any) => {
-          const choice = choices[p.ref] || {};
-          const fields = choice.fields || p.proposed;
-          return <div className="rounded border p-3" key={p.ref}>
-            <strong>Satır {p.row} · {p.source.sku || p.source.suggested_sku} · {p.source.name_en}</strong>
-            <Select value={choice.action || ''} onChange={e => editChoice(p.ref, { ...choice, action: e.target.value, productId: choice.productId || p.current?.id, fields: { ...p.proposed, ...choice.fields } })}>
-              <option value="">Karar seçin</option><option value="KEEP">Kayıtlı kartı kullan, alanlarını koru</option><option value="UPDATE">Katalog farklarını onayla ve güncelle</option><option value="CREATE">Yeni pasif ürün oluştur</option>
-            </Select>
-            {choice.action !== 'CREATE' && <Select value={choice.productId || p.current?.id || ''} onChange={e => editChoice(p.ref, { ...choice, productId: e.target.value })}><option value="">Mevcut SKU seçin</option>{products.map(product => <option key={product.id} value={product.id}>{product.sku}</option>)}</Select>}
-            <p className="text-xs">Mevcut: {p.current ? `${p.current.sku} · ${p.current.title} · ${p.current.product_type} · ${p.current.material || '—'} · ${p.current.size || '—'} · ${p.current.mass_grams ?? '—'} g · v${p.current.catalog_version}` : 'Yok'}</p>
-            {['UPDATE','CREATE'].includes(choice.action) && <div className="grid gap-2 md:grid-cols-3">{['sku','title','product_type','name_tr','name_en','material','size','profile_type','base_uom_code','mass_grams'].map(field => <label className="text-xs" key={field}>{field}<Input value={fields[field] ?? ''} onChange={e => editChoice(p.ref, { ...choice, fields: { ...fields, [field]: field === 'mass_grams' ? (e.target.value === '' ? null : Number(e.target.value)) : e.target.value } })}/></label>)}</div>}
-          </div>;
-        })}</div>
-      </details>
-      <details><summary className="font-bold">BOM farkları ({preview.bom.length})</summary>{preview.bom.map((b: any) => <div key={b.parentRef}><strong>{b.parentRef}</strong><pre className="overflow-auto text-xs">{JSON.stringify({ mevcut: b.current.lines, önerilen: b.incoming }, null, 2)}</pre></div>)}</details>
-      <details><summary className="font-bold">Kaynak koli ve içerik planı</summary>{preview.parsed.groups.map((g: any) => <div className="border-b py-2 text-xs" key={g.record_id}><strong>{g.record_id} · {g.package_count} koli {g.meta.mixed ? '· Karışık: depoda ayır ve tart' : ''}</strong><p>Kaynak net {g.net_weight_kg || '—'} kg · brüt {g.gross_weight_kg || '—'} kg (grup toplamı)</p>{preview.parsed.items.filter((i: any) => i.parent_ref === g.record_id).map((i: any) => <p key={i.record_id}>{i.sku || i.product_ref} · {i.quantity} toplam · {i.units_per_package}/koli · alış {i.purchase_line_ref}</p>)}</div>)}</details>
-      <div className="grid gap-3 md:grid-cols-3">
-        <Select value={policy.vatMode} onChange={e => editPolicy({ ...policy, vatMode: e.target.value })}><option value="">Vergi tutara dahil mi?</option><option value="EXCLUDED">Hariç</option><option value="INCLUDED">Dahil</option></Select>
-        <label className="text-xs">Vergi oranı (baz puan; %1 = 100)<Input type="number" min="0" max="10000" value={policy.vatRateBps} onChange={e => editPolicy({ ...policy, vatRateBps: e.target.value === '' ? '' : Number(e.target.value) })}/></label>
-        <Select value={policy.acquisitionCostVatPolicy} onChange={e => editPolicy({ ...policy, acquisitionCostVatPolicy: e.target.value })}><option value="">Stok maliyetinde vergi politikası</option><option value="VAT_EXCLUDED_FROM_INVENTORY_COST">Vergi maliyete dahil değil</option><option value="VAT_INCLUDED_IN_INVENTORY_COST">Vergi maliyete dahil</option></Select>
-        <Select value={policy.includedCost} onChange={e => editPolicy({ ...policy, includedCost: e.target.value })}><option value="">Fiyata dahil içerik politikası</option><option value="NO_SEPARATE_CHARGE">Ek bedel yok; LC gider dağıtımı ayrıca onaylanır</option></Select>
-        <Select value={policy.stockCheck} onChange={e => editPolicy({ ...policy, stockCheck: e.target.value })}><option value="">Önceki stok kontrolü</option><option value="NO_PRIOR_RECEIPT">Bu parti daha önce kabul/başlangıç stokuna alınmadı</option></Select>
-        <Input placeholder="Kontrol kanıtı / açıklaması" value={policy.stockEvidence} onChange={e => editPolicy({ ...policy, stockEvidence: e.target.value })}/>
+      <div className="grid gap-2 text-sm md:grid-cols-3">
+        <p>Mevcut SKU: <strong>{preview.summary.existingSkuCount}</strong> · Yeni SKU: <strong>{preview.summary.newSkuCount}</strong></p>
+        <p>Alış: <strong>{preview.summary.purchaseLineCount}</strong> satır ({preview.summary.billedLineCount} faturalanmış + {preview.summary.includedLineCount} fiyata dahil)</p>
+        <p>Ürün bedeli: <strong>{(preview.parsed.summary.goodsAmountMinor / 100).toFixed(2)} {preview.parsed.header.currency}</strong></p>
+        <p>Kaynak koli: <strong>{preview.parsed.summary.sourceCartons}</strong> · Planlı depo paketi: <strong>{preview.parsed.summary.warehousePackages}</strong></p>
+        <p>BOM: <strong>{preview.summary.bomCount}</strong> reçete · {preview.summary.bomRelationCount} bileşen bağı</p>
+        <p>Otomatik tedarik eşleşmesi: <strong>{preview.summary.aliasCount}</strong></p>
       </div>
-      <p role="status" className="text-amber-700">Giderler aktarılmadı, manuel girilecek. Taslak yalnız ürün bedelini içerir; kaynak fatura genel toplamı değiştirilmez.</p>
-      <details><summary>Kaynak gider bilgileri (işlem oluşturulmadı)</summary>{preview.parsed.expenses.map((r: any) => <p key={r.record_id}>{r.name_en} · {r.amount} {r.currency}</p>)}</details>
-      <div className="space-y-2">{preview.requirements.map((r: any) => <label className="block text-xs" key={r.key}><input type="checkbox" checked={confirmations.includes(r.key)} onChange={e => setConfirmations(c => e.target.checked ? [...c, r.key] : c.filter(k => k !== r.key))}/> Satır {r.row} · {r.sku} · {r.message}</label>)}</div>
-      <Button disabled={busy || !reviewed || preview.products.some((p: any) => !choices[p.ref]?.action) || preview.requirements.some((r: any) => !confirmations.includes(r.key))} onClick={apply}>Onaylanan Satın Alma Taslağını Oluştur</Button>
-      {!reviewed && <p className="text-sm">Değişikliklerden sonra önizlemeyi yenileyin.</p>}
+      <p className="text-sm">Kaynak fatura genel toplamı: {preview.parsed.summary.sourceInvoiceTotalMinor == null ? '—' : (preview.parsed.summary.sourceInvoiceTotalMinor / 100).toFixed(2)} {preview.parsed.header.currency}. Giderler aktarılmadı, Satın Alma'dan manuel girilecek.</p>
+      {preview.existingPurchaseId && <p className="text-amber-700">Bu fatura daha önce aktarılmış; aynı onayla mevcut taslak döner.</p>}
+      {preview.blockingErrors.length > 0 && <div role="alert" className="space-y-1 rounded border border-red-300 p-3 text-sm text-danger"><strong>CSV'de düzeltilmesi gereken hatalar ({preview.blockingErrors.length})</strong>{preview.blockingErrors.map((message: string, index: number) => <p key={index}>{message}</p>)}</div>}
+      {preview.skippedAliases.length > 0 && <p className="text-xs text-amber-700">Birden fazla SKU için kullanılan genel kaynak açıklamaları alias olarak kaydedilmedi: {preview.skippedAliases.join(', ')}.</p>}
+      <details><summary className="cursor-pointer font-bold">Otomatik SKU eşleşmeleri ({preview.products.length})</summary><div className="max-h-80 space-y-1 overflow-auto text-xs">{preview.products.map((product: any) => <p key={product.ref}>Satır {product.row} · {product.sku} · {product.action === 'KEEP' ? 'Mevcut kart korunur' : 'Yeni pasif kart'} · {product.proposed.title}</p>)}</div></details>
+      {preview.summary.bomChangeCount > 0 && <details><summary className="cursor-pointer font-bold">Tek onayla uygulanacak BOM farkları ({preview.summary.bomChangeCount})</summary>{preview.bom.filter((item: any) => item.action === 'REPLACE').map((item: any) => <p key={item.parentRef} className="text-xs">{item.parentRef} · mevcut {item.current.lines.length}, önerilen {item.incoming.length} bileşen</p>)}</details>}
+      <details><summary className="cursor-pointer font-bold">Kaynak koliler ve planlanan paketler</summary>{preview.parsed.groups.map((group: any) => <div className="border-b py-2 text-xs" key={group.record_id}><strong>{group.record_id} · {group.package_count} koli {group.meta.mixed ? '· Karışık: depoda ayrılıp tartılacak' : ''}</strong><p>Net {group.net_weight_kg || '—'} kg · brüt {group.gross_weight_kg || '—'} kg</p>{preview.parsed.items.filter((item: any) => item.parent_ref === group.record_id).map((item: any) => <p key={item.record_id}>{item.sku || item.product_ref} · {item.quantity} toplam · {item.units_per_package}/koli · alış {item.purchase_line_ref}</p>)}</div>)}</details>
+      <details><summary>Kaynak gider kanıtı (işlem oluşturulmaz)</summary>{preview.parsed.expenses.map((row: any) => <p key={row.record_id}>{row.name_en} · {row.amount} {row.currency}</p>)}</details>
+      <p className="text-xs">İçe aktarmayı onaylamak, yazdığınız kanıta göre bu partinin daha önce fiziksel stoğa alınmadığını da teyit eder. Mal kabul ve FINAL maliyet ayrıca tamamlanır.</p>
+      <Button disabled={busy || !reviewed || !policyReady || preview.blockingErrors.length > 0} onClick={apply}>İçe Aktarmayı Onayla</Button>
+      {!reviewed && <p className="text-sm text-amber-700">Politika değişti; önizlemeyi yenileyin.</p>}
     </>}
   </Card>;
 }

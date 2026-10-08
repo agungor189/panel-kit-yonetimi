@@ -5,6 +5,7 @@ import { normalizeBaseQuantity, type UomCode } from "../catalog/uom.js";
 import { ExchangeRateService, type FxSnapshot } from "../finance/exchangeRates.js";
 import { canonicalProductType, normalizeCsvHeader, type ProductType } from "../../../shared/productCsvMapping.js";
 import { generateNormalizedFields } from "../../utils/normalizeProductFields.js";
+import { decimal } from "./procurementImport.js";
 import {
   amountForQuantity,
   convertMoney,
@@ -680,6 +681,28 @@ export class ProcurementService {
     const costDetails = new Map((this.hasTable("purchase_cost_component_details")
       ? this.db.prepare("SELECT * FROM purchase_cost_component_details WHERE component_id IN (SELECT id FROM purchase_cost_components WHERE purchase_order_id=?)").all(purchaseId) as any[]
       : []).map((row) => [row.component_id, row]));
+    const sourceRows = this.hasTable('procurement_import_records') ? (this.db.prepare(`SELECT r.record_id,r.record_type,r.canonical_id,r.source_json
+      FROM procurement_import_records r JOIN procurement_imports i ON i.id=r.import_id
+      WHERE i.purchase_order_id=? AND r.record_type IN ('PRODUCT','LINE')`).all(purchaseId) as any[]) : [];
+    const productsBySourceRef = new Map<string, any>();
+    const linesByCanonicalId = new Map<string, any>();
+    for (const record of sourceRows) {
+      const source = JSON.parse(record.source_json);
+      if (record.record_type === 'PRODUCT') productsBySourceRef.set(record.record_id, source);
+      else linesByCanonicalId.set(record.canonical_id, source);
+    }
+    const catalogSnapshots = new Map((this.hasTable('catalog_product_versions') ? this.db.prepare(`SELECT version_ref,snapshot_json FROM catalog_product_versions
+      WHERE version_ref IN (SELECT catalog_version_ref_snapshot FROM purchase_order_lines WHERE purchase_order_id=?)`).all(purchaseId) as Array<{ version_ref: string; snapshot_json: string }> : [])
+      .map(row => [row.version_ref, JSON.parse(row.snapshot_json)]));
+    const packagePlans = this.hasTable('procurement_package_plan') ? (this.db.prepare('SELECT purchase_line_id,quantity_base_int,mixed FROM procurement_package_plan WHERE purchase_order_id=?').all(purchaseId) as any[]) : [];
+    const plansByLine = new Map<string, { count: number; mixedCount: number; distribution: Map<number, number> }>();
+    for (const plan of packagePlans) {
+      const summary = plansByLine.get(plan.purchase_line_id) || { count: 0, mixedCount: 0, distribution: new Map<number, number>() };
+      summary.count++;
+      summary.mixedCount += Number(plan.mixed);
+      summary.distribution.set(plan.quantity_base_int, (summary.distribution.get(plan.quantity_base_int) || 0) + 1);
+      plansByLine.set(plan.purchase_line_id, summary);
+    }
     return {
       id: header.id,
       sourcePacking: this.hasTable('procurement_import_records') ? (this.db.prepare(`SELECT r.source_json FROM procurement_import_records r JOIN procurement_imports i ON i.id=r.import_id WHERE i.purchase_order_id=? AND r.record_type IN ('PACKAGE_GROUP','PACKAGE_ITEM') ORDER BY r.record_id`).all(purchaseId) as any[]).map(r => JSON.parse(r.source_json)) : [],
@@ -699,7 +722,21 @@ export class ProcurementService {
       lines: lineRows.map((row) => ({
         id: row.id,
         productId: row.product_id,
-        product: { sku: row.product_sku_snapshot, title: row.product_title_snapshot, catalogVersionRef: row.catalog_version_ref_snapshot },
+        product: (() => {
+          const sourceLine = linesByCanonicalId.get(row.id);
+          const sourceProduct = productsBySourceRef.get(sourceLine?.product_ref) || catalogSnapshots.get(row.catalog_version_ref_snapshot) || sourceLine || {};
+          return { sku: row.product_sku_snapshot, title: row.product_title_snapshot, catalogVersionRef: row.catalog_version_ref_snapshot,
+            supplierCode: sourceProduct.supplier_code || null,
+            nameTr: sourceProduct.name_tr || null, nameEn: sourceProduct.name_en || null,
+            size: sourceProduct.size || null, material: sourceProduct.material || null,
+            profileType: sourceProduct.profile_type || null, productType: sourceProduct.product_type || null };
+        })(),
+        sourceLineAmountMinor: linesByCanonicalId.has(row.id) ? Number(decimal(linesByCanonicalId.get(row.id).amount, linesByCanonicalId.get(row.id), 'amount', 2)) : null,
+        plannedPackages: (() => {
+          const plan = plansByLine.get(row.id);
+          return plan ? { count: plan.count, mixedCount: plan.mixedCount,
+            distribution: [...plan.distribution].map(([quantity, count]) => ({ quantity, count })).sort((a,b) => b.quantity - a.quantity) } : null;
+        })(),
         quote: { basis: row.quote_basis, originalQuantity: row.original_quantity, supplierUnitPriceMinor: row.supplier_unit_price_minor, currency: row.supplier_currency, profileLengthMm: row.profile_length_mm, profileLengthKind: row.profile_length_kind },
         normalizedQuantity: { baseQuantity: row.quantity_base_int, baseUomCode: row.base_uom_code_snapshot, quantityScale: row.base_uom_scale_snapshot },
         vat: { mode: row.vat_mode, rateBps: row.vat_rate_bps },
