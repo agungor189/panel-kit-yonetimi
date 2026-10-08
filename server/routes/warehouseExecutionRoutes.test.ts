@@ -1,3 +1,4 @@
+import { PrintingService } from "../modules/printing/printingService.js";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import Database from "better-sqlite3";
@@ -101,4 +102,27 @@ test("V2-08 execution API audits and replays receive/identify/place while legacy
   const legacy = await post("/admin/moves", { package_code: "ROUTE-PACKAGE", location_code: "A1", idempotency_key: "legacy" });
   assert.equal(legacy.status, 410);
   assert.equal(((await legacy.json()) as any).error.code, "V2_WAREHOUSE_EXECUTION_REQUIRED");
+});
+
+
+test('package replacement acknowledgement is explicit, human-authorized and replay-safe', async () => {
+  db.prepare("INSERT OR IGNORE INTO users(id,username,password_hash,role,is_active) VALUES ('warehouse-v2-user','Owner','fixture','admin',1)").run();
+  const printing = new PrintingService(db);
+  const template = { id: 'fixture', name: 'Fixture', purpose: 'goods_receipt' as const, width: 100, height: 150, version: 1, contentHash: 'a'.repeat(64), elements: [{ type: 'barcode', value: '{Package_code}' }] };
+  const queue = (count: number) => printing.queueTemplateJob({ purpose: 'GOODS_RECEIPT_PACKAGE', subjectId: 'fixture-pkg', subjectCode: 'PKG-FIXTURE', payload: { Package_code: 'PKG-FIXTURE', Paket_ici_adet: count }, template, operationId: `count-${count}`, actorId: 'warehouse-v2-user' });
+  const old = queue(30), claim = printing.claimNext('fixture')!;
+  printing.mark(old.id, claim.attemptId, 'RENDERED', {}, 'fixture', claim.leaseToken);
+  printing.beginSubmission(old.id, claim.attemptId, claim.leaseToken, 'fixture');
+  printing.mark(old.id, claim.attemptId, 'DELIVERY_UNKNOWN', {}, 'fixture', claim.leaseToken);
+  const current = queue(29), endpoint = `/admin/print-jobs/${current.id}/acknowledge-replacement`;
+  const unauthorized = await fetch(`${baseUrl}${endpoint}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': 'warehouse-v2-key' }, body: JSON.stringify({ oldLabelRemovedOrReplaced: true, idempotency_key: 'no-human' }) });
+  assert.equal(unauthorized.status, 401);
+  assert.equal((await post(endpoint, { idempotency_key: 'no-confirmation' })).status, 409);
+  const first = await post(endpoint, { oldLabelRemovedOrReplaced: true, idempotency_key: 'confirmed-replacement' });
+  assert.equal(first.status, 200, JSON.stringify(await first.json()));
+  const replay = await post(endpoint, { oldLabelRemovedOrReplaced: true, idempotency_key: 'confirmed-replacement' });
+  assert.equal((await replay.json() as any).idempotent, true);
+  assert.equal(printing.getJob(current.id).replacement_blocked, false);
+  assert.equal(printing.getJob(current.id).history.filter((h: any) => JSON.parse(h.details_json).oldLabelRemovedOrReplaced).length, 1);
+  assert.equal((await post(`/admin/print-jobs/${old.id}/reprint`, { reason: 'LOST', idempotency_key: 'stale-reprint' })).status, 409);
 });

@@ -156,7 +156,11 @@ export class PrintingService {
         }
         return { ...this.getJob(existing.id), logical_replay: true };
       }
-      const logicalExisting = input.originalJobId
+      const packageRevision = input.purpose === 'GOODS_RECEIPT_PACKAGE' && !input.originalJobId;
+      if (input.originalJobId && input.purpose === 'GOODS_RECEIPT_PACKAGE') this.assertCurrent(this.row(input.originalJobId), true);
+      const currentRoots = packageRevision ? this.db.prepare(`SELECT * FROM printing_jobs WHERE purpose='GOODS_RECEIPT_PACKAGE'
+        AND subject_id=? AND original_job_id IS NULL AND superseded_by_job_id IS NULL ORDER BY rowid DESC`).all(input.subjectId) as any[] : [];
+      const logicalExisting = packageRevision ? (currentRoots.length === 1 && currentRoots[0].printable_snapshot_hash === printableSnapshotHash ? currentRoots[0] : null) : input.originalJobId
         ? this.db.prepare(`SELECT * FROM printing_jobs WHERE original_job_id IS NOT NULL AND reprint_dedupe_hash=?
             AND status IN (${ACTIVE_REPRINT_STATUSES.map(() => "?").join(",")}) ORDER BY datetime(created_at),id LIMIT 1`)
           .get(reprintDedupeHash, ...ACTIVE_REPRINT_STATUSES) as any
@@ -164,16 +168,28 @@ export class PrintingService {
           .get(printableSnapshotHash) as any;
       if (logicalExisting) return { ...this.getJob(logicalExisting.id), logical_replay: true };
 
+      const priorJobs = packageRevision ? this.db.prepare(`SELECT * FROM printing_jobs WHERE purpose='GOODS_RECEIPT_PACKAGE'
+        AND subject_id=? AND superseded_by_job_id IS NULL`).all(input.subjectId) as any[] : [];
+      const replacementRequired = priorJobs.some(job => this.mayHaveBeenSubmitted(job) || (job.replacement_required && !job.replacement_acknowledged_at));
       const id = randomUUID();
+      for (const prior of priorJobs) {
+        this.db.prepare('UPDATE printing_jobs SET superseded_by_job_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(id, prior.id);
+        const canCancel = !this.mayHaveBeenSubmitted(prior) && ['QUEUED','RENDERED','FAILED'].includes(prior.status);
+        if (canCancel) {
+          this.db.prepare("UPDATE printing_jobs SET status='CANCELLED',cancelled_at=CURRENT_TIMESTAMP WHERE id=?").run(prior.id);
+          this.db.prepare("UPDATE printing_attempts SET state='FAILED',completed_at=CURRENT_TIMESTAMP,error_code='PRINT_VERSION_SUPERSEDED' WHERE job_id=? AND completed_at IS NULL AND submission_started_at IS NULL").run(prior.id);
+        }
+        this.event(prior.id, null, prior.status, canCancel ? 'CANCELLED' : prior.status, `${operationId}:supersede`, actorId, { supersededByJobId: id, invalidated: true, mayHaveBeenSubmitted: this.mayHaveBeenSubmitted(prior) });
+      }
       this.db.prepare(`INSERT INTO printing_jobs (id,purpose,subject_type,subject_id,subject_code,original_job_id,request_hash,
         template_id,template_version,template_content_hash,template_snapshot_json,payload_snapshot_json,payload_snapshot_hash,
         printable_snapshot_hash,reprint_dedupe_hash,provider,artifact_reference,artifact_sha256,artifact_media_type,artifact_blob,
-        printer_name,created_operation_id,created_by)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.purpose, input.subjectType, input.subjectId, input.subjectCode,
+        printer_name,created_operation_id,created_by,supersedes_job_id,replacement_required)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.purpose, input.subjectType, input.subjectId, input.subjectCode,
         input.originalJobId || null, requestHash, input.template?.id || null, input.template?.version || null, input.template?.contentHash || null,
         templateJson, payloadJson, payloadSnapshotHash, printableSnapshotHash, reprintDedupeHash, input.provider || null, input.artifactReference || null, input.artifactSha256 || null,
-        input.artifactMediaType || null, input.artifact || null, optional(input.printerName, 160), operationId, actorId);
-      this.event(id, null, null, "QUEUED", operationId, actorId, { explicitOperatorAction: true });
+        input.artifactMediaType || null, input.artifact || null, optional(input.printerName, 160), operationId, actorId, currentRoots[0]?.id || null, replacementRequired ? 1 : 0);
+      this.event(id, null, null, "QUEUED", operationId, actorId, { explicitOperatorAction: true, supersedesJobId: currentRoots[0]?.id || null, replacementRequired });
       return { ...this.getJob(id), logical_replay: false };
     }).immediate();
   }
@@ -186,6 +202,7 @@ export class PrintingService {
     const payload = JSON.parse(original.payload_snapshot_json);
     const template = original.template_snapshot_json ? JSON.parse(original.template_snapshot_json) : null;
     return this.db.transaction(() => {
+      this.assertCurrent(this.row(original.id), true);
       const common = { purpose: original.purpose, subjectType: original.subject_type, subjectId: original.subject_id, subjectCode: original.subject_code,
         payload, operationId: input.operationId, actorId: input.actorId, printerName: original.printer_name, originalJobId: original.id,
         reprintReason: input.reason, reprintExplanation: explanation };
@@ -207,17 +224,24 @@ export class PrintingService {
   }
 
   cancel(jobId: string, operationId: string, actorId: string) {
-    const job = this.row(jobId);
-    if (!["QUEUED", "RENDERED", "FAILED"].includes(job.status)) throw new PrintingError("PRINT_CANCEL_STATE_CONFLICT", "Print job can no longer be cancelled.", 409);
-    this.transition(job.id, "CANCELLED", operationId, actorId, {}, null, "cancelled_at=CURRENT_TIMESTAMP");
-    return this.getJob(job.id);
+    return this.db.transaction(() => {
+      const job = this.row(jobId);
+      if (this.mayHaveBeenSubmitted(job) || !['QUEUED','RENDERED','FAILED'].includes(job.status)) throw new PrintingError('PRINT_CANCEL_STATE_CONFLICT', 'Print job can no longer be cancelled.', 409);
+      this.transition(job.id, 'CANCELLED', operationId, actorId, {}, null, 'cancelled_at=CURRENT_TIMESTAMP');
+      return this.getJob(job.id);
+    }).immediate();
   }
 
   claimNext(workerId: string, leaseSeconds = 90) {
     return this.db.transaction(() => {
       const job = this.db.prepare(`SELECT j.* FROM printing_jobs j
-        WHERE j.status='QUEUED' AND NOT EXISTS (
-          SELECT 1 FROM printing_attempts a WHERE a.job_id=j.id AND a.state='STARTED' AND datetime(a.lease_expires_at)>datetime('now')
+        WHERE j.status='QUEUED' AND j.superseded_by_job_id IS NULL
+        AND (j.purpose<>'GOODS_RECEIPT_PACKAGE' OR (SELECT COUNT(*) FROM printing_jobs roots WHERE roots.purpose='GOODS_RECEIPT_PACKAGE' AND roots.subject_id=j.subject_id AND roots.original_job_id IS NULL AND roots.superseded_by_job_id IS NULL)=1)
+        AND NOT (j.replacement_required=1 AND j.replacement_acknowledged_at IS NULL)
+        AND (j.original_job_id IS NULL OR NOT EXISTS (SELECT 1 FROM printing_jobs root WHERE root.id=j.original_job_id
+          AND (root.superseded_by_job_id IS NOT NULL OR (root.replacement_required=1 AND root.replacement_acknowledged_at IS NULL))))
+        AND NOT EXISTS (
+          SELECT 1 FROM printing_attempts a WHERE a.job_id=j.id AND a.state IN ('STARTED','RENDERED') AND a.completed_at IS NULL AND datetime(a.lease_expires_at)>datetime('now')
         ) ORDER BY datetime(j.created_at),j.id LIMIT 1`).get() as any;
       if (!job) return null;
       const count = Number(this.db.prepare("SELECT COUNT(*) FROM printing_attempts WHERE job_id=?").pluck().get(job.id)) + 1;
@@ -228,23 +252,85 @@ export class PrintingService {
     }).immediate();
   }
 
-  mark(jobId: string, attemptId: string, to: "RENDERED" | "SUBMITTED" | "ACKNOWLEDGED" | "DELIVERY_UNKNOWN" | "FAILED", details: Record<string, unknown>, actorId: string) {
-    const job = this.row(jobId); const attempt = this.db.prepare("SELECT * FROM printing_attempts WHERE id=? AND job_id=?").get(attemptId, jobId) as any;
-    if (!attempt) throw new PrintingError("PRINT_ATTEMPT_NOT_FOUND", "Print attempt was not found.", 404);
-    const allowed: Record<string, string[]> = {
-      QUEUED: ["RENDERED", "FAILED"], RENDERED: ["SUBMITTED", "FAILED"], SUBMITTED: ["ACKNOWLEDGED", "DELIVERY_UNKNOWN", "FAILED"],
-      ACKNOWLEDGED: ["DELIVERY_UNKNOWN", "FAILED"], DELIVERY_UNKNOWN: [], FAILED: [], CANCELLED: [], PRINTED_CONFIRMED: [],
-    };
-    if (!allowed[job.status]?.includes(to)) throw new PrintingError("PRINT_STATE_CONFLICT", `${job.status} cannot transition to ${to}.`, 409);
-    this.db.transaction(() => {
+  private assertCurrent(job: any, checkReplacement = false) {
+    if (job.purpose !== 'GOODS_RECEIPT_PACKAGE') return;
+    if (job.superseded_by_job_id) {
+      const current = this.currentPackageJob(job.subject_id);
+      throw new PrintingError('PRINT_VERSION_SUPERSEDED', `Geçersiz etiket sürümü; güncel işi kullanın: ${current?.id || job.superseded_by_job_id}`, 409);
+    }
+    if (this.packageRevisionAmbiguous(job.subject_id)) throw new PrintingError('PRINT_REVISION_AMBIGUOUS', 'Birden fazla eski etiket sürümü var; paket ekranından güncel içerikle yeni etiket isteyin.', 409);
+    const root = job.original_job_id ? this.row(job.original_job_id) : job;
+    if (root.superseded_by_job_id) this.assertCurrent(root, checkReplacement);
+    if (checkReplacement && root.replacement_required && !root.replacement_acknowledged_at) throw new PrintingError('PRINT_REPLACEMENT_ACK_REQUIRED', 'Eski etiketi çıkar/değiştir; yeni gönderim için açık operatör onayı gerekli.', 409);
+  }
+  private packageRevisionAmbiguous(subjectId: string) {
+    return Number(this.db.prepare("SELECT COUNT(*) FROM printing_jobs WHERE purpose='GOODS_RECEIPT_PACKAGE' AND subject_id=? AND original_job_id IS NULL AND superseded_by_job_id IS NULL").pluck().get(subjectId)) > 1;
+  }
+  private currentPackageJob(subjectId: string) {
+    return this.db.prepare("SELECT * FROM printing_jobs WHERE purpose='GOODS_RECEIPT_PACKAGE' AND subject_id=? AND original_job_id IS NULL AND superseded_by_job_id IS NULL ORDER BY rowid DESC LIMIT 1").get(subjectId) as any;
+  }
+  private mayHaveBeenSubmitted(job: any) {
+    return ['SUBMITTED','ACKNOWLEDGED','PRINTED_CONFIRMED','DELIVERY_UNKNOWN'].includes(job.status)
+      || Boolean(this.db.prepare(`SELECT 1 FROM printing_attempts WHERE job_id=? AND (submission_started_at IS NOT NULL
+        OR state IN ('SUBMITTED','ACKNOWLEDGED','DELIVERY_UNKNOWN') OR spool_reference IS NOT NULL
+        OR (state='FAILED' AND rendered_sha256 IS NOT NULL AND COALESCE(error_code,'')<>'PRINT_VERSION_SUPERSEDED'))`).get(job.id));
+  }
+  private validLease(jobId: string, attemptId: string, leaseToken?: string, requireLive = true) {
+    const attempt = this.db.prepare(`SELECT *, datetime(lease_expires_at)>datetime('now') AS lease_live FROM printing_attempts WHERE id=? AND job_id=?`).get(attemptId, jobId) as any;
+    if (!attempt || !leaseToken || attempt.lease_token !== leaseToken || attempt.completed_at || (requireLive && !attempt.lease_live)) throw new PrintingError('PRINT_LEASE_INVALID', 'Print attempt lease is stale or missing.', 409);
+    return attempt;
+  }
+
+  // Durable send fence, acquired under the same SQLite write lock as revision invalidation.
+  // Once acquired, replacement cannot be acknowledged until this exact attempt resolves.
+  beginSubmission(jobId: string, attemptId: string, leaseToken: string, actorId: string) {
+    return this.db.transaction(() => {
+      const job = this.row(jobId); this.assertCurrent(job, true);
+      const attempt = this.validLease(jobId, attemptId, leaseToken);
+      if (job.status !== 'RENDERED' || attempt.state !== 'RENDERED' || attempt.submission_started_at) throw new PrintingError('PRINT_SUBMISSION_CONFLICT', 'Print attempt is not eligible for submission.', 409);
+      this.db.prepare('UPDATE printing_attempts SET submission_started_at=CURRENT_TIMESTAMP WHERE id=?').run(attemptId);
+      this.event(jobId, attemptId, job.status, job.status, `${attempt.attempt_identity}:send-fence`, actorId, { submissionStarted: true });
+    }).immediate();
+  }
+
+  acknowledgeReplacement(jobId: string, confirmed: boolean, operationId: string, actorId: string) {
+    return this.db.transaction(() => {
+      const job = this.row(jobId); this.assertCurrent(job);
+      if (confirmed !== true) throw new PrintingError('PRINT_REPLACEMENT_ACK_REQUIRED', 'Eski etiketi çıkar/değiştir işlemi için açık onay gerekli.', 409);
+      if (job.original_job_id || !job.replacement_required) throw new PrintingError('PRINT_REPLACEMENT_NOT_REQUIRED', 'Bu iş için etiket değiştirme onayı gerekmiyor.', 409);
+      if (job.replacement_acknowledged_at) return this.getJob(jobId);
+      const inFlight = this.db.prepare(`SELECT 1 FROM printing_attempts a JOIN printing_jobs j ON j.id=a.job_id
+        WHERE j.purpose='GOODS_RECEIPT_PACKAGE' AND j.subject_id=? AND j.superseded_by_job_id IS NOT NULL
+          AND a.submission_started_at IS NOT NULL AND a.completed_at IS NULL`).get(job.subject_id);
+      // Expiry is not proof that a paused/crashed sender can no longer send. Fail closed.
+      if (inFlight) throw new PrintingError('PRINT_SUBMISSION_IN_FLIGHT', 'Eski etiket gönderimi devam ediyor veya sonucu çözümlenmedi; gönderim bitmeden yeni baskı onaylanamaz.', 409);
+      this.db.prepare('UPDATE printing_jobs SET replacement_acknowledged_at=CURRENT_TIMESTAMP,replacement_acknowledged_by=? WHERE id=?').run(actorId, jobId);
+      this.event(jobId, null, job.status, job.status, operationId, actorId, { oldLabelRemovedOrReplaced: true });
+      return this.getJob(jobId);
+    }).immediate();
+  }
+
+  mark(jobId: string, attemptId: string, to: "RENDERED" | "SUBMITTED" | "ACKNOWLEDGED" | "DELIVERY_UNKNOWN" | "FAILED", details: Record<string, unknown>, actorId: string, leaseToken?: string) {
+    return this.db.transaction(() => {
+      const job = this.row(jobId);
+      const raw = this.db.prepare('SELECT * FROM printing_attempts WHERE id=? AND job_id=?').get(attemptId, jobId) as any;
+      const attempt = this.validLease(jobId, attemptId, leaseToken, !raw?.submission_started_at);
+      if (!attempt.submission_started_at) this.assertCurrent(job, true);
+      if (['SUBMITTED','ACKNOWLEDGED'].includes(to) && !attempt.submission_started_at) throw new PrintingError('PRINT_SUBMISSION_FENCE_REQUIRED', 'Submission fence is required.', 409);
+      const allowed: Record<string, string[]> = {
+        QUEUED: ['RENDERED','FAILED'], RENDERED: ['SUBMITTED','FAILED', ...(attempt.submission_started_at ? ['DELIVERY_UNKNOWN'] : [])],
+        SUBMITTED: ['ACKNOWLEDGED','DELIVERY_UNKNOWN'], ACKNOWLEDGED: ['DELIVERY_UNKNOWN'], DELIVERY_UNKNOWN: [], FAILED: [], CANCELLED: [], PRINTED_CONFIRMED: [],
+      };
+      if (to === 'FAILED' && attempt.submission_started_at) throw new PrintingError('PRINT_DELIVERY_UNKNOWN', 'Send started; delivery must remain unknown.', 409);
+      if (!allowed[job.status]?.includes(to)) throw new PrintingError('PRINT_STATE_CONFLICT', `${job.status} cannot transition to ${to}.`, 409);
       this.db.prepare(`UPDATE printing_attempts SET state=?,rendered_sha256=COALESCE(?,rendered_sha256),spool_reference=COALESCE(?,spool_reference),
         error_code=COALESCE(?,error_code),error_message=COALESCE(?,error_message),completed_at=CASE WHEN ? IN ('DELIVERY_UNKNOWN','FAILED') THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE id=?`)
         .run(to, details.renderedSha256 || null, details.spoolReference || null, details.errorCode || null, details.errorMessage || null, to, attemptId);
-      this.db.prepare("UPDATE printing_jobs SET status=?,error_code=?,error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+      this.db.prepare('UPDATE printing_jobs SET status=?,error_code=?,error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?')
         .run(to, details.errorCode || null, details.errorMessage || null, jobId);
       this.event(jobId, attemptId, job.status, to, `${attempt.attempt_identity}:${to}`, actorId, details);
+      return this.getJob(jobId);
     }).immediate();
-    return this.getJob(jobId);
   }
 
   listJobs(limit = 100) {
@@ -259,7 +345,11 @@ export class PrintingService {
   }
   private view(row: any) {
     const { artifact_blob: _artifactBlob, ...safeRow } = row;
-    return { ...safeRow, payload_snapshot: JSON.parse(row.payload_snapshot_json),
+    const current = row.purpose === 'GOODS_RECEIPT_PACKAGE' ? this.currentPackageJob(row.subject_id) : null;
+    const replacementBlocked = Boolean(current?.replacement_required && !current.replacement_acknowledged_at);
+    return { ...safeRow, revision_ambiguous: row.purpose === 'GOODS_RECEIPT_PACKAGE' && this.packageRevisionAmbiguous(row.subject_id), current_job_id: current?.id || row.id, replacement_blocked: replacementBlocked,
+      replacement_warning: replacementBlocked ? 'Eski etiketi çıkar/değiştir; yeni gönderim için açık operatör onayı gerekli.' : null,
+      payload_snapshot: JSON.parse(row.payload_snapshot_json),
       template_snapshot: row.template_snapshot_json ? JSON.parse(row.template_snapshot_json) : null,
       attempts: this.db.prepare("SELECT * FROM printing_attempts WHERE job_id=? ORDER BY attempt_number").all(row.id),
       reprint: this.db.prepare("SELECT * FROM printing_reprints WHERE reprint_job_id=?").get(row.id) || null,

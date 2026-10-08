@@ -1225,6 +1225,16 @@ export function createWarehouseRouter({
       res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
     } catch (error) { return handleServiceError(res, error); }
   });
+  router.post("/admin/print-jobs/:id/acknowledge-replacement", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:print_labels"), (req, res) => {
+    try {
+      const payload = { jobId: req.params.id, oldLabelRemovedOrReplaced: req.body?.oldLabelRemovedOrReplaced === true };
+      const outcome = commandExecutor.execute(commandRequest(req, res, "printing.package-replacement.acknowledge.v1", "warehouse:print_labels", payload), () => ({
+        statusCode: 200, body: { success: true, contract: "dsdst.print-job.v1",
+          data: printingService.acknowledgeReplacement(req.params.id, payload.oldLabelRemovedOrReplaced, operationIdFromRequest(req), actor(res).id) },
+      }));
+      res.status(outcome.result.statusCode).json({ ...(outcome.result.body as object), idempotent: outcome.replayed });
+    } catch (error) { return handleServiceError(res, error); }
+  });
   router.post("/admin/print-jobs/:id/confirm", authenticate("write:warehouse_status"), requireWarehouseUser, requireWarehousePermission("warehouse:print_labels"), (req, res) => {
     try {
       const payload = { jobId: req.params.id, physicalConfirmation: true };

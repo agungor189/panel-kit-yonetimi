@@ -74,7 +74,7 @@ test("worker keeps render/spool/physical confirmation distinct and failed attemp
     submitArtifact: async () => "request id is XP-470B-7" });
   assert.equal((await worker.runOnce()), true);
   assert.equal(service.getJob(job.id).status, "DELIVERY_UNKNOWN");
-  assert.deepEqual(service.getJob(job.id).history.map((event: any) => event.to_status), ["QUEUED", "RENDERED", "SUBMITTED", "ACKNOWLEDGED", "DELIVERY_UNKNOWN"]);
+  assert.deepEqual(service.getJob(job.id).history.map((event: any) => event.to_status), ["QUEUED", "RENDERED", "RENDERED", "SUBMITTED", "ACKNOWLEDGED", "DELIVERY_UNKNOWN"]);
   assert.equal(service.confirm(job.id, "confirm-op", actorId).status, "PRINTED_CONFIRMED");
   await new Promise<void>((resolve) => server.close(() => resolve()));
 

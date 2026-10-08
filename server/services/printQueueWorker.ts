@@ -67,20 +67,26 @@ export function startPrintQueueWorker(db: Database.Database, options: {
     running = true;
     const claimed = printing.claimNext(workerId);
     if (!claimed) { running = false; return false; }
+    let submissionStarted = false;
     try {
       const artifact = await render(claimed.job);
-      printing.mark(claimed.job.id, claimed.attemptId, "RENDERED", { renderedSha256: sha256(artifact), dryRun }, workerId);
+      printing.mark(claimed.job.id, claimed.attemptId, "RENDERED", { renderedSha256: sha256(artifact), dryRun }, workerId, claimed.leaseToken);
       if (dryRun) return true;
+      printing.beginSubmission(claimed.job.id, claimed.attemptId, claimed.leaseToken, workerId);
+      submissionStarted = true;
       const spoolReference = await submit(artifact, claimed.job);
-      printing.mark(claimed.job.id, claimed.attemptId, "SUBMITTED", { spoolReference }, workerId);
-      printing.mark(claimed.job.id, claimed.attemptId, "ACKNOWLEDGED", { spoolReference }, workerId);
-      printing.mark(claimed.job.id, claimed.attemptId, "DELIVERY_UNKNOWN", { spoolReference, reason: "NO_PHYSICAL_DELIVERY_SENSOR" }, workerId);
+      printing.mark(claimed.job.id, claimed.attemptId, "SUBMITTED", { spoolReference }, workerId, claimed.leaseToken);
+      printing.mark(claimed.job.id, claimed.attemptId, "ACKNOWLEDGED", { spoolReference }, workerId, claimed.leaseToken);
+      printing.mark(claimed.job.id, claimed.attemptId, "DELIVERY_UNKNOWN", { spoolReference, reason: "NO_PHYSICAL_DELIVERY_SENSOR" }, workerId, claimed.leaseToken);
       logger.info(`[print-worker] submitted ${claimed.job.purpose}:${claimed.job.subject_code}; physical delivery remains unknown`);
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message.slice(0, 1000) : "Print failed";
       const code = String((error as any)?.code || "PRINT_FAILED").slice(0, 100);
-      printing.mark(claimed.job.id, claimed.attemptId, "FAILED", { errorCode: code, errorMessage: message }, workerId);
+      // An invalidated/expired renderer must not overwrite the newer revision's cancellation.
+      // Once send starts, an error cannot establish that the printer received nothing.
+      try { printing.mark(claimed.job.id, claimed.attemptId, submissionStarted ? 'DELIVERY_UNKNOWN' : 'FAILED', { errorCode: code, errorMessage: message }, workerId, claimed.leaseToken); }
+      catch (markError) { if (!['PRINT_VERSION_SUPERSEDED','PRINT_LEASE_INVALID','PRINT_STATE_CONFLICT'].includes(String((markError as any)?.code))) throw markError; }
       logger.error(`[print-worker] ${claimed.job.purpose}:${claimed.job.subject_code} ${message}`);
       return false;
     } finally { running = false; }
