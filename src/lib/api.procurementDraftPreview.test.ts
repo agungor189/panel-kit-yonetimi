@@ -18,3 +18,15 @@ test('draft FINAL preview is read-only POST while FINAL approval keeps operation
     assert.equal(calls[1].headers['X-Operation-ID'],'approved-preview');
   } finally { globalThis.fetch = original; }
 });
+
+test('expense approval requires an explicit operation ID and keeps retries stable',async()=>{
+  const original=globalThis.fetch;let requests=0;
+  globalThis.fetch=(async(_url:string,init:RequestInit)=>{
+    requests++;assert.equal((init.headers as Record<string,string>)['X-Operation-ID'],'approved-expense');
+    return new Response(JSON.stringify({success:true,data:{}}),{status:200,headers:{'content-type':'application/json'}});
+  }) as typeof fetch;
+  try {
+    await assert.rejects(api.post('/expenses/expense/approve-payment',{}),/X-Operation-ID/);assert.equal(requests,0);
+    await api.post('/expenses/expense/approve-payment',{}, {operationId:'approved-expense'});assert.equal(requests,1);
+  } finally {globalThis.fetch=original;}
+});

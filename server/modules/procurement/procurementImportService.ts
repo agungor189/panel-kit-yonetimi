@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { CatalogService, type CatalogProductInput } from '../catalog/catalogService.js';
 import { ExchangeRateService } from '../finance/exchangeRates.js';
+import { ExpenseService } from '../finance/expenseService.js';
 import { canonicalPayloadHash } from '../commands/commandFoundation.js';
 import { normalizeBaseQuantity, type UomCode } from '../catalog/uom.js';
 import { ProcurementService, ProcurementValidationError, type PurchaseInput, type PurchaseCostInput } from './procurementService.js';
@@ -267,11 +268,13 @@ export class ProcurementImportService {
       this.openDraft(draftId);
       const now = new Date().toISOString();
       for (const cost of this.activeDraftCosts(draftId)) {
+        new ExpenseService(this.db).assertCostUnpaid(cost.id);
         const changed = this.db.prepare(`UPDATE procurement_import_draft_costs SET status='DELETED',version=version+1,updated_by=?,updated_at=?
           WHERE id=? AND draft_id=? AND status='ACTIVE' AND version=?`).run(actorId,now,cost.id,draftId,cost.version);
         if (changed.changes !== 1) throw new ProcurementValidationError('DRAFT_COST_STALE','Maliyet kalemi değişti; iptal işlemini yenileyin.',409);
         this.recordCostRevision(this.db.prepare('SELECT * FROM procurement_import_draft_costs WHERE id=?').get(cost.id),
           'DELETE',actorId,operationId,now);
+        new ExpenseService(this.db).syncPendingCost(cost.id);
       }
       this.db.prepare(`INSERT INTO procurement_import_draft_lifecycle_events
         (draft_id,event_type,operation_id,actor_id,created_at) VALUES (?,'CANCELLED',?,?,?)`)
@@ -302,6 +305,7 @@ export class ProcurementImportService {
         VALUES (?,?,?,?,?,?,'ACTIVE',1,?,?,?,?)`).run(id,draftId,cost.title,cost.amountMinor,cost.currency,cost.description,actorId,now,actorId,now);
       const row = this.db.prepare('SELECT * FROM procurement_import_draft_costs WHERE id=?').get(id);
       this.recordCostRevision(row,'CREATE',actorId,operationId,now);
+      new ExpenseService(this.db).syncPendingCost(id);
       return this.getDraft(draftId)!;
     }).immediate();
   }
@@ -310,12 +314,14 @@ export class ProcurementImportService {
     return this.db.transaction(() => {
       this.openDraft(draftId);
       const cost = draftCostFields(input), now = new Date().toISOString();
+      new ExpenseService(this.db).assertCostUnpaid(costId);
       if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) throw new ProcurementValidationError('DRAFT_COST_VERSION_REQUIRED', 'Güncel maliyet sürümü gerekli.', 409);
       const changed = this.db.prepare(`UPDATE procurement_import_draft_costs SET title=?,amount_minor=?,currency=?,description=?,
         version=version+1,updated_by=?,updated_at=? WHERE id=? AND draft_id=? AND status='ACTIVE' AND version=?`)
         .run(cost.title,cost.amountMinor,cost.currency,cost.description,actorId,now,costId,draftId,input.expectedVersion);
       if (changed.changes !== 1) throw new ProcurementValidationError('DRAFT_COST_STALE', 'Maliyet kalemi değişmiş veya silinmiş; listeyi yenileyin.', 409);
       this.recordCostRevision(this.db.prepare('SELECT * FROM procurement_import_draft_costs WHERE id=?').get(costId),'UPDATE',actorId,operationId,now);
+      new ExpenseService(this.db).syncPendingCost(costId);
       return this.getDraft(draftId)!;
     }).immediate();
   }
@@ -323,12 +329,14 @@ export class ProcurementImportService {
   deleteDraftCost(draftId: string, costId: string, expectedVersion: number, actorId: string, operationId: string) {
     return this.db.transaction(() => {
       this.openDraft(draftId);
+      new ExpenseService(this.db).assertCostUnpaid(costId);
       if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) throw new ProcurementValidationError('DRAFT_COST_VERSION_REQUIRED', 'Güncel maliyet sürümü gerekli.', 409);
       const now = new Date().toISOString();
       const changed = this.db.prepare(`UPDATE procurement_import_draft_costs SET status='DELETED',version=version+1,updated_by=?,updated_at=?
         WHERE id=? AND draft_id=? AND status='ACTIVE' AND version=?`).run(actorId,now,costId,draftId,expectedVersion);
       if (changed.changes !== 1) throw new ProcurementValidationError('DRAFT_COST_STALE', 'Maliyet kalemi değişmiş veya silinmiş; listeyi yenileyin.', 409);
       this.recordCostRevision(this.db.prepare('SELECT * FROM procurement_import_draft_costs WHERE id=?').get(costId),'DELETE',actorId,operationId,now);
+      new ExpenseService(this.db).syncPendingCost(costId);
       return this.getDraft(draftId)!;
     }).immediate();
   }
@@ -347,6 +355,7 @@ export class ProcurementImportService {
     const currentFx = new ExchangeRateService(this.db).getCurrentUsdTry();
     const draftCosts = this.activeDraftCosts(row.id).map(cost => ({
       id: cost.id, title: cost.title, amountMinor: cost.amount_minor, currency: cost.currency, description: cost.description, version: cost.version,
+      expenseId: cost.id, paymentStatus: new ExpenseService(this.db).detail(cost.id)?.paymentStatus ?? null,
       estimateUsdMinor: cost.currency === 'USD' ? cost.amount_minor : currentFx ? roundRatio(cost.amount_minor,currentFx.denominator,currentFx.numerator) : null,
     }));
     const goodsAmountUsdMinor = parsed.header.currency === 'USD' ? parsed.summary.goodsAmountMinor : null;

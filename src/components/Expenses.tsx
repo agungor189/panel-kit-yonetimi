@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Plus, Search, FileText, Download, Trash2, X, ChevronRight, Calculator, Calendar, DollarSign, Tag, Image as ImageIcon, Briefcase, FileSignature, Paperclip } from 'lucide-react';
-import { api } from '../lib/api';
+import { api, createRetryOperation } from '../lib/api';
 import { useCurrency } from '../CurrencyContext';
 import { Transaction, ExpenseAttachment, Settings } from '../types';
 import { useAuth } from '../App';
@@ -333,6 +333,28 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const isProcurementLinked = Boolean(expense.procurement_cost_id || expense.procurement);
+  const [paymentAccount, setPaymentAccount] = useState('');
+  const [paymentAccounts, setPaymentAccounts] = useState<any[]>([]);
+  const [paymentBusy, setPaymentBusy] = useState(false);
+  const [paymentError, setPaymentError] = useState('');
+  const [paymentOperation] = useState(() => createRetryOperation('expense-approval'));
+  useEffect(() => {
+    if (isProcurementLinked && !isReadOnly && expense.payment_method === 'Onay Bekliyor')
+      api.get('/cash-accounts').then(setPaymentAccounts).catch(error => setPaymentError(error.message));
+  }, [isProcurementLinked, isReadOnly, expense.id, expense.payment_method]);
+  const approvePayment = async () => {
+    if (isReadOnly || !expense.procurement) return;
+    setPaymentBusy(true);setPaymentError('');
+    try {
+      const payload = {cashAccountId:paymentAccount,expectedCostVersion:expense.procurement.costVersion};
+      const operationId = paymentOperation.idFor(payload);
+      await api.post(`/expenses/${expense.id}/approve-payment`,payload,{operationId});
+      paymentOperation.complete(operationId);
+      await loadDetails();onRefresh();
+    } catch(error:any) {setPaymentError(error.message || 'Ödeme onaylanamadı.');}
+    finally {setPaymentBusy(false);}
+  };
   const [deleteTarget, setDeleteTarget] = useState<{ type: 'expense' } | { type: 'attachment'; id: string } | null>(null);
 
   // Edit form state
@@ -458,7 +480,7 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
             <p className="text-gray-500 text-sm mt-1">{new Date(expense.date).toLocaleDateString('tr-TR')} · {expense.category}</p>
           </div>
           <div className="flex items-center gap-2">
-            {!isReadOnly && (
+            {!isReadOnly && !isProcurementLinked && (
               <button onClick={() => setDeleteTarget({ type: 'expense' })} className="p-2 text-danger hover:bg-red-50 rounded-lg transition-colors" title="Gideri Sil">
                 <Trash2 className="w-5 h-5" />
               </button>
@@ -588,7 +610,7 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                              <p className="text-gray-500 text-sm font-medium mb-1">Toplam Tutar</p>
                              <div className="text-3xl font-black text-gray-900 tracking-tight"><FormatAmount amount={expense.amount || 0} originalCurrency={(expense as any).currency || 'TRY'} exchangeRateAtTransaction={expense.exchange_rate_at_transaction} /></div>
                            </div>
-                           {!isReadOnly && (
+                           {!isReadOnly && !isProcurementLinked && (
                              <Button variant="secondary" onClick={() => setIsEditing(true)} className="border-gray-200 font-bold text-gray-700 shadow-sm hover:bg-gray-50">
                                Düzenle
                              </Button>
@@ -617,6 +639,23 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                              <p className="font-bold text-gray-900">{expense.payment_method || expense.platform || '-'}</p>
                            </div>
                         </div>
+
+                        {isProcurementLinked && <div className="space-y-3 rounded-xl border p-4">
+                          <p className="font-bold">{expense.payment_method}</p>
+                          <p className="text-sm">Satın alma: {expense.reference_number} · {expense.currency === 'TRY' ? 'TL' : expense.currency}</p>
+                          {expense.procurement?.paymentStatus === 'PAID' && <p className="text-sm text-gray-500">{expense.procurement.cashAccountName} · {expense.procurement.paidAt ? new Date(expense.procurement.paidAt).toLocaleString('tr-TR') : ''}</p>}
+                          {expense.payment_method === 'Onay Bekliyor' && !isReadOnly && <>
+                            <label className="text-sm font-bold">Ödemenin yapıldığı kasa / banka hesabı
+                              <Select value={paymentAccount} onChange={event => setPaymentAccount(event.target.value)}>
+                                <option value="">Hesap seçin</option>
+                                {paymentAccounts.filter(account => account.is_active === 1 && account.currency === expense.currency).map(account => <option key={account.id} value={account.id}>{account.name} ({account.currency === 'TRY' ? 'TL' : account.currency})</option>)}
+                              </Select>
+                            </label>
+                            <p className="text-xs text-gray-500">Fatura / Ekler sekmesinden belge ekleyin ve giderin para birimindeki hesabı seçin. Onay, seçilen hesaptan gerçek kasa çıkışı oluşturur; FINAL LC'den bağımsızdır.</p>
+                            <Button disabled={paymentBusy || uploading || !paymentAccount || !attachments.length || !expense.procurement} onClick={approvePayment}>{paymentBusy ? 'Onaylanıyor...' : 'Ödemeyi Onayla'}</Button>
+                          </>}
+                          {paymentError && <p role="alert" className="text-sm text-danger">{paymentError}</p>}
+                        </div>}
 
                         {expense.description && (
                           <div className="pt-6 border-t border-gray-100">
@@ -669,7 +708,7 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
                                 <img src={url} alt={att.file_name} className="w-full h-full object-cover" />
                               </a>
                             )}
-                            {!isReadOnly && <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                            {!isReadOnly && !(isProcurementLinked && expense.payment_method === 'Ödendi') && <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
                               <button
                                 onClick={(e) => { e.preventDefault(); e.stopPropagation(); setDeleteTarget({ type: 'attachment', id: att.id }); }}
                                 className="p-1.5 bg-red-600 text-white rounded-md shadow-lg hover:bg-red-700"

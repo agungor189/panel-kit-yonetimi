@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import {ExpenseService} from '../finance/expenseService.js';
 import type Database from "better-sqlite3";
 import { CatalogService, CatalogValidationError } from "../catalog/catalogService.js";
 import { normalizeBaseQuantity, type UomCode } from "../catalog/uom.js";
@@ -422,6 +423,8 @@ export class ProcurementService {
           optionalText(item.description || item.notes, "cost.description", 1000), item.occurredOn || createdAt.slice(0, 10),
           targets.length ? "SELECTED_LINES" : "COMMON", JSON.stringify(targets), createdAt, item.counterparty,
         );
+        if (!this.db.prepare('SELECT 1 FROM procurement_import_draft_costs WHERE id=?').get(normalized.id))
+          new ExpenseService(this.db).syncPendingCost(normalized.id);
       }
       const insertAttachment = this.db.prepare(`INSERT INTO purchase_attachments
         (id,purchase_order_id,kind,file_name,media_type,size_bytes,sha256,storage_reference,created_at) VALUES (?,?,?,?,?,?,?,?,?)`);
@@ -844,6 +847,7 @@ export class ProcurementService {
         (component_id,expense_type,description,occurred_on,target_scope,target_line_ids_json,created_at,counterparty) VALUES (?,?,?,?,?,?,?,?)`)
         .run(normalized.id, expenseType, optionalText(input.description || input.notes, "description", 1000), occurredOn,
           targetIds.length ? "SELECTED_LINES" : "COMMON", JSON.stringify(targetIds), createdAt, input.counterparty);
+      new ExpenseService(this.db).syncPendingCost(normalized.id);
       const currentHeader = this.db.prepare('SELECT * FROM purchase_orders WHERE id=?').get(purchaseId);
       this.db.prepare('UPDATE purchase_orders SET payment_status=? WHERE id=?').run(this.paymentStatus(currentHeader), purchaseId);
       this.db.prepare("UPDATE procurement_workflows SET state='COST_PENDING',updated_at=? WHERE purchase_order_id=? AND state IN ('DRAFT','ORDERED','IN_TRANSIT')")

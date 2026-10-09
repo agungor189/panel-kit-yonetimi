@@ -1,3 +1,5 @@
+import {ExpenseService, ExpenseValidationError, OPERATING_EXPENSE_FILTER} from './server/modules/finance/expenseService.js';
+import {createProcurementExpenseRouter} from './server/routes/procurementExpenseRoutes.js';
 import { withFinalLandedCost } from './server/modules/pricing/finalLandedCostSource.js';
 import "dotenv/config";
 import { webcrypto } from "node:crypto";
@@ -1136,35 +1138,7 @@ function ensureActiveCashAccount(accountId: string): any {
 }
 
 function insertExpenseCashTransaction(expense: any): string {
-  const accountId = getExpensePaymentAccountId(expense);
-  if (!accountId) throw new Error("Gider eklerken ödeme hesabı veya ödeyen kişi seçimi zorunludur.");
-  ensureActiveCashAccount(accountId);
-
-  const amount = Number(expense.amount);
-  if (!Number.isFinite(amount) || amount <= 0) throw new Error("Tutar 0'dan büyük olmalıdır.");
-
-  const exchangeRate = Number(expense.exchange_rate_at_transaction || expense.exchange_rate || 1);
-  if (!Number.isFinite(exchangeRate) || exchangeRate <= 0) throw new Error("Döviz kuru geçerli değil.");
-
-  const cashTxId = uuidv4();
-  db.prepare(`
-    INSERT INTO cash_transactions (
-      id, account_id, type, amount, currency, exchange_rate_at_transaction,
-      source_type, source_id, description, transaction_date, is_deleted
-    )
-    VALUES (?, ?, 'OUT', ?, ?, ?, 'expense', ?, ?, ?, 0)
-  `).run(
-    cashTxId,
-    accountId,
-    amount,
-    expense.currency || 'TRY',
-    exchangeRate,
-    expense.id,
-    buildExpenseCashDescription(expense),
-    expense.date || new Date().toISOString(),
-  );
-
-  return cashTxId;
+  return new ExpenseService(db).insertCashTransaction(expense);
 }
 
 function syncExpenseCashTransaction(expense: any): void {
@@ -1709,7 +1683,7 @@ async function startServer() {
       }
 
       // Get expenses
-      const expenses = db.prepare(`SELECT * FROM transactions WHERE type = 'Expense' AND date >= ?`).all(startDateStr) as any[];
+      const expenses = db.prepare(`SELECT * FROM transactions WHERE type = 'Expense' AND date >= ? AND COALESCE(is_deleted,0)=0 AND ${OPERATING_EXPENSE_FILTER}`).all(startDateStr) as any[];
 
       // Aggregations
       const metrics = {
@@ -1942,7 +1916,7 @@ async function startServer() {
         }
       };
       const sumExpensesForRange = (start?: Date | null, end?: Date | null) => {
-        const clauses = ["type = 'Expense'", "COALESCE(is_deleted, 0) = 0"];
+        const clauses = ["type = 'Expense'", "COALESCE(is_deleted, 0) = 0", OPERATING_EXPENSE_FILTER];
         const params: string[] = [];
         addDateRange(clauses, params, "COALESCE(date, created_at)", start, end);
         const row = db.prepare(`
@@ -2144,7 +2118,7 @@ async function startServer() {
       };
 
       // Charts: 6 Month History
-      const monthlyExpenseClauses = ["type = 'Expense'", "COALESCE(is_deleted, 0) = 0"];
+      const monthlyExpenseClauses = ["type = 'Expense'", "COALESCE(is_deleted, 0) = 0", OPERATING_EXPENSE_FILTER];
       const monthlyExpenseParams: string[] = [];
       addDateRange(monthlyExpenseClauses, monthlyExpenseParams, "COALESCE(date, created_at)", periodStart, periodEnd);
       const monthlySalesClauses = ["status NOT IN ('İptal Edildi', 'İade Edildi')"];
@@ -2826,9 +2800,11 @@ async function startServer() {
   });
 
   // Expenses API
+  app.use("/api/expenses",createProcurementExpenseRouter(db,requireFinanceWrite));
   app.get("/api/expenses", (req, res) => {
     const expenses = db.prepare(`
       SELECT t.*,
+             CASE WHEN t.expense_type='PROCUREMENT_COST' THEN t.id END AS procurement_cost_id,
              (SELECT COUNT(*) FROM expense_attachments WHERE expense_id = t.id) as attachment_count
       FROM transactions t
       WHERE t.type = 'Expense' AND (t.is_deleted = 0 OR t.is_deleted IS NULL)
@@ -2848,7 +2824,7 @@ async function startServer() {
 
     const attachments = db.prepare("SELECT * FROM expense_attachments WHERE expense_id = ? ORDER BY uploaded_at DESC").all(req.params.id);
 
-    res.json({ ...expense, attachments });
+    res.json({ ...expense, attachments, procurement: new ExpenseService(db).detail(req.params.id) });
   });
 
   app.post("/api/expenses", requireFinanceWrite, (req, res) => {
@@ -2947,6 +2923,7 @@ async function startServer() {
           throw err;
         }
 
+        new ExpenseService(db).assertStandaloneEditable(req.params.id);
         const nextAmount = amount !== undefined ? toDbNumber(amount, NaN) : Number(beforeState.amount);
         if (!Number.isFinite(nextAmount) || nextAmount <= 0) throw new Error("Tutar 0'dan büyük olmalıdır.");
 
@@ -3029,6 +3006,7 @@ async function startServer() {
           throw err;
         }
 
+        if (beforeState.type === 'Expense') new ExpenseService(db).assertStandaloneEditable(req.params.id);
         db.prepare("UPDATE transactions SET is_deleted = 1 WHERE id = ?").run(req.params.id);
         db.prepare(`
           UPDATE cash_transactions
@@ -3071,10 +3049,12 @@ async function startServer() {
     const attachment = db.prepare("SELECT * FROM expense_attachments WHERE id = ? AND expense_id = ?").get(req.params.attachmentId, req.params.id) as any;
 
     if (!attachment) return res.status(404).json({ error: "Attachment not found" });
+    try {new ExpenseService(db).assertDocumentRemovable(req.params.id);}
+    catch(error) {if(error instanceof ExpenseValidationError) return res.status(error.statusCode).json({error:error.message});throw error;}
 
     if (attachment.file_path) {
       const removal = removeStoredUploadReference(uploadsDir, attachment.file_path, () => {
-        db.prepare("DELETE FROM expense_attachments WHERE id = ?").run(req.params.attachmentId);
+        new ExpenseService(db).deleteAttachmentRecord(req.params.id,req.params.attachmentId);
       });
       if (removal.status === "rejected") {
         logActivity("UNSAFE_UPLOAD_PATH_REJECTED", "expense_attachment", req.params.attachmentId, { reason: removal.reason }, req.user?.id);
@@ -3082,7 +3062,7 @@ async function startServer() {
         logActivity("UPLOAD_DELETE_CLEANUP_PENDING", "expense_attachment", req.params.attachmentId, {}, req.user?.id);
       }
     } else {
-      db.prepare("DELETE FROM expense_attachments WHERE id = ?").run(req.params.attachmentId);
+      new ExpenseService(db).deleteAttachmentRecord(req.params.id,req.params.attachmentId);
     }
 
     res.json({ success: true });
@@ -3408,6 +3388,7 @@ async function startServer() {
           throw err;
         }
 
+        if (beforeState.type === 'Expense') new ExpenseService(db).assertStandaloneEditable(req.params.id);
         db.prepare("UPDATE transactions SET is_deleted = 1 WHERE id = ?").run(req.params.id);
         if (beforeState.type === 'Expense') {
           db.prepare(`
@@ -6000,7 +5981,7 @@ async function startServer() {
 
     const expenses = db.prepare(`
       SELECT COUNT(*) AS count, COALESCE(SUM(amount_try), 0) AS total
-      FROM transactions WHERE type = 'Expense' AND date >= ?
+      FROM transactions WHERE type = 'Expense' AND date >= ? AND COALESCE(is_deleted,0)=0 AND ${OPERATING_EXPENSE_FILTER}
     `).get(startIso) as any;
 
     const top = db.prepare(`

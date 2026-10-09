@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import {ExpenseValidationError} from '../modules/finance/expenseService.js';
 import express, { type RequestHandler } from "express";
 import multer from "multer";
 import { createHash } from "node:crypto";
@@ -43,7 +44,7 @@ const sendOutcome = (res: express.Response, outcome: ReturnType<CommandExecutor[
 const sendError = (error: unknown, res: express.Response) => {
   if (error instanceof ImportValidationError || error instanceof CatalogValidationError) return res.status(error.statusCode).json({ success: false, error: { code: error.code, message: error.message } });
   if (error instanceof CommandFoundationError) return res.status(error.statusCode).json({ success: false, error: { code: error.code, message: error.message } });
-  if (error instanceof ProcurementValidationError) return res.status(error.statusCode).json({ success: false, error: { code: error.code, message: error.message } });
+  if (error instanceof ProcurementValidationError || error instanceof ExpenseValidationError) return res.status(error.statusCode).json({ success: false, error: { code: error.code, message: error.message } });
   if (error instanceof ExchangeRateValidationError || error instanceof MoneyValidationError) {
     return res.status(400).json({ success: false, error: { code: "MONEY_VALIDATION_FAILED", message: error.message } });
   }
