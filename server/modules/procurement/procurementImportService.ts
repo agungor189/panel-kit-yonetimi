@@ -6,7 +6,7 @@ import { ExchangeRateService } from '../finance/exchangeRates.js';
 import { ExpenseService, draftCostAmounts } from '../finance/expenseService.js';
 import { canonicalPayloadHash } from '../commands/commandFoundation.js';
 import { normalizeBaseQuantity, type UomCode } from '../catalog/uom.js';
-import { ProcurementService, ProcurementValidationError, type PurchaseInput, type PurchaseCostInput } from './procurementService.js';
+import { ProcurementService, ProcurementValidationError, deterministicValueAllocation, calculateLandedLine, type PurchaseInput, type PurchaseCostInput } from './procurementService.js';
 import { parseProcurementImport, expandSourcePackages, decimal, fail, ImportValidationError, type ImportRow } from './procurementImport.js';
 
 type Choice = { action: 'KEEP' | 'UPDATE' | 'CREATE'; productId?: string; fields?: CatalogProductInput };
@@ -20,17 +20,17 @@ export type ImportCostDecision = {
   includedCost: 'NO_SEPARATE_CHARGE'; stockCheck: 'NO_PRIOR_RECEIPT'; stockEvidence: string;
   costDecisions?: Array<{ costId: string; category: PurchaseCostInput['category']; counterparty: 'SUPPLIER' | 'THIRD_PARTY'; vatMode: 'INCLUDED' | 'EXCLUDED'; vatRateBps: number }>;
   approveProportionalAllocation?: boolean;
-  expectedPreviewHash?: string; approvePreview?: boolean;
+  expectedPreviewHash?: string; expectedProjectionHash?: string; approvePreview?: boolean;
 };
 class PreviewRollback extends Error { constructor(readonly result: any) { super('Read-only preview rollback'); } }
-export type DraftCostInput = { title: string; amountMinor: number; currency: 'USD' | 'TRY'; description?: string; vatRateBps?: number };
+export type DraftCostInput = { title: string; amountMinor: number; currency: 'USD' | 'TRY'; description?: string; vatRateBps?: number; counterparty?: 'SUPPLIER'|'THIRD_PARTY' };
 
 const draftText = (value: unknown, field: string, max: number) => {
   const result = typeof value === 'string' ? value.trim() : '';
   if (!result || result.length > max || /[\u0000-\u001f\u007f]/.test(result)) throw new ProcurementValidationError('DRAFT_COST_INVALID', `${field} geçersiz.`);
   return result;
 };
-const draftCostFields = (input: DraftCostInput) => {
+const draftCostFields = (input: DraftCostInput, savedCounterparty?: string|null) => {
   const title = draftText(input?.title, 'Başlık', 120);
   if (!Number.isSafeInteger(input?.amountMinor) || input.amountMinor <= 0) throw new ProcurementValidationError('DRAFT_COST_INVALID', 'Tutar pozitif kuruş değeri olmalı.');
   if (input.currency !== 'USD' && input.currency !== 'TRY') throw new ProcurementValidationError('DRAFT_COST_INVALID', 'Para birimi USD veya TRY olmalı.');
@@ -38,7 +38,9 @@ const draftCostFields = (input: DraftCostInput) => {
   const vatRateBps = input.vatRateBps === undefined ? 2000 : input.vatRateBps;
   if (!Number.isInteger(vatRateBps) || vatRateBps < 0 || vatRateBps > 10000) throw new ProcurementValidationError('DRAFT_COST_INVALID','KDV oranı %0–100 arasında, en çok iki ondalık basamakla girilmeli.');
   integerMoney(splitVat(input.amountMinor,'INCLUDED',vatRateBps).grossMinor,'gross cost');
-  return { title, amountMinor: input.amountMinor, currency: input.currency, description, vatRateBps };
+  const counterparty = input.counterparty ?? savedCounterparty;
+  if (counterparty !== 'SUPPLIER' && counterparty !== 'THIRD_PARTY') throw new ProcurementValidationError('DRAFT_COST_COUNTERPARTY_REQUIRED','Maliyetin tedarikçiye mi üçüncü tarafa mı ödeneceğini seçin.');
+  return { title, amountMinor: input.amountMinor, currency: input.currency, description, vatRateBps, counterparty };
 };
 const roundRatio = (amount: number, numerator: number, denominator: number) => {
   const n = BigInt(amount) * BigInt(numerator), d = BigInt(denominator);
@@ -290,7 +292,7 @@ export class ProcurementImportService {
   private activeDraftCosts(draftId: string) {
     return this.db.prepare(`SELECT *
       FROM procurement_import_draft_costs WHERE draft_id=? AND status='ACTIVE' ORDER BY created_at,id`).all(draftId) as Array<{
-        id: string; title: string; amount_minor: number; currency: 'USD' | 'TRY'; description: string | null; vat_rate_bps: number | null; vat_mode?: 'INCLUDED' | 'EXCLUDED'; version: number; created_at: string;
+        id: string; title: string; amount_minor: number; currency: 'USD' | 'TRY'; description: string | null; vat_rate_bps: number | null; vat_mode?: 'INCLUDED' | 'EXCLUDED'; counterparty: 'SUPPLIER'|'THIRD_PARTY'|null; version: number; created_at: string;
       }>;
   }
 
@@ -305,8 +307,8 @@ export class ProcurementImportService {
       this.openDraft(draftId);
       const cost = draftCostFields(input), id = randomUUID(), now = new Date().toISOString();
       this.db.prepare(`INSERT INTO procurement_import_draft_costs
-        (id,draft_id,title,amount_minor,currency,description,vat_rate_bps,vat_mode,status,version,created_by,created_at,updated_by,updated_at)
-        VALUES (?,?,?,?,?,?,?,'INCLUDED','ACTIVE',1,?,?,?,?)`).run(id,draftId,cost.title,cost.amountMinor,cost.currency,cost.description,cost.vatRateBps,actorId,now,actorId,now);
+        (id,draft_id,title,amount_minor,currency,description,vat_rate_bps,counterparty,vat_mode,status,version,created_by,created_at,updated_by,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,'INCLUDED','ACTIVE',1,?,?,?,?)`).run(id,draftId,cost.title,cost.amountMinor,cost.currency,cost.description,cost.vatRateBps,cost.counterparty,actorId,now,actorId,now);
       const row = this.db.prepare('SELECT * FROM procurement_import_draft_costs WHERE id=?').get(id);
       this.recordCostRevision(row,'CREATE',actorId,operationId,now);
       new ExpenseService(this.db).syncPendingCost(id);
@@ -317,12 +319,13 @@ export class ProcurementImportService {
   updateDraftCost(draftId: string, costId: string, input: DraftCostInput & { expectedVersion: number }, actorId: string, operationId: string) {
     return this.db.transaction(() => {
       this.openDraft(draftId);
-      const cost = draftCostFields(input), now = new Date().toISOString();
       new ExpenseService(this.db).assertCostUnpaid(costId);
+      const saved = this.activeDraftCosts(draftId).find(cost => cost.id === costId);
+      const cost = draftCostFields(input,saved?.counterparty), now = new Date().toISOString();
       if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) throw new ProcurementValidationError('DRAFT_COST_VERSION_REQUIRED', 'Güncel maliyet sürümü gerekli.', 409);
-      const changed = this.db.prepare(`UPDATE procurement_import_draft_costs SET title=?,amount_minor=?,currency=?,description=?,vat_rate_bps=?,vat_mode='INCLUDED',
+      const changed = this.db.prepare(`UPDATE procurement_import_draft_costs SET title=?,amount_minor=?,currency=?,description=?,vat_rate_bps=?,counterparty=?,vat_mode='INCLUDED',
         version=version+1,updated_by=?,updated_at=? WHERE id=? AND draft_id=? AND status='ACTIVE' AND version=?`)
-        .run(cost.title,cost.amountMinor,cost.currency,cost.description,cost.vatRateBps,actorId,now,costId,draftId,input.expectedVersion);
+        .run(cost.title,cost.amountMinor,cost.currency,cost.description,cost.vatRateBps,cost.counterparty,actorId,now,costId,draftId,input.expectedVersion);
       if (changed.changes !== 1) throw new ProcurementValidationError('DRAFT_COST_STALE', 'Maliyet kalemi değişmiş veya silinmiş; listeyi yenileyin.', 409);
       this.recordCostRevision(this.db.prepare('SELECT * FROM procurement_import_draft_costs WHERE id=?').get(costId),'UPDATE',actorId,operationId,now);
       new ExpenseService(this.db).syncPendingCost(costId);
@@ -358,7 +361,7 @@ export class ProcurementImportService {
     const packages = expandSourcePackages(parsed);
     const currentFx = new ExchangeRateService(this.db).getCurrentUsdTry();
     const draftCosts = this.activeDraftCosts(row.id).map(cost => ({
-      id: cost.id, title: cost.title, amountMinor: cost.amount_minor, vatMode:cost.vat_mode || 'EXCLUDED', ...draftCostAmounts(cost), currency: cost.currency, description: cost.description, version: cost.version,
+      id: cost.id, title: cost.title, counterparty:cost.counterparty, amountMinor: cost.amount_minor, vatMode:cost.vat_mode || 'EXCLUDED', ...draftCostAmounts(cost), currency: cost.currency, description: cost.description, version: cost.version,
       expenseId: cost.id, paymentStatus: new ExpenseService(this.db).detail(cost.id)?.paymentStatus ?? null,
       estimateUsdMinor: cost.currency === 'USD' ? draftCostAmounts(cost).grossMinor : currentFx ? roundRatio(draftCostAmounts(cost).grossMinor,currentFx.denominator,currentFx.numerator) : null,
     }));
@@ -366,11 +369,12 @@ export class ProcurementImportService {
     const additionalCostsUsdMinor = draftCosts.every(cost => cost.estimateUsdMinor !== null)
       ? draftCosts.reduce((sum,cost) => sum + cost.estimateUsdMinor!,0) : null;
     const estimatedTotalUsdMinor = goodsAmountUsdMinor === null || additionalCostsUsdMinor === null ? null : goodsAmountUsdMinor + additionalCostsUsdMinor;
+    const draftPricing = this.projectDraftPrices(parsed, resolved.lineIds, draftCosts, currentFx);
     return { id: row.id, purchaseNumber: `CSV-${row.invoice_number}`, orderDate: row.invoice_date,
       workflowState: 'DRAFT', status: 'INCOMPLETE', costDecisionPending: true,
       goodsAmountUsdMinor, additionalCostsUsdMinor, estimatedTotalUsdMinor,
       estimateFx: currentFx ? { observationId: currentFx.observationId, numerator: currentFx.numerator, denominator: currentFx.denominator, observedAt: currentFx.observedAt } : null,
-      draftCosts,
+      draftCosts, draftPricing,
       supplier: { id: row.supplier_id, name: row.supplier_name }, supplierCurrency: row.currency,
       vatPolicy: null, totalNetMinor: null, totalVatMinor: null, totalGrossMinor: null, paidMinor: 0,
       outstandingMinor: null, paymentStatus: 'UNPAID', acquisitionCosts: [], lots: [], documents: [], sourcePacking: [...parsed.groups, ...parsed.items],
@@ -397,6 +401,42 @@ export class ProcurementImportService {
           vat: null, amounts: null, fx: null, normalizedMerchandiseUnitCostTry: null, packing: null };
       }),
     };
+  }
+
+  private projectDraftPrices(parsed: ReturnType<typeof parseProcurementImport>, lineIds: Record<string,string>,
+    costs: Array<{ id:string; version:number; currency:string; grossMinor:number }>,
+    fx: ReturnType<ExchangeRateService['getCurrentUsdTry']>) {
+    // Estimates use invoice purchase amounts, not an assumed invoice VAT policy.
+    // Native currency remains usable without FX only when every amount has that currency.
+    const projectionFx = ['USD','TRY'].includes(parsed.header.currency) ? fx : null;
+    const currency = projectionFx ? 'TRY' : costs.every(cost => cost.currency === parsed.header.currency) ? parsed.header.currency : null;
+    const convert = (amount:number, source:string) => currency === source ? amount : projectionFx
+      ? roundRatio(amount, source === 'USD' ? projectionFx.numerator : projectionFx.denominator, source === 'USD' ? projectionFx.denominator : projectionFx.numerator) : null;
+    const weights = parsed.lines.map(row => ({ id:lineIds[row.record_id],
+      baseTry:{ netMinor:currency ? convert(Number(decimal(row.amount,row,'amount',2)),row.currency)! : 0 } }));
+    const allocated = new Map(weights.map(line => [line.id,0]));
+    const sum = (values:number[]) => integerMoney(values.reduce((total,value) => total+value,0),'draft projection total');
+    const expenseAmounts = currency ? costs.map(cost => convert(cost.grossMinor,cost.currency)!) : [];
+    if (currency) for (const amount of expenseAmounts) {
+      const allocation = deterministicValueAllocation(amount,weights);
+      if (sum(allocation.entries.map(entry => entry.amountTryMinor)) !== amount)
+        throw new ProcurementValidationError('DRAFT_ALLOCATION_INVALID','Ek giderler alış bedeline dağıtılamadı.');
+      for (const entry of allocation.entries) allocated.set(entry.lineId,sum([allocated.get(entry.lineId)!,entry.amountTryMinor]));
+    }
+    const lines = parsed.lines.map((row,index) => {
+      const quantity = normalizeBaseQuantity(row.quantity,row.uom as UomCode);
+      const merchandiseMinor = currency ? weights[index].baseTry.netMinor : null;
+      const allocatedExpenseMinor = currency ? allocated.get(lineIds[row.record_id])! : null;
+      const calculated = merchandiseMinor === null ? null : calculateLandedLine(merchandiseMinor,[allocatedExpenseMinor!],quantity.quantityScale,quantity.baseQuantity);
+      return { lineId:lineIds[row.record_id],merchandiseMinor,allocatedExpenseMinor,
+        totalMinor:calculated?.landed ?? null,unitCost:calculated?.normalized ?? null };
+    });
+    const totals = { merchandiseMinor:currency ? sum(lines.map(line => line.merchandiseMinor!)) : null,
+      additionalMinor:currency ? sum(expenseAmounts) : null,landedMinor:currency ? sum(lines.map(line => line.totalMinor!)) : null };
+    const result = { readOnly:true as const,currency,fxPending:!projectionFx,lines,totals,
+      landedUsdMinor:currency === 'USD' ? totals.landedMinor : currency === 'TRY' && projectionFx && totals.landedMinor !== null ? roundRatio(totals.landedMinor,projectionFx.denominator,projectionFx.numerator) : null,
+      fx:projectionFx ? { observationId:projectionFx.observationId,numerator:projectionFx.numerator,denominator:projectionFx.denominator,observedAt:projectionFx.observedAt } : null };
+    return { ...result,projectionHash:canonicalPayloadHash({ sourceHash:parsed.sourceHash,costs:costs.map(({id,version,currency,grossMinor}) => ({id,version,currency,grossMinor})),result }) };
   }
 
   listDrafts() {
@@ -446,6 +486,8 @@ export class ProcurementImportService {
           !['SUPPLIER','THIRD_PARTY'].includes(decision.counterparty) || !['INCLUDED','EXCLUDED'].includes(decision.vatMode) ||
           !Number.isInteger(decision.vatRateBps) || decision.vatRateBps < 0 || decision.vatRateBps > 10000)
           throw new ProcurementValidationError('DRAFT_COST_DECISION_REQUIRED', 'Ek maliyetin türü, muhatabı ve vergi kararı gerekli.', 409);
+        if (cost.counterparty && cost.counterparty !== decision.counterparty)
+          throw new ProcurementValidationError('DRAFT_COST_COUNTERPARTY_CONFLICT','Maliyet kaydındaki muhatap kesinleştirmede değiştirilemez.',409);
         if (cost.vat_rate_bps != null && (decision.vatMode !== (cost.vat_mode || 'EXCLUDED') || decision.vatRateBps !== cost.vat_rate_bps))
           throw new ProcurementValidationError('DRAFT_COST_VAT_CONFLICT','Kesinleştirmede maliyetin kayıtlı KDV biçimi ve oranı kullanılmalı; tutara yeniden KDV eklenemez.',409);
         return { id: cost.id, category: decision.category, counterparty: decision.counterparty,
@@ -476,6 +518,26 @@ export class ProcurementImportService {
       this.db.prepare('INSERT INTO procurement_import_draft_completions VALUES (?,?,?,?,?)').run(draftId, purchaseId, JSON.stringify(policy), actorId, createdAt);
       return new ProcurementService(this.db).getPurchase(purchase.id)!;
     }).immediate();
+  }
+
+  private draftStockCheck(draftId:string) {
+    const draft = this.db.prepare('SELECT supplier_id,invoice_number,resolved_json FROM procurement_import_drafts WHERE id=?').get(draftId) as any;
+    const resolved = JSON.parse(draft.resolved_json);
+    const lineIds = Object.values(resolved.lineIds) as string[];
+    const purchases = this.db.prepare(`SELECT id FROM purchase_orders WHERE supplier_id=? AND upper(trim(invoice_number))=upper(trim(?))
+      UNION SELECT purchase_order_id AS id FROM procurement_import_draft_completions WHERE draft_id=?`).all(draft.supplier_id,draft.invoice_number,draftId) as {id:string}[];
+    const purchaseIds = [draftId,...purchases.map(row => row.id)];
+    const placeholders = (items:string[]) => items.map(() => '?').join(',');
+    const condition = `purchase_order_id IN (${placeholders(purchaseIds)}) OR purchase_line_id IN (${placeholders(lineIds)})`;
+    const refs = [...purchaseIds,...lineIds];
+    const receipts = this.db.prepare(`SELECT id FROM warehouse_goods_receipts WHERE ${condition}`).all(...refs) as {id:string}[];
+    const lots = this.db.prepare(`SELECT id FROM inventory_lots WHERE ${condition}`).all(...refs) as {id:string}[];
+    const events = this.db.prepare(`SELECT e.id FROM inventory_ledger_events e JOIN inventory_lots l ON l.id=e.lot_id
+      WHERE l.purchase_order_id IN (${placeholders(purchaseIds)}) OR l.purchase_line_id IN (${placeholders(lineIds)})`).all(...refs) as {id:string}[];
+    const completed = this.db.prepare(`SELECT purchase_order_id AS id FROM procurement_workflows WHERE state='COMPLETED' AND purchase_order_id IN (${placeholders(purchaseIds)})`).all(...purchaseIds) as {id:string}[];
+    const conflicts = [...receipts.map(r => `Mal kabul ${r.id}`),...lots.map(r => `Stok lotu ${r.id}`),...events.map(r => `Stok hareketi ${r.id}`),...completed.map(r => `Tamamlanmış satın alma ${r.id}`)];
+    if (conflicts.length) throw new ProcurementValidationError('DRAFT_ALREADY_RECEIVED',`Bu parti daha önce stok işlemine girmiş: ${conflicts.join(' · ')}. FINAL onayı engellendi.`,409);
+    return {source:'AUTHORITATIVE_DB',draftId,purchaseIds,lineIds,receipts:[],inventoryLots:[],inventoryEvents:[],completedPurchases:[]};
   }
 
   previewDraftCost(draftId: string, decision: ImportCostDecision, actorId: string) {
@@ -511,8 +573,17 @@ export class ProcurementImportService {
 
   finalizeDraft(draftId: string, decision: ImportCostDecision, actorId: string) {
     return this.db.transaction(() => {
+      if (decision?.expectedProjectionHash && decision.approvePreview === true) {
+        const draft = this.getDraft(draftId);
+        if (!draft?.draftPricing || draft.draftPricing.projectionHash !== decision.expectedProjectionHash)
+          throw new ProcurementValidationError('COST_PREVIEW_STALE','Maliyet veya kur değişti; taslağı yeniden açın.',409);
+        this.draftStockCheck(draftId);
+        throw new ProcurementValidationError('DRAFT_FINAL_APPROVAL_REQUIRED',
+          'Bu görünüm tahmini maliyettir. Satın almanın mevcut onaylı maliyet kararı bulunmadan FINAL oluşturulamaz; stok ve ödeme kaydı oluşturulmadı.',409);
+      }
       if (decision?.approvePreview !== true || !decision.expectedPreviewHash)
         throw new ProcurementValidationError('COST_PREVIEW_APPROVAL_REQUIRED','FINAL maliyet önizlemesi açıkça onaylanmalı.',409);
+      this.draftStockCheck(draftId);
       const preview = this.previewDraftCost(draftId,decision,actorId);
       if (preview.previewHash !== decision.expectedPreviewHash)
         throw new ProcurementValidationError('COST_PREVIEW_STALE','Maliyet veya kur değişti; önizlemeyi yenileyin.',409);

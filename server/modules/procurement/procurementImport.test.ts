@@ -98,7 +98,7 @@ test('incomplete draft cancellation is immutable, hides the intent and reopens t
     product_ref:'assembly',component_ref:'a',quantity_per_unit:'2' });
   const input = request(data);
   const draft = importer.apply(input,'tester');
-  importer.addDraftCost(draft.id,{ title:'Nakliye',amountMinor:100,currency:'USD' },'tester','draft-cost');
+  importer.addDraftCost(draft.id,{ counterparty:'THIRD_PARTY',title:'Nakliye',amountMinor:100,currency:'USD' },'tester','draft-cost');
   const productId = draft.lines[0].productId;
   const sourceHash = db.prepare('SELECT source_hash FROM procurement_import_drafts WHERE id=?').pluck().get(draft.id);
   const aliasCount = db.prepare('SELECT COUNT(*) FROM catalog_supplier_aliases').pluck().get();
@@ -225,10 +225,10 @@ test('three approved PCI identities fill only peer-corroborated proposal fields 
 test('draft costs are editable without tax/FX decisions and FINAL conversion uses the existing LC engine once', () => {
   const { db, importer, request, decision } = setup();
   const draft = importer.apply(request(),'tester');
-  const first = importer.addDraftCost(draft.id,{title:'Nakliye',amountMinor:1000,currency:'USD',vatRateBps:0,description:'freight'},'tester','add-1');
+  const first = importer.addDraftCost(draft.id,{counterparty:'THIRD_PARTY',title:'Nakliye',amountMinor:1000,currency:'USD',vatRateBps:0,description:'freight'},'tester','add-1');
   const freight = first.draftCosts[0];
   assert.equal(first.estimatedTotalUsdMinor,21000);
-  const second = importer.addDraftCost(draft.id,{title:'Paketleme',amountMinor:4000,currency:'TRY',vatRateBps:0},'tester','add-2');
+  const second = importer.addDraftCost(draft.id,{counterparty:'THIRD_PARTY',title:'Paketleme',amountMinor:4000,currency:'TRY',vatRateBps:0},'tester','add-2');
   assert.equal(second.additionalCostsUsdMinor,1100);
   const edited = importer.updateDraftCost(draft.id,freight.id,{title:'Nakliye',amountMinor:1500,currency:'USD',vatRateBps:0,description:'updated',expectedVersion:1},'tester','edit-1');
   assert.equal(edited.draftCosts.find(cost => cost.id === freight.id)?.version,2);
@@ -481,4 +481,73 @@ test('published synthetic CSV keeps merchandise, source invoice total and ignore
   assert.equal(parsed.summary.sourceInvoiceTotalMinor, 21951);
   assert.equal(parsed.summary.expenseAmountMinor, 1951);
   assert.deepEqual(expandSourcePackages(parsed).map(p => p.quantity), ['30','30','30','10']);
+});
+
+
+test('automatic draft LC uses gross expenses, exact source-line allocations and refreshed edits/deletions without posting',()=>{
+  const {db,importer,request}=setup();
+  const data:any[]=rows();
+  data.push({...data[2],record_id:'l2',quantity:'100',unit_price:'4',amount:'400'});
+  data.push({...data[3],record_id:'g3',package_count:'2'});
+  data.push({...data[5],record_id:'i3',parent_ref:'g3',purchase_line_ref:'l2',quantity:'100',units_per_package:'50'});
+  const draft=importer.apply(request(data),'tester');
+  assert.equal(draft.draftPricing.readOnly,true);
+  assert.deepEqual(draft.draftPricing.totals,{merchandiseMinor:2400000,additionalMinor:0,landedMinor:2400000});
+  for(const line of draft.draftPricing.lines) assert.equal(line.totalMinor,line.merchandiseMinor);
+  const add=importer.addDraftCost(draft.id,{title:'Navlun',amountMinor:120001,currency:'TRY',counterparty:'THIRD_PARTY'},'tester','gross');
+  assert.equal(add.draftPricing.totals.landedMinor,2520001);
+  assert.deepEqual(add.draftPricing.lines.map((line:any)=>line.allocatedExpenseMinor),[40000,80001]);
+  assert.equal(add.draftPricing.lines.reduce((sum:number,line:any)=>sum+line.allocatedExpenseMinor,0),120001);
+  const cost=add.draftCosts[0];
+  const vat=importer.updateDraftCost(draft.id,cost.id,{title:'Navlun',amountMinor:120001,currency:'TRY',vatRateBps:1735,expectedVersion:1},'tester','vat');
+  assert.equal(vat.draftCosts[0].grossMinor,120001);assert.deepEqual(vat.draftPricing.totals,add.draftPricing.totals);
+  const edit=importer.updateDraftCost(draft.id,cost.id,{title:'Navlun',amountMinor:150000,currency:'TRY',expectedVersion:2},'tester','edit');
+  assert.deepEqual(edit.draftPricing.lines.map((line:any)=>line.allocatedExpenseMinor),[50000,100000]);
+  const remove=importer.deleteDraftCost(draft.id,cost.id,3,'tester','remove');
+  assert.deepEqual(remove.draftPricing.totals,draft.draftPricing.totals);
+  const changes=db.prepare('SELECT total_changes()').pluck().get();
+  assert.deepEqual(importer.getDraft(draft.id).draftPricing,remove.draftPricing);
+  assert.equal(db.prepare('SELECT total_changes()').pluck().get(),changes);
+  for(const table of ['purchase_orders','acquisition_lot_cost_snapshots','inventory_ledger_events','inventory_lots','cash_transactions','procurement_package_plan'])
+    assert.equal(db.prepare(`SELECT COUNT(*) FROM ${table}`).pluck().get(),0,table);
+  db.close();
+});
+
+test('automatic draft LC retains native prices without FX and never invents mixed-currency equivalents',()=>{
+  const {db,importer,request}=setup();db.prepare('DELETE FROM fx_current_rates').run();
+  const draft=importer.apply(request(),'tester');
+  assert.equal(draft.draftPricing.currency,'USD');assert.equal(draft.draftPricing.fxPending,true);
+  assert.equal(draft.draftPricing.lines[0].unitCost.numerator/draft.draftPricing.lines[0].unitCost.denominator,200);
+  const same=importer.addDraftCost(draft.id,{title:'USD',amountMinor:1200,currency:'USD',counterparty:'SUPPLIER'},'tester','usd');
+  assert.equal(same.draftPricing.totals.landedMinor,21200);
+  const mixed=importer.addDraftCost(draft.id,{title:'TL',amountMinor:120000,currency:'TRY',counterparty:'THIRD_PARTY'},'tester','try');
+  assert.equal(mixed.draftPricing.currency,null);assert.equal(mixed.draftPricing.totals.landedMinor,null);
+  assert.equal(mixed.draftPricing.lines[0].unitCost,null);
+  assert.equal(mixed.lines[0].quote.supplierUnitPriceMinor,200);assert.equal(mixed.lines[0].sourceLineAmountMinor,20000);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM cash_transactions').pluck().get(),0);db.close();
+});
+
+test('draft projection cannot substitute for explicit FINAL approval or bypass recorded receipt evidence',()=>{
+  const {db,importer,request,decision,procurement}=setup();
+  const draft=importer.apply(request(),'tester');
+  assert.throws(()=>importer.addDraftCost(draft.id,{title:'No counterparty',amountMinor:120000,currency:'TRY'},'tester','missing'),(e:any)=>e.code==='DRAFT_COST_COUNTERPARTY_REQUIRED');
+  const add=importer.addDraftCost(draft.id,{title:'Nakliye',amountMinor:3000,currency:'USD',counterparty:'SUPPLIER'},'tester','supplier');
+  assert.equal(add.draftCosts[0].counterparty,'SUPPLIER');
+  assert.throws(()=>importer.finalizeDraft(draft.id,{expectedProjectionHash:add.draftPricing.projectionHash,approvePreview:true} as any,'tester'),(e:any)=>e.code==='DRAFT_FINAL_APPROVAL_REQUIRED');
+  new ExchangeRateService(db).recordCurrentUsdTry({rate:'41',source:'MANUAL',changedAt:'2026-01-02T00:00:00Z',actorId:'tester'});
+  assert.throws(()=>importer.finalizeDraft(draft.id,{expectedProjectionHash:add.draftPricing.projectionHash,approvePreview:true} as any,'tester'),(e:any)=>e.code==='COST_PREVIEW_STALE');
+  assert.equal(db.prepare('SELECT COUNT(*) FROM purchase_orders').pluck().get(),0);
+  const policy={...decision,acquisitionCostVatPolicy:'VAT_INCLUDED_IN_INVENTORY_COST' as const,approveProportionalAllocation:true,
+    costDecisions:[{costId:add.draftCosts[0].id,category:'FREIGHT' as const,counterparty:'SUPPLIER' as const,vatMode:'INCLUDED' as const,vatRateBps:2000}]};
+  const preview=importer.previewDraftCost(draft.id,policy,'tester');
+  const final=importer.finalizeDraft(draft.id,{...policy,approvePreview:true,expectedPreviewHash:preview.previewHash},'tester');
+  assert.equal(final.lots[0].landedCostTryMinor,943000);
+  assert.equal(final.acquisitionCosts[0].counterparty,'SUPPLIER');
+  assert.equal(db.prepare('SELECT amount FROM transactions WHERE id=?').pluck().get(add.draftCosts[0].id),30);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM cash_transactions').pluck().get(),0);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM inventory_lots').pluck().get(),0);
+  procurement.approveForReceipt(final.id,'tester');
+  const receipt=new InventoryService(db).receiveCostedLot({receiptId:'test-receipt',costSnapshotId:final.lots[0].id,receivedAt:'2026-01-03T00:00:00Z',operationId:'receipt-fixture',location:{id:'test-location',kind:'RESERVE'}},{validatedWarehousePlan:true});
+  assert.throws(()=>importer.finalizeDraft(draft.id,{...policy,approvePreview:true,expectedPreviewHash:preview.previewHash},'tester'),(e:any)=>e.code==='DRAFT_ALREADY_RECEIVED' && e.message.includes(receipt.lot.id));
+  db.close();
 });

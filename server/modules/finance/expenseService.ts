@@ -28,7 +28,7 @@ export class ExpenseService {
       'CSV-'||d.invoice_number AS purchase_number FROM procurement_import_draft_costs c
       JOIN procurement_import_drafts d ON d.id=c.draft_id JOIN procurement_suppliers s ON s.id=d.supplier_id WHERE c.id=?`).get(id);
     const component=this.db.prepare(`SELECT c.id,NULL AS draft_id,c.purchase_order_id AS purchase_id,
-      COALESCE(d.description,d.expense_type) AS title,c.source_gross_minor AS amount_minor,c.source_currency AS currency,
+      d.counterparty,COALESCE(d.description,d.expense_type) AS title,c.source_gross_minor AS amount_minor,c.source_currency AS currency,
       c.source_net_minor,c.source_vat_minor,c.source_gross_minor,c.vat_rate_bps,c.notes AS description,'ACTIVE' AS status,1 AS version,c.created_at,p.invoice_number,p.supplier_name_snapshot AS supplier_name,w.purchase_number
       FROM purchase_cost_components c JOIN purchase_orders p ON p.id=c.purchase_order_id
       JOIN procurement_workflows w ON w.purchase_order_id=p.id JOIN purchase_cost_component_details d ON d.component_id=c.id WHERE c.id=?`).get(id);
@@ -87,7 +87,7 @@ export class ExpenseService {
     if(!row) return null;
     const cost=this.cost(id);
     if(!cost) return null;
-    return {draftId:cost.draft_id,purchaseId:row.purchase_order_id??cost.purchase_id??null,costVersion:cost.version,
+    return {counterparty:cost.counterparty??null,draftId:cost.draft_id,purchaseId:row.purchase_order_id??cost.purchase_id??null,costVersion:cost.version,
       paymentStatus:row.payment_method==='Ödendi'?'PAID':'PENDING',cashAccountId:row.cash_account_id??null,
       cashAccountName:row.account_name??null,paidAt:row.paid_at??null,amounts:cost.amounts};
   }

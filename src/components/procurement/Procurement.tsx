@@ -1,5 +1,5 @@
 import { ProcurementImport } from './ProcurementImport';
-import { PurchaseProductTree } from './PurchaseProductTree';
+import { PurchaseProductTree, type DraftPricing } from './PurchaseProductTree';
 import { DraftCostsPanel, parseVatRate } from './DraftCostsPanel';
 import { useEffect, useMemo, useState } from 'react';
 import { FileUp, Plus, RefreshCw, ShoppingBasket, Truck } from 'lucide-react';
@@ -30,7 +30,8 @@ type Purchase = PurchaseSummary & {
   supplier: Supplier; vatPolicy: string | null; status: string;
   goodsAmountUsdMinor?: number | null; additionalCostsUsdMinor?: number | null; estimatedTotalUsdMinor?: number | null;
   estimateFx?: { numerator: number; denominator: number; observedAt: string } | null;
-  draftCosts?: Array<{ id: string; title: string; amountMinor: number; currency: 'USD' | 'TRY'; description: string | null; version: number; paymentStatus?: string; vatMode:'INCLUDED'|'EXCLUDED'; netMinor:number|null; vatRateBps:number|null; vatMinor:number|null; grossMinor:number; estimateUsdMinor: number | null }>;
+  draftPricing?: DraftPricing;
+  draftCosts?: Array<{ id: string; title: string; amountMinor: number; currency: 'USD' | 'TRY'; description: string | null; version: number; paymentStatus?: string; vatMode:'INCLUDED'|'EXCLUDED'; counterparty:'SUPPLIER'|'THIRD_PARTY'|null; netMinor:number|null; vatRateBps:number|null; vatMinor:number|null; grossMinor:number; estimateUsdMinor: number | null }>;
   lines: Array<{ id: string; productId: string; product: { sku: string; title: string; supplierCode?: string | null; nameTr?: string | null; nameEn?: string | null; size?: string | null; material?: string | null; profileType?: string | null; productType?: string | null }; quote: { originalQuantity: string; supplierUnitPriceMinor: number; currency: string }; normalizedQuantity: { baseQuantity: number; baseUomCode: string }; sourceLineAmountMinor?: number | null; plannedPackages?: { count: number; mixedCount: number; distribution: Array<{ quantity: number; count: number }> } | null; packing?: Packing | null }>;
   acquisitionCosts: Array<{ id: string; category: string; expenseType: string; counterparty?: string; description?: string; occurredOn: string; sourceAmountMinor: number; currency: string; targetLineIds: string[]; vat:{mode:string;rateBps:number}; amounts: { source:{netMinor:number;vatMinor:number;grossMinor:number}; baseTry: { netMinor: number; grossMinor:number } }; fx: { numerator: number; denominator: number; observedAt: string } }>;
   lots: Array<{ id: string; lineId: string; productId: string; landedCostTryMinor: number; merchandiseCostTryMinor: number; freightCostTryMinor: number; customsCostTryMinor: number; cuttingLaborCostTryMinor: number; otherDirectCostTryMinor: number; normalizedAcquisitionUnitCostTry: { numerator: number; denominator: number; perBaseUom: string } }>;
@@ -58,6 +59,7 @@ export default function Procurement() {
   const [purchases, setPurchases] = useState<PurchaseSummary[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [selected, setSelected] = useState<Purchase | null>(null);
+  const [draftApprovalError,setDraftApprovalError] = useState('');
   const [busy, setBusy] = useState(false);
   const [supplierForm, setSupplierForm] = useState({ name: '', defaultCurrency: 'USD', taxIdentifier: '' });
   const [order, setOrder] = useState<{ purchaseNumber: string; orderDate: string; supplierId: string; notes: string; lines: DraftLine[] }>({ purchaseNumber: '', orderDate: new Date().toISOString().slice(0, 10), supplierId: '', notes: '',
@@ -80,7 +82,7 @@ export default function Procurement() {
   };
 
   const loadPurchase = async (id: string) => {
-    setSelectedId(id);
+    setSelectedId(id); setDraftApprovalError('');
     setCostPreview(null);
     if (!id) return setSelected(null);
     const data = await api.get(`/procurement/v1/purchases/${id}`);
@@ -103,6 +105,16 @@ export default function Procurement() {
     } finally { setBusy(false); }
   };
 
+  const approveDraft = async () => {
+    if (!selected?.draftPricing || busy) return;
+    try {
+      setBusy(true); setDraftApprovalError('');
+      const response = await api.post(`/procurement/v1/imports/drafts/${selected.id}/finalize`,
+        { expectedProjectionHash:selected.draftPricing.projectionHash,approvePreview:true },op('draft-finalize'));
+      setSelected(response.data); setSelectedId(response.data.id); await load();
+    } catch (cause:any) { setDraftApprovalError(cause.message || 'Taslak onaylanamadı.'); }
+    finally { setBusy(false); }
+  };
   const cancelDraft = async () => {
     if (!selected?.costDecisionPending || !window.confirm('Bu satın alma taslağı iptal edilsin mi? Ürün kartları ve işlem geçmişi korunur.')) return;
     try {
@@ -226,13 +238,16 @@ export default function Procurement() {
     {tab === 'costs' && <div className="space-y-6"><PurchasePicker purchases={purchases} selectedId={selectedId} onSelect={loadPurchase}/>{selected && <>
       <Card padding="lg" className="space-y-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="font-black">{selected.purchaseNumber}</h3><p className="text-sm text-text-muted">{selected.supplier.name}</p></div><Badge>{stateLabels[selected.workflowState]}</Badge></div>
         <div className="flex flex-wrap gap-2">{selected.costDecisionPending && <Button variant="secondary" disabled={busy} onClick={cancelDraft}>Taslağı Sil</Button>}{!selected.costDecisionPending && selected.workflowState === 'DRAFT' && <Button variant="secondary" onClick={() => transition('ORDERED')}>Sipariş Verildi</Button>}{selected.workflowState === 'ORDERED' && <Button variant="secondary" onClick={() => transition('IN_TRANSIT')}>Yolda</Button>}{!selected.costDecisionPending && ['DRAFT','ORDERED','IN_TRANSIT'].includes(selected.workflowState) && <Button variant="secondary" onClick={() => transition('COST_PENDING')}>Maliyet Bekliyor</Button>}</div>
-        <PurchaseProductTree lines={selected.lines} lots={selected.lots}/>
+        <PurchaseProductTree lines={selected.lines} lots={selected.lots} pricing={selected.draftPricing}/>
       </Card>
-      {selected.costDecisionPending && selected.draftCosts && <DraftCostsPanel draft={{ id:selected.id, goodsAmountUsdMinor:selected.goodsAmountUsdMinor ?? null,
-        additionalCostsUsdMinor:selected.additionalCostsUsdMinor ?? null, estimatedTotalUsdMinor:selected.estimatedTotalUsdMinor ?? null,
-        estimateFx:selected.estimateFx ?? null, draftCosts:selected.draftCosts }}
-        onChanged={(data) => { setSelected(data); void load(); }}
-        onFinalized={(data) => { setSelected(data); setSelectedId(data.id); void load(); }}/>}
+      {selected.costDecisionPending && selected.draftCosts && <>
+        <DraftCostsPanel key={selected.id} draft={{ id:selected.id,draftCosts:selected.draftCosts }}
+          onChanged={(data) => { setSelected(data); void load(); }}/>
+        <div className="space-y-2 text-sm"><p>Tahmini fiyatlar giderlerin KDV dahil toplamını alış bedeli oranında dağıtır. Tahmini fiyatlar stok, ödeme veya kesin maliyet oluşturmaz. Mal kabul ve ödeme kendi onay akışlarında gerçekleşir.</p>
+          <Button disabled={busy || !selected.draftPricing} onClick={approveDraft}>Landed Cost'u Kesinleştir</Button>
+          {draftApprovalError && <p role="alert" className="text-danger">{draftApprovalError}</p>}
+        </div>
+      </>}
 
       {Boolean(selected.sourcePacking?.length) && <Card padding="lg"><details><summary className="cursor-pointer font-bold">Kaynak koliler ve içerikleri</summary>{selected.sourcePacking!.filter(r => r.record_type === 'PACKAGE_GROUP').map(g => <div className="border-b py-2 text-xs" key={g.record_id}><strong>{g.record_id} · {g.package_count} koli {g.meta?.mixed ? '· Karışık kaynak koli' : ''}</strong><p>Grup net {g.net_weight_kg || '—'} kg · brüt {g.gross_weight_kg || '—'} kg</p>{selected.sourcePacking!.filter(r => r.parent_ref === g.record_id).map(i => <p key={i.record_id}>{i.sku || i.product_ref} · {i.quantity} toplam · {i.units_per_package}/koli · alış kaynağı {i.purchase_line_ref}</p>)}</div>)}</details></Card>}
       {selected.acquisitionCosts.length > 0 && <Card padding="lg" className="space-y-2"><h3 className="font-black">Kaydedilmiş Giderler</h3>{selected.acquisitionCosts.map((item) => <div key={item.id} className="rounded-xl border p-3 text-sm"><strong>{item.counterparty === 'SUPPLIER' ? 'Tedarikçi ek bedeli' : item.counterparty === 'THIRD_PARTY' ? 'Üçüncü taraf' : 'Geçmiş kayıt · muhatap belirtilmemiş'} · {item.expenseType} · Genel toplam {money(item.amounts.source.grossMinor, item.currency)}</strong><p>Ana tutar {money(item.amounts.source.netMinor,item.currency)} · KDV %{item.vat.rateBps/100}: {money(item.amounts.source.vatMinor,item.currency)}</p><p className="text-xs text-text-muted">Brüt TL karşılığı {money(item.amounts.baseTry.grossMinor)} · kur {item.fx.numerator / item.fx.denominator} · {item.occurredOn} · {item.targetLineIds.length ? `${item.targetLineIds.length} seçili satır` : 'ortak gider'}</p></div>)}</Card>}

@@ -3134,9 +3134,13 @@ const migrations: Migration[] = [
   { version: 103, name: "add_import_draft_lifecycle_events", up(db) { db.exec(PROCUREMENT_DRAFT_LIFECYCLE_SCHEMA_V103); } },
   { version: 104, name: "snapshot_purchase_cost_vat", up(db) { db.exec(PROCUREMENT_COST_VAT_SCHEMA_V104); } },
   { version: 105, name: "preserve_draft_cost_vat_basis", up(db) { db.exec(PROCUREMENT_COST_VAT_BASIS_SCHEMA_V105); } },
+  { version: 106, name: "persist_draft_cost_counterparty", up(db) {
+    // Unknown historical counterparties stay unknown; only explicit user writes fill them.
+    db.exec("ALTER TABLE procurement_import_draft_costs ADD COLUMN counterparty TEXT CHECK(counterparty IN ('SUPPLIER','THIRD_PARTY'));");
+  } },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 105;
+export const CURRENT_SCHEMA_VERSION = 106;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),

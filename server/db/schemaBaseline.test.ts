@@ -197,7 +197,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   initializeDatabase(db);
 
   const manifest = getMigrationManifest();
-  assert.equal(manifest.length, 104);
+  assert.equal(manifest.length, 105);
   assert.equal(manifest.at(-1)?.version, CURRENT_SCHEMA_VERSION);
   assert.deepEqual(SUPPORTED_UPGRADE_STARTS, [48, 53]);
   assert.deepEqual(
@@ -207,6 +207,7 @@ test("fresh production schema is exact, versioned and has zero business history"
   assert.ok(manifest.every(({ checksum }) => /^[a-f0-9]{64}$/.test(checksum)));
 
   const requiredColumns: Record<string, string[]> = {
+    procurement_import_draft_costs: ["id", "draft_id", "vat_mode", "vat_rate_bps", "counterparty"],
     purchase_cost_component_details: ["component_id", "counterparty", "expense_type", "target_scope"],
     products: ["base_uom_code", "catalog_class", "catalog_type", "catalog_version", "catalog_version_ref", "central_stock", "fixed_price_adjustment_try", "id", "mass_grams_int", "material_behavior", "price_rounding_increment", "procurement_activation_pending", "product_type", "sku", "title"],
     pricing_history: ["buffer_percentage", "fixed_price_adjustment_try", "price_rounding_increment", "product_id", "profit_percentage", "sale_price"],

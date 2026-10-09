@@ -234,7 +234,7 @@ type NormalizedCost = {
   notes: string | null;
 };
 
-const deterministicValueAllocation = (amount: number, lines: NormalizedLine[]) => {
+export const deterministicValueAllocation = (amount: number, lines: Array<{ id: string; baseTry: { netMinor: number } }>) => {
   const weights = lines.map((line) => ({ lineId: line.id, weight: line.baseTry.netMinor }));
   const totalWeight = safeAdd(weights.map(({ weight }) => weight), "allocation weight");
   if (amount === 0 || totalWeight === 0) return { entries: [], residual: amount };
@@ -261,6 +261,13 @@ const deterministicValueAllocation = (amount: number, lines: NormalizedLine[]) =
     entries: base.sort((left, right) => left.lineId.localeCompare(right.lineId)).map(({ remainder: _remainder, ...entry }) => entry),
     residual,
   };
+};
+
+// Shared by authoritative FINAL calculation and the read-only draft projection.
+export const calculateLandedLine = (merchandise: number, expenses: number[], quantityScale: number, quantityBaseInt: number) => {
+  const landed = safeAdd([merchandise, ...expenses], "landed cost");
+  const normalized = reduceRational(BigInt(landed) * BigInt(quantityScale), BigInt(quantityBaseInt), "landed unit cost");
+  return { landed, normalized };
 };
 
 const deterministicWeightedAllocation = <T extends { key: string; weight: number }>(amount: number, weights: T[]) => {
@@ -528,8 +535,7 @@ export class ProcurementService {
       const merchandiseCost = header.acquisition_cost_vat_policy === "VAT_INCLUDED_IN_INVENTORY_COST" ? line.base_try_gross_minor : line.base_try_net_minor;
       const allocatedComponentVat = safeAdd(allocated.map((entry) => allocatedVatByComponentAndLine.get(`${entry.componentId}:${line.id}`) || 0), "allocated acquisition VAT");
       const vatSnapshot = safeAdd([line.base_try_vat_minor, allocatedComponentVat], "lot VAT snapshot");
-      const landed = safeAdd([merchandiseCost, freight, customs, cutting, other], "landed cost");
-      const normalized = reduceRational(BigInt(landed) * BigInt(line.base_uom_scale_snapshot), BigInt(line.quantity_base_int), "landed unit cost");
+      const { landed, normalized } = calculateLandedLine(merchandiseCost, [freight, customs, cutting, other], line.base_uom_scale_snapshot, line.quantity_base_int);
       return { line, allocated, freight, customs, cutting, other, merchandiseCost, vatSnapshot, landed, normalized };
     });
     return { purchaseId, header, components, allocations, lineCosts };
