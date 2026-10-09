@@ -37,7 +37,7 @@ const draftCostFields = (input: DraftCostInput) => {
   const description = input.description?.trim() ? draftText(input.description, 'Açıklama', 1000) : null;
   const vatRateBps = input.vatRateBps === undefined ? 2000 : input.vatRateBps;
   if (!Number.isInteger(vatRateBps) || vatRateBps < 0 || vatRateBps > 10000) throw new ProcurementValidationError('DRAFT_COST_INVALID','KDV oranı %0–100 arasında, en çok iki ondalık basamakla girilmeli.');
-  integerMoney(splitVat(input.amountMinor,'EXCLUDED',vatRateBps).grossMinor,'gross cost');
+  integerMoney(splitVat(input.amountMinor,'INCLUDED',vatRateBps).grossMinor,'gross cost');
   return { title, amountMinor: input.amountMinor, currency: input.currency, description, vatRateBps };
 };
 const roundRatio = (amount: number, numerator: number, denominator: number) => {
@@ -290,7 +290,7 @@ export class ProcurementImportService {
   private activeDraftCosts(draftId: string) {
     return this.db.prepare(`SELECT *
       FROM procurement_import_draft_costs WHERE draft_id=? AND status='ACTIVE' ORDER BY created_at,id`).all(draftId) as Array<{
-        id: string; title: string; amount_minor: number; currency: 'USD' | 'TRY'; description: string | null; vat_rate_bps: number | null; version: number; created_at: string;
+        id: string; title: string; amount_minor: number; currency: 'USD' | 'TRY'; description: string | null; vat_rate_bps: number | null; vat_mode?: 'INCLUDED' | 'EXCLUDED'; version: number; created_at: string;
       }>;
   }
 
@@ -305,8 +305,8 @@ export class ProcurementImportService {
       this.openDraft(draftId);
       const cost = draftCostFields(input), id = randomUUID(), now = new Date().toISOString();
       this.db.prepare(`INSERT INTO procurement_import_draft_costs
-        (id,draft_id,title,amount_minor,currency,description,vat_rate_bps,status,version,created_by,created_at,updated_by,updated_at)
-        VALUES (?,?,?,?,?,?,?,'ACTIVE',1,?,?,?,?)`).run(id,draftId,cost.title,cost.amountMinor,cost.currency,cost.description,cost.vatRateBps,actorId,now,actorId,now);
+        (id,draft_id,title,amount_minor,currency,description,vat_rate_bps,vat_mode,status,version,created_by,created_at,updated_by,updated_at)
+        VALUES (?,?,?,?,?,?,?,'INCLUDED','ACTIVE',1,?,?,?,?)`).run(id,draftId,cost.title,cost.amountMinor,cost.currency,cost.description,cost.vatRateBps,actorId,now,actorId,now);
       const row = this.db.prepare('SELECT * FROM procurement_import_draft_costs WHERE id=?').get(id);
       this.recordCostRevision(row,'CREATE',actorId,operationId,now);
       new ExpenseService(this.db).syncPendingCost(id);
@@ -320,7 +320,7 @@ export class ProcurementImportService {
       const cost = draftCostFields(input), now = new Date().toISOString();
       new ExpenseService(this.db).assertCostUnpaid(costId);
       if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) throw new ProcurementValidationError('DRAFT_COST_VERSION_REQUIRED', 'Güncel maliyet sürümü gerekli.', 409);
-      const changed = this.db.prepare(`UPDATE procurement_import_draft_costs SET title=?,amount_minor=?,currency=?,description=?,vat_rate_bps=?,
+      const changed = this.db.prepare(`UPDATE procurement_import_draft_costs SET title=?,amount_minor=?,currency=?,description=?,vat_rate_bps=?,vat_mode='INCLUDED',
         version=version+1,updated_by=?,updated_at=? WHERE id=? AND draft_id=? AND status='ACTIVE' AND version=?`)
         .run(cost.title,cost.amountMinor,cost.currency,cost.description,cost.vatRateBps,actorId,now,costId,draftId,input.expectedVersion);
       if (changed.changes !== 1) throw new ProcurementValidationError('DRAFT_COST_STALE', 'Maliyet kalemi değişmiş veya silinmiş; listeyi yenileyin.', 409);
@@ -358,7 +358,7 @@ export class ProcurementImportService {
     const packages = expandSourcePackages(parsed);
     const currentFx = new ExchangeRateService(this.db).getCurrentUsdTry();
     const draftCosts = this.activeDraftCosts(row.id).map(cost => ({
-      id: cost.id, title: cost.title, amountMinor: cost.amount_minor, ...draftCostAmounts(cost), currency: cost.currency, description: cost.description, version: cost.version,
+      id: cost.id, title: cost.title, amountMinor: cost.amount_minor, vatMode:cost.vat_mode || 'EXCLUDED', ...draftCostAmounts(cost), currency: cost.currency, description: cost.description, version: cost.version,
       expenseId: cost.id, paymentStatus: new ExpenseService(this.db).detail(cost.id)?.paymentStatus ?? null,
       estimateUsdMinor: cost.currency === 'USD' ? draftCostAmounts(cost).grossMinor : currentFx ? roundRatio(draftCostAmounts(cost).grossMinor,currentFx.denominator,currentFx.numerator) : null,
     }));
@@ -446,8 +446,8 @@ export class ProcurementImportService {
           !['SUPPLIER','THIRD_PARTY'].includes(decision.counterparty) || !['INCLUDED','EXCLUDED'].includes(decision.vatMode) ||
           !Number.isInteger(decision.vatRateBps) || decision.vatRateBps < 0 || decision.vatRateBps > 10000)
           throw new ProcurementValidationError('DRAFT_COST_DECISION_REQUIRED', 'Ek maliyetin türü, muhatabı ve vergi kararı gerekli.', 409);
-        if (cost.vat_rate_bps != null && (decision.vatMode !== 'EXCLUDED' || decision.vatRateBps !== cost.vat_rate_bps))
-          throw new ProcurementValidationError('DRAFT_COST_VAT_CONFLICT','Maliyet ana tutarı KDV hariçtir; kesinleştirmede kayıtlı KDV oranı kullanılmalı.',409);
+        if (cost.vat_rate_bps != null && (decision.vatMode !== (cost.vat_mode || 'EXCLUDED') || decision.vatRateBps !== cost.vat_rate_bps))
+          throw new ProcurementValidationError('DRAFT_COST_VAT_CONFLICT','Kesinleştirmede maliyetin kayıtlı KDV biçimi ve oranı kullanılmalı; tutara yeniden KDV eklenemez.',409);
         return { id: cost.id, category: decision.category, counterparty: decision.counterparty,
           amountMinor: cost.amount_minor, currency: cost.currency, vatMode: decision.vatMode, vatRateBps: decision.vatRateBps,
           expenseType: decision.category === 'FREIGHT' ? 'FREIGHT' : decision.category === 'CUSTOMS' ? 'CUSTOMS_DUTY' : 'OTHER',

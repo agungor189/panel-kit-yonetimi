@@ -239,7 +239,7 @@ test('draft costs are editable without tax/FX decisions and FINAL conversion use
   assert.equal(db.prepare('SELECT COUNT(*) FROM procurement_import_draft_cost_revisions').pluck().get(),4);
   assert.throws(() => importer.previewDraftCost(draft.id,{...decision,approveProportionalAllocation:true},'tester'),/Her ek maliyet/);
   const finalDecision = {...decision,approveProportionalAllocation:true,
-    costDecisions:[{costId:freight.id,category:'FREIGHT' as const,counterparty:'THIRD_PARTY' as const,vatMode:'EXCLUDED' as const,vatRateBps:0}]};
+    costDecisions:[{costId:freight.id,category:'FREIGHT' as const,counterparty:'THIRD_PARTY' as const,vatMode:'INCLUDED' as const,vatRateBps:0}]};
   assert.throws(() => importer.finalizeDraft(draft.id,finalDecision,'tester'),/önizlemesi/);
   const preview = importer.previewDraftCost(draft.id,finalDecision,'tester');
   assert.equal(preview.readOnly,true);

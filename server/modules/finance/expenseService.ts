@@ -14,7 +14,7 @@ export class ExpenseValidationError extends Error {
 
 export const draftCostAmounts = (cost:any) => cost.vat_rate_bps == null
   ? {netMinor:null,vatRateBps:null,vatMinor:null,grossMinor:cost.amount_minor}
-  : {...splitVat(cost.amount_minor,'EXCLUDED',cost.vat_rate_bps),vatRateBps:cost.vat_rate_bps};
+  : {...splitVat(cost.amount_minor,cost.vat_mode || 'EXCLUDED',cost.vat_rate_bps),vatRateBps:cost.vat_rate_bps};
 
 export class ExpenseService {
   constructor(private readonly db:Database.Database) {}

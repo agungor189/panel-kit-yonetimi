@@ -37,7 +37,7 @@ function setup(targetVersion?:number) {
   const document=(id:string,suffix='one')=>db.prepare('INSERT INTO expense_attachments(id,expense_id,file_name,file_path,mime_type) VALUES (?,?,?,?,?)').run(`${id}:${suffix}`,id,'invoice.pdf','uploads/expenses/synthetic.pdf','application/pdf');
   const decision=(cost:any):ImportCostDecision=>({vatMode:'EXCLUDED',vatRateBps:0,acquisitionCostVatPolicy:'VAT_EXCLUDED_FROM_INVENTORY_COST',
     includedCost:'NO_SEPARATE_CHARGE',stockCheck:'NO_PRIOR_RECEIPT',stockEvidence:'Synthetic fixture with no receipt',approveProportionalAllocation:true,
-    costDecisions:[{costId:cost.id,category:'FREIGHT',counterparty:'THIRD_PARTY',vatMode:'EXCLUDED',vatRateBps:0}]});
+    costDecisions:[{costId:cost.id,category:'FREIGHT',counterparty:'THIRD_PARTY',vatMode:cost.vatMode || 'INCLUDED',vatRateBps:0}]});
   const pay=(cost:any,key='pay')=>command(key,'finance.procurement-expense.approve-payment.v1',{expenseId:cost.id,cashAccountId:'usd',expectedCostVersion:cost.version},
     ()=>expenses.approvePayment(cost.id,{cashAccountId:'usd',expectedCostVersion:cost.version}));
   const finalize=(cost:any)=>{
@@ -162,29 +162,36 @@ test('expense approval API requires authorization and operation key; identical r
 
 test('VAT default and editable rates preserve net, tax, gross, revisions and unpaid expense',()=>{
   const {db,importer,draft,expenses}=setup();
-  const cost=importer.addDraftCost(draft.id,{title:'Navlun',amountMinor:100000,currency:'TRY'},'owner','vat-add').draftCosts[0];
-  assert.equal(cost.vatRateBps,2000);assert.equal(cost.amountMinor,100000);assert.equal(cost.vatMinor,20000);assert.equal(cost.grossMinor,120000);
+  const cost=importer.addDraftCost(draft.id,{title:'Navlun',amountMinor:120000,currency:'TRY'},'owner','vat-add').draftCosts[0];
+  assert.equal(cost.vatRateBps,2000);assert.equal(cost.amountMinor,120000);assert.equal(cost.vatMinor,20000);assert.equal(cost.grossMinor,120000);
   assert.equal(db.prepare('SELECT amount FROM transactions WHERE id=?').pluck().get(cost.id),1200);
   assert.deepEqual(expenses.detail(cost.id)?.amounts,{netMinor:100000,vatRateBps:2000,vatMinor:20000,grossMinor:120000});
-  for(const [index,rate] of [1000,0,1750].entries()) {
-    const changed=importer.updateDraftCost(draft.id,cost.id,{title:'Navlun',amountMinor:100000,currency:'TRY',vatRateBps:rate,expectedVersion:index+1},'owner',`vat-edit-${index}`).draftCosts[0];
-    assert.equal(changed.vatMinor,rate*10);assert.equal(changed.grossMinor,100000+rate*10);
-    assert.equal(db.prepare('SELECT amount FROM transactions WHERE id=?').pluck().get(cost.id),(100000+rate*10)/100);
+  for(const [index,[rate,net,vat]] of [[1000,109091,10909],[0,120000,0],[1750,102128,17872]].entries()) {
+    const changed=importer.updateDraftCost(draft.id,cost.id,{title:'Navlun',amountMinor:120000,currency:'TRY',vatRateBps:rate,expectedVersion:index+1},'owner',`vat-edit-${index}`).draftCosts[0];
+    assert.equal(changed.netMinor,net);assert.equal(changed.vatMinor,vat);assert.equal(changed.grossMinor,120000);
+    assert.equal(db.prepare('SELECT amount FROM transactions WHERE id=?').pluck().get(cost.id),1200);
   }
   for(const rate of [-1,10001,1.5,null]) assert.throws(()=>importer.updateDraftCost(draft.id,cost.id,{title:'Navlun',amountMinor:100000,currency:'TRY',vatRateBps:rate as any,expectedVersion:4},'owner','invalid'),/KDV/);
   const rounded=importer.addDraftCost(draft.id,{title:'Rounding',amountMinor:5,currency:'TRY',vatRateBps:1000},'owner','rounding').draftCosts.find((item:any)=>item.id!==cost.id);
-  assert.equal(rounded.vatMinor,1);assert.equal(rounded.grossMinor,6);
+  assert.equal(rounded.vatMinor,0);assert.equal(rounded.netMinor,5);assert.equal(rounded.grossMinor,5);
   assert.equal(db.prepare('SELECT COUNT(*) FROM procurement_import_draft_cost_revisions WHERE cost_id=?').pluck().get(cost.id),4);
   assert.equal(db.prepare('SELECT COUNT(*) FROM cash_transactions').pluck().get(),0);db.close();
 });
 
 test('VAT gross enters FINAL LC and cash exactly once without taxing the gross twice',()=>{
   const {db,importer,draft,expenses,document,decision}=setup();
-  const cost=importer.addDraftCost(draft.id,{title:'Navlun',amountMinor:100000,currency:'TRY'},'owner','gross').draftCosts[0];
-  const policy=decision(cost);policy.costDecisions![0].vatMode='EXCLUDED';policy.costDecisions![0].vatRateBps=2000;
+  const cost=importer.addDraftCost(draft.id,{title:'Navlun',amountMinor:120000,currency:'TRY'},'owner','gross').draftCosts[0];
+  const policy=decision(cost);policy.costDecisions![0].vatMode='INCLUDED';policy.costDecisions![0].vatRateBps=2000;
   const preview=importer.previewDraftCost(draft.id,policy,'owner');
   assert.equal(preview.totals.allocatedExpensesTryMinor,120000);assert.equal(preview.totals.landedCostTryMinor,160000);
-  document(cost.id);expenses.approvePayment(cost.id,{cashAccountId:'try',expectedCostVersion:1});
+  assert.equal(db.prepare('SELECT amount FROM transactions WHERE id=?').pluck().get(cost.id),1200);
+  assert.equal(db.prepare('SELECT payment_method FROM transactions WHERE id=?').pluck().get(cost.id),'Onay Bekliyor');
+  assert.throws(()=>importer.previewDraftCost(draft.id,{...policy,costDecisions:[{...policy.costDecisions![0],vatMode:'EXCLUDED'}]},'owner'),(e:any)=>e.code==='DRAFT_COST_VAT_CONFLICT');
+  assert.throws(()=>expenses.approvePayment(cost.id,{cashAccountId:'try',expectedCostVersion:1}),(e:any)=>e.code==='EXPENSE_DOCUMENT_REQUIRED');
+  document(cost.id);
+  assert.throws(()=>expenses.approvePayment(cost.id,{cashAccountId:'',expectedCostVersion:1}),(e:any)=>e.code==='EXPENSE_ACCOUNT_REQUIRED');
+  assert.equal(db.prepare('SELECT COUNT(*) FROM cash_transactions').pluck().get(),0);
+  expenses.approvePayment(cost.id,{cashAccountId:'try',expectedCostVersion:1});
   assert.equal(db.prepare('SELECT amount FROM cash_transactions').pluck().get(),1200);
   const final=importer.finalizeDraft(draft.id,{...policy,approvePreview:true,expectedPreviewHash:preview.previewHash},'owner');
   assert.equal(final.lots[0].landedCostTryMinor,160000);
@@ -196,7 +203,7 @@ test('VAT gross enters FINAL LC and cash exactly once without taxing the gross t
   const direct=setup(),productId=direct.importer.getDraft(direct.draft.id).lines[0].productId;
   const purchase=direct.procurement.createPurchase({supplierId:'supplier',acquisitionCostVatPolicy:'VAT_EXCLUDED_FROM_INVENTORY_COST',
     lines:[{productId,quantity:'1',quoteBasis:'piece',supplierUnitPriceMinor:1000,currency:'USD',vatMode:'EXCLUDED',vatRateBps:0}],
-    acquisitionCosts:[{id:'direct-vat',category:'FREIGHT',counterparty:'THIRD_PARTY',amountMinor:100000,currency:'TRY',vatMode:'EXCLUDED',vatRateBps:2000}]});
+    acquisitionCosts:[{id:'direct-vat',category:'FREIGHT',counterparty:'THIRD_PARTY',amountMinor:120000,currency:'TRY',vatMode:'INCLUDED',vatRateBps:2000}]});
   const directPreview=direct.procurement.previewAcquisitionCosts(purchase.id,{allocations:[{componentId:'direct-vat',mode:'ACCEPT_SUGGESTION'}]});
   assert.equal(directPreview.totals.allocatedExpensesTryMinor,120000);
   direct.document('direct-vat');direct.expenses.approvePayment('direct-vat',{cashAccountId:'try',expectedCostVersion:1});
@@ -207,7 +214,7 @@ test('VAT gross enters FINAL LC and cash exactly once without taxing the gross t
 test('VAT supplier expense payments reconcile purchase debt before and after FINAL and prevent double payment',()=>{
   for(const beforeFinal of [true,false]) {
     const {db,importer,draft,procurement,expenses,document,decision}=setup();
-    const cost=importer.addDraftCost(draft.id,{title:'Supplier freight',amountMinor:200,currency:'USD'},'owner','supplier').draftCosts[0];
+    const cost=importer.addDraftCost(draft.id,{title:'Supplier freight',amountMinor:240,currency:'USD'},'owner','supplier').draftCosts[0];
     const policy=decision(cost);Object.assign(policy.costDecisions![0],{counterparty:'SUPPLIER',vatRateBps:2000});
     document(cost.id);
     if(beforeFinal) expenses.approvePayment(cost.id,{cashAccountId:'usd',expectedCostVersion:1});
@@ -237,7 +244,7 @@ test('VAT supplier expense payments reconcile purchase debt before and after FIN
 
 test('VAT payment replay uses gross and preserves paid costs, documents and immutable payment history',()=>{
   const {db,importer,draft,expenses,document,pay}=setup();
-  const cost=importer.addDraftCost(draft.id,{title:'Navlun',amountMinor:200,currency:'USD',vatRateBps:1000},'owner','replay-vat').draftCosts[0];document(cost.id);
+  const cost=importer.addDraftCost(draft.id,{title:'Navlun',amountMinor:220,currency:'USD',vatRateBps:1000},'owner','replay-vat').draftCosts[0];document(cost.id);
   const paid=pay(cost);assert.equal(paid.result.body.amountMinor,220);assert.equal(pay(cost).replayed,true);
   assert.throws(()=>pay(cost,'repeat-key'),(e:any)=>e.code==='PROCUREMENT_COST_PAID');
   assert.throws(()=>importer.updateDraftCost(draft.id,cost.id,{title:'Changed',amountMinor:300,currency:'USD',vatRateBps:2000,expectedVersion:1},'owner','edit'),(e:any)=>e.code==='PROCUREMENT_COST_PAID');
@@ -260,7 +267,35 @@ test('VAT forward migration preserves unknown legacy tax and paid cash history w
   assert.equal(db.prepare('SELECT vat_rate_bps FROM procurement_import_draft_costs WHERE id=?').pluck().get('legacy'),null);
   assert.equal(db.prepare('SELECT amount_minor FROM procurement_import_draft_costs WHERE id=?').pluck().get('legacy'),200);
   assert.deepEqual(db.prepare('SELECT * FROM cash_transactions').all(),cash);assert.deepEqual(db.prepare('SELECT * FROM transactions').all(),expense);
-  assert.equal(db.prepare('SELECT MAX(version) FROM schema_migrations').pluck().get(),104);
+  assert.equal(db.prepare('SELECT MAX(version) FROM schema_migrations').pluck().get(),105);
   assert.throws(()=>db.prepare('UPDATE procurement_import_draft_costs SET vat_rate_bps=1.5 WHERE id=?').run('legacy'),/CHECK constraint/);
   assert.throws(()=>new ExpenseService(db).assertCostUnpaid('legacy'),(e:any)=>e.code==='PROCUREMENT_COST_PAID');db.close();
+});
+
+
+test('VAT inclusive change preserves v104 exclusive pending and paid records and their FINAL costs',()=>{
+  const {db,draft,importer,expenses,document,decision}=setup(104);
+  for(const id of ['old-pending','old-paid']) {
+    db.prepare(`INSERT INTO procurement_import_draft_costs
+      (id,draft_id,title,amount_minor,currency,vat_rate_bps,status,version,created_by,created_at,updated_by,updated_at)
+      VALUES (?,?,'Old freight',100000,'TRY',2000,'ACTIVE',1,'owner','2026-01-01','owner','2026-01-01')`).run(id,draft.id);
+    expenses.syncPendingCost(id);document(id);
+  }
+  expenses.approvePayment('old-paid',{cashAccountId:'try',expectedCostVersion:1});
+  const history=db.prepare('SELECT * FROM transactions ORDER BY id').all(),cash=db.prepare('SELECT * FROM cash_transactions').all();
+  runMigrations(db);
+  assert.deepEqual(db.prepare('SELECT * FROM transactions ORDER BY id').all(),history);
+  assert.deepEqual(db.prepare('SELECT * FROM cash_transactions').all(),cash);
+  const costs=importer.getDraft(draft.id).draftCosts;
+  for(const cost of costs) {assert.equal(cost.vatMode,'EXCLUDED');assert.equal(cost.amountMinor,100000);assert.equal(cost.netMinor,100000);assert.equal(cost.vatMinor,20000);assert.equal(cost.grossMinor,120000);}
+  assert.throws(()=>importer.updateDraftCost(draft.id,'old-paid',{title:'Changed',amountMinor:120000,currency:'TRY',expectedVersion:1},'owner','edit-paid'),(e:any)=>e.code==='PROCUREMENT_COST_PAID');
+  const policy=decision(costs[0]);policy.costDecisions=costs.map((cost:any)=>({costId:cost.id,category:'FREIGHT',counterparty:'THIRD_PARTY',vatMode:'EXCLUDED',vatRateBps:2000}));
+  assert.equal(importer.previewDraftCost(draft.id,policy,'owner').totals.allocatedExpensesTryMinor,240000);
+  const edited=importer.updateDraftCost(draft.id,'old-pending',{title:'Old freight',amountMinor:120000,currency:'TRY',vatRateBps:2000,expectedVersion:1},'owner','edit').draftCosts.find((cost:any)=>cost.id==='old-pending');
+  assert.equal(edited.vatMode,'INCLUDED');assert.equal(edited.netMinor,100000);assert.equal(edited.vatMinor,20000);assert.equal(edited.grossMinor,120000);
+  assert.equal(db.prepare('SELECT amount FROM transactions WHERE id=?').pluck().get('old-pending'),1200);
+  const before=db.prepare('SELECT * FROM transactions WHERE id=?').get('old-paid');
+  expenses.approvePayment('old-pending',{cashAccountId:'try',expectedCostVersion:2});
+  assert.deepEqual(db.prepare('SELECT * FROM transactions WHERE id=?').get('old-paid'),before);
+  assert.equal(db.prepare('SELECT SUM(amount) FROM cash_transactions').pluck().get(),2400);db.close();
 });
