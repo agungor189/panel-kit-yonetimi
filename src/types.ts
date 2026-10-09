@@ -161,7 +161,7 @@ export interface Transaction {
   description?: string;
   payment_method?: string;
   procurement_cost_id?: string;
-  procurement?: {draftId:string|null;purchaseId:string|null;costVersion:number;paymentStatus:string;cashAccountId:string|null;cashAccountName:string|null;paidAt:string|null};
+  procurement?: {draftId:string|null;purchaseId:string|null;costVersion:number;paymentStatus:string;cashAccountId:string|null;cashAccountName:string|null;paidAt:string|null;amounts:{netMinor:number|null;vatRateBps:number|null;vatMinor:number|null;grossMinor:number}};
   supplier?: string;
   invoice_number?: string;
   attachment_count?: number;

@@ -253,7 +253,7 @@ test("third-party acquisition components retain independent currencies and never
   db.close();
 });
 
-test("purchase VAT policy is explicit, immutable, and controls whether VAT enters historical lot cost", () => {
+test("purchase VAT policy is explicit and immutable for merchandise while new expenses capitalize gross VAT", () => {
   const { db, procurement } = setup();
   const missingPolicy: any = purchase("po-vat-policy-missing", [line({ currency: "TRY" })]);
   delete missingPolicy.acquisitionCostVatPolicy;
@@ -274,12 +274,12 @@ test("purchase VAT policy is explicit, immutable, and controls whether VAT enter
 
   assert.equal(excludedLot.vatPolicy, "VAT_EXCLUDED_FROM_INVENTORY_COST");
   assert.equal(excludedLot.lots[0].vatPolicy, "VAT_EXCLUDED_FROM_INVENTORY_COST");
-  assert.equal(excludedLot.lots[0].landedCostTryMinor, 11_000);
+  assert.equal(excludedLot.lots[0].landedCostTryMinor, 11_200);
   assert.equal(excludedLot.lots[0].vatTryMinor, 2_200);
   assert.equal(includedLot.lots[0].landedCostTryMinor, 13_200);
   assert.equal(includedLot.lots[0].vatTryMinor, 2_200);
   assert.throws(() => db.prepare("UPDATE purchase_orders SET acquisition_cost_vat_policy='VAT_INCLUDED_IN_INVENTORY_COST' WHERE id='po-vat-policy-ex'").run(), /immutable/i);
-  assert.equal(procurement.getPurchase("po-vat-policy-ex")!.lots[0].landedCostTryMinor, 11_000);
+  assert.equal(procurement.getPurchase("po-vat-policy-ex")!.lots[0].landedCostTryMinor, 11_200);
   db.close();
 });
 

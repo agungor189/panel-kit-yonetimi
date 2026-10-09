@@ -642,6 +642,12 @@ function ExpenseDetailModal({ expense: currentExpense, onClose, onRefresh, setti
 
                         {isProcurementLinked && <div className="space-y-3 rounded-xl border p-4">
                           <p className="font-bold">{expense.payment_method}</p>
+                          {expense.procurement && <div className="grid gap-2 text-sm sm:grid-cols-2">
+                            <p>Ana tutar: {expense.procurement.amounts.netMinor == null ? '—' : <FormatAmount amount={expense.procurement.amounts.netMinor/100} originalCurrency={expense.currency === 'USD' ? 'USD' : 'TRY'} exchangeRateAtTransaction={expense.exchange_rate_at_transaction}/>}</p>
+                            <p>KDV oranı: {expense.procurement.amounts.vatRateBps == null ? '—' : `%${expense.procurement.amounts.vatRateBps/100}`}</p>
+                            <p>KDV tutarı: {expense.procurement.amounts.vatMinor == null ? '—' : <FormatAmount amount={expense.procurement.amounts.vatMinor/100} originalCurrency={expense.currency === 'USD' ? 'USD' : 'TRY'} exchangeRateAtTransaction={expense.exchange_rate_at_transaction}/>}</p>
+                            <p className="font-bold">Genel toplam: <FormatAmount amount={expense.procurement.amounts.grossMinor/100} originalCurrency={expense.currency === 'USD' ? 'USD' : 'TRY'} exchangeRateAtTransaction={expense.exchange_rate_at_transaction}/></p>
+                          </div>}
                           <p className="text-sm">Satın alma: {expense.reference_number} · {expense.currency === 'TRY' ? 'TL' : expense.currency}</p>
                           {expense.procurement?.paymentStatus === 'PAID' && <p className="text-sm text-gray-500">{expense.procurement.cashAccountName} · {expense.procurement.paidAt ? new Date(expense.procurement.paidAt).toLocaleString('tr-TR') : ''}</p>}
                           {expense.payment_method === 'Onay Bekliyor' && !isReadOnly && <>

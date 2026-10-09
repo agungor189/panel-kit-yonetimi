@@ -3,6 +3,7 @@ import type Database from 'better-sqlite3';
 import {CommandExecutor,CommandFoundationError} from '../modules/commands/commandFoundation.js';
 import {ExpenseService,ExpenseValidationError} from '../modules/finance/expenseService.js';
 import {ExchangeRateValidationError} from '../modules/finance/exchangeRates.js';
+import {ProcurementValidationError} from '../modules/procurement/procurementService.js';
 import {MoneyValidationError} from '../modules/finance/money.js';
 
 export function createProcurementExpenseRouter(db:Database.Database,authorize:RequestHandler) {
@@ -15,7 +16,7 @@ export function createProcurementExpenseRouter(db:Database.Database,authorize:Re
           body:{success:true,data:expenses.approvePayment(req.params.id,req.body)}}));
       return res.status(outcome.result.statusCode).json({...outcome.result.body as object,idempotent:outcome.replayed});
     } catch(error) {
-      if(error instanceof ExpenseValidationError||error instanceof CommandFoundationError)
+      if(error instanceof ExpenseValidationError||error instanceof CommandFoundationError||error instanceof ProcurementValidationError)
         return res.status(error.statusCode).json({success:false,error:{code:error.code,message:error.message}});
       if(error instanceof ExchangeRateValidationError||error instanceof MoneyValidationError)
         return res.status(400).json({success:false,error:{code:'EXPENSE_PAYMENT_INVALID',message:error.message}});

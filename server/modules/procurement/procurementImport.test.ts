@@ -225,12 +225,12 @@ test('three approved PCI identities fill only peer-corroborated proposal fields 
 test('draft costs are editable without tax/FX decisions and FINAL conversion uses the existing LC engine once', () => {
   const { db, importer, request, decision } = setup();
   const draft = importer.apply(request(),'tester');
-  const first = importer.addDraftCost(draft.id,{title:'Nakliye',amountMinor:1000,currency:'USD',description:'freight'},'tester','add-1');
+  const first = importer.addDraftCost(draft.id,{title:'Nakliye',amountMinor:1000,currency:'USD',vatRateBps:0,description:'freight'},'tester','add-1');
   const freight = first.draftCosts[0];
   assert.equal(first.estimatedTotalUsdMinor,21000);
-  const second = importer.addDraftCost(draft.id,{title:'Paketleme',amountMinor:4000,currency:'TRY'},'tester','add-2');
+  const second = importer.addDraftCost(draft.id,{title:'Paketleme',amountMinor:4000,currency:'TRY',vatRateBps:0},'tester','add-2');
   assert.equal(second.additionalCostsUsdMinor,1100);
-  const edited = importer.updateDraftCost(draft.id,freight.id,{title:'Nakliye',amountMinor:1500,currency:'USD',description:'updated',expectedVersion:1},'tester','edit-1');
+  const edited = importer.updateDraftCost(draft.id,freight.id,{title:'Nakliye',amountMinor:1500,currency:'USD',vatRateBps:0,description:'updated',expectedVersion:1},'tester','edit-1');
   assert.equal(edited.draftCosts.find(cost => cost.id === freight.id)?.version,2);
   assert.throws(() => importer.updateDraftCost(draft.id,freight.id,{title:'x',amountMinor:1500,currency:'USD',expectedVersion:1},'tester','stale'),/değişmiş/);
   const deleted = importer.deleteDraftCost(draft.id,second.draftCosts[1].id,1,'tester','delete-1');

@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { CatalogService, type CatalogProductInput } from '../catalog/catalogService.js';
+import { splitVat, integerMoney } from '../finance/money.js';
 import { ExchangeRateService } from '../finance/exchangeRates.js';
-import { ExpenseService } from '../finance/expenseService.js';
+import { ExpenseService, draftCostAmounts } from '../finance/expenseService.js';
 import { canonicalPayloadHash } from '../commands/commandFoundation.js';
 import { normalizeBaseQuantity, type UomCode } from '../catalog/uom.js';
 import { ProcurementService, ProcurementValidationError, type PurchaseInput, type PurchaseCostInput } from './procurementService.js';
@@ -22,7 +23,7 @@ export type ImportCostDecision = {
   expectedPreviewHash?: string; approvePreview?: boolean;
 };
 class PreviewRollback extends Error { constructor(readonly result: any) { super('Read-only preview rollback'); } }
-export type DraftCostInput = { title: string; amountMinor: number; currency: 'USD' | 'TRY'; description?: string };
+export type DraftCostInput = { title: string; amountMinor: number; currency: 'USD' | 'TRY'; description?: string; vatRateBps?: number };
 
 const draftText = (value: unknown, field: string, max: number) => {
   const result = typeof value === 'string' ? value.trim() : '';
@@ -34,7 +35,10 @@ const draftCostFields = (input: DraftCostInput) => {
   if (!Number.isSafeInteger(input?.amountMinor) || input.amountMinor <= 0) throw new ProcurementValidationError('DRAFT_COST_INVALID', 'Tutar pozitif kuruş değeri olmalı.');
   if (input.currency !== 'USD' && input.currency !== 'TRY') throw new ProcurementValidationError('DRAFT_COST_INVALID', 'Para birimi USD veya TRY olmalı.');
   const description = input.description?.trim() ? draftText(input.description, 'Açıklama', 1000) : null;
-  return { title, amountMinor: input.amountMinor, currency: input.currency, description };
+  const vatRateBps = input.vatRateBps === undefined ? 2000 : input.vatRateBps;
+  if (!Number.isInteger(vatRateBps) || vatRateBps < 0 || vatRateBps > 10000) throw new ProcurementValidationError('DRAFT_COST_INVALID','KDV oranı %0–100 arasında, en çok iki ondalık basamakla girilmeli.');
+  integerMoney(splitVat(input.amountMinor,'EXCLUDED',vatRateBps).grossMinor,'gross cost');
+  return { title, amountMinor: input.amountMinor, currency: input.currency, description, vatRateBps };
 };
 const roundRatio = (amount: number, numerator: number, denominator: number) => {
   const n = BigInt(amount) * BigInt(numerator), d = BigInt(denominator);
@@ -284,9 +288,9 @@ export class ProcurementImportService {
   }
 
   private activeDraftCosts(draftId: string) {
-    return this.db.prepare(`SELECT id,title,amount_minor,currency,description,version,created_at
+    return this.db.prepare(`SELECT *
       FROM procurement_import_draft_costs WHERE draft_id=? AND status='ACTIVE' ORDER BY created_at,id`).all(draftId) as Array<{
-        id: string; title: string; amount_minor: number; currency: 'USD' | 'TRY'; description: string | null; version: number; created_at: string;
+        id: string; title: string; amount_minor: number; currency: 'USD' | 'TRY'; description: string | null; vat_rate_bps: number | null; version: number; created_at: string;
       }>;
   }
 
@@ -301,8 +305,8 @@ export class ProcurementImportService {
       this.openDraft(draftId);
       const cost = draftCostFields(input), id = randomUUID(), now = new Date().toISOString();
       this.db.prepare(`INSERT INTO procurement_import_draft_costs
-        (id,draft_id,title,amount_minor,currency,description,status,version,created_by,created_at,updated_by,updated_at)
-        VALUES (?,?,?,?,?,?,'ACTIVE',1,?,?,?,?)`).run(id,draftId,cost.title,cost.amountMinor,cost.currency,cost.description,actorId,now,actorId,now);
+        (id,draft_id,title,amount_minor,currency,description,vat_rate_bps,status,version,created_by,created_at,updated_by,updated_at)
+        VALUES (?,?,?,?,?,?,?,'ACTIVE',1,?,?,?,?)`).run(id,draftId,cost.title,cost.amountMinor,cost.currency,cost.description,cost.vatRateBps,actorId,now,actorId,now);
       const row = this.db.prepare('SELECT * FROM procurement_import_draft_costs WHERE id=?').get(id);
       this.recordCostRevision(row,'CREATE',actorId,operationId,now);
       new ExpenseService(this.db).syncPendingCost(id);
@@ -316,9 +320,9 @@ export class ProcurementImportService {
       const cost = draftCostFields(input), now = new Date().toISOString();
       new ExpenseService(this.db).assertCostUnpaid(costId);
       if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) throw new ProcurementValidationError('DRAFT_COST_VERSION_REQUIRED', 'Güncel maliyet sürümü gerekli.', 409);
-      const changed = this.db.prepare(`UPDATE procurement_import_draft_costs SET title=?,amount_minor=?,currency=?,description=?,
+      const changed = this.db.prepare(`UPDATE procurement_import_draft_costs SET title=?,amount_minor=?,currency=?,description=?,vat_rate_bps=?,
         version=version+1,updated_by=?,updated_at=? WHERE id=? AND draft_id=? AND status='ACTIVE' AND version=?`)
-        .run(cost.title,cost.amountMinor,cost.currency,cost.description,actorId,now,costId,draftId,input.expectedVersion);
+        .run(cost.title,cost.amountMinor,cost.currency,cost.description,cost.vatRateBps,actorId,now,costId,draftId,input.expectedVersion);
       if (changed.changes !== 1) throw new ProcurementValidationError('DRAFT_COST_STALE', 'Maliyet kalemi değişmiş veya silinmiş; listeyi yenileyin.', 409);
       this.recordCostRevision(this.db.prepare('SELECT * FROM procurement_import_draft_costs WHERE id=?').get(costId),'UPDATE',actorId,operationId,now);
       new ExpenseService(this.db).syncPendingCost(costId);
@@ -354,9 +358,9 @@ export class ProcurementImportService {
     const packages = expandSourcePackages(parsed);
     const currentFx = new ExchangeRateService(this.db).getCurrentUsdTry();
     const draftCosts = this.activeDraftCosts(row.id).map(cost => ({
-      id: cost.id, title: cost.title, amountMinor: cost.amount_minor, currency: cost.currency, description: cost.description, version: cost.version,
+      id: cost.id, title: cost.title, amountMinor: cost.amount_minor, ...draftCostAmounts(cost), currency: cost.currency, description: cost.description, version: cost.version,
       expenseId: cost.id, paymentStatus: new ExpenseService(this.db).detail(cost.id)?.paymentStatus ?? null,
-      estimateUsdMinor: cost.currency === 'USD' ? cost.amount_minor : currentFx ? roundRatio(cost.amount_minor,currentFx.denominator,currentFx.numerator) : null,
+      estimateUsdMinor: cost.currency === 'USD' ? draftCostAmounts(cost).grossMinor : currentFx ? roundRatio(draftCostAmounts(cost).grossMinor,currentFx.denominator,currentFx.numerator) : null,
     }));
     const goodsAmountUsdMinor = parsed.header.currency === 'USD' ? parsed.summary.goodsAmountMinor : null;
     const additionalCostsUsdMinor = draftCosts.every(cost => cost.estimateUsdMinor !== null)
@@ -442,6 +446,8 @@ export class ProcurementImportService {
           !['SUPPLIER','THIRD_PARTY'].includes(decision.counterparty) || !['INCLUDED','EXCLUDED'].includes(decision.vatMode) ||
           !Number.isInteger(decision.vatRateBps) || decision.vatRateBps < 0 || decision.vatRateBps > 10000)
           throw new ProcurementValidationError('DRAFT_COST_DECISION_REQUIRED', 'Ek maliyetin türü, muhatabı ve vergi kararı gerekli.', 409);
+        if (cost.vat_rate_bps != null && (decision.vatMode !== 'EXCLUDED' || decision.vatRateBps !== cost.vat_rate_bps))
+          throw new ProcurementValidationError('DRAFT_COST_VAT_CONFLICT','Maliyet ana tutarı KDV hariçtir; kesinleştirmede kayıtlı KDV oranı kullanılmalı.',409);
         return { id: cost.id, category: decision.category, counterparty: decision.counterparty,
           amountMinor: cost.amount_minor, currency: cost.currency, vatMode: decision.vatMode, vatRateBps: decision.vatRateBps,
           expenseType: decision.category === 'FREIGHT' ? 'FREIGHT' : decision.category === 'CUSTOMS' ? 'CUSTOMS_DUTY' : 'OTHER',

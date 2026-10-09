@@ -228,6 +228,7 @@ type NormalizedCost = {
   source: { netMinor: number; vatMinor: number; grossMinor: number };
   baseTry: { netMinor: number; vatMinor: number; grossMinor: number };
   fx: FxSnapshot;
+  inventoryVatIncluded: boolean;
   suggestions: Array<{ lineId: string; amountTryMinor: number; roundingAdjustmentMinor: number }>;
   roundingResidualMinor: number;
   notes: string | null;
@@ -417,15 +418,16 @@ export class ProcurementService {
         const normalized = costs[index];
         const targets = Array.isArray(item.targetLineIds) ? item.targetLineIds : [];
         this.db.prepare(`INSERT INTO purchase_cost_component_details
-          (component_id,expense_type,description,occurred_on,target_scope,target_line_ids_json,created_at,counterparty)
-          VALUES (?,?,?,?,?,?,?,?)`).run(
+          (component_id,expense_type,description,occurred_on,target_scope,target_line_ids_json,created_at,counterparty,inventory_vat_included)
+          VALUES (?,?,?,?,?,?,?,?,?)`).run(
           normalized.id, item.expenseType || (item.category === "FREIGHT" ? "FREIGHT" : item.category === "CUSTOMS" ? "CUSTOMS_DUTY" : "OTHER"),
           optionalText(item.description || item.notes, "cost.description", 1000), item.occurredOn || createdAt.slice(0, 10),
-          targets.length ? "SELECTED_LINES" : "COMMON", JSON.stringify(targets), createdAt, item.counterparty,
+          targets.length ? "SELECTED_LINES" : "COMMON", JSON.stringify(targets), createdAt, item.counterparty, normalized.inventoryVatIncluded ? 1 : 0,
         );
         if (!this.db.prepare('SELECT 1 FROM procurement_import_draft_costs WHERE id=?').get(normalized.id))
           new ExpenseService(this.db).syncPendingCost(normalized.id);
       }
+      for (const cost of costs) this.recordExpensePayment(cost.id);
       const insertAttachment = this.db.prepare(`INSERT INTO purchase_attachments
         (id,purchase_order_id,kind,file_name,media_type,size_bytes,sha256,storage_reference,created_at) VALUES (?,?,?,?,?,?,?,?,?)`);
       for (const attachment of attachments) {
@@ -449,7 +451,8 @@ export class ProcurementService {
     if (!header) throw new ProcurementValidationError("PURCHASE_NOT_FOUND", "Purchase was not found.", 404);
     if (header.status !== "DRAFT") throw new ProcurementValidationError("PURCHASE_ALREADY_FINALIZED", "Purchase acquisition cost is already finalized.", 409);
     const lines = this.db.prepare("SELECT * FROM purchase_order_lines WHERE purchase_order_id=? ORDER BY line_index").all(purchaseId) as any[];
-    const components = this.db.prepare("SELECT * FROM purchase_cost_components WHERE purchase_order_id=? ORDER BY id").all(purchaseId) as any[];
+    const components = this.db.prepare(`SELECT c.*,d.inventory_vat_included FROM purchase_cost_components c
+      LEFT JOIN purchase_cost_component_details d ON d.component_id=c.id WHERE c.purchase_order_id=? ORDER BY c.id`).all(purchaseId) as any[];
     for (const line of lines) {
       if (!Number.isSafeInteger(Number(line.quantity_base_int)) || Number(line.quantity_base_int) <= 0
         || !Number.isSafeInteger(Number(line.base_uom_scale_snapshot)) || Number(line.base_uom_scale_snapshot) <= 0
@@ -475,7 +478,9 @@ export class ProcurementService {
     const allocations: Array<{ componentId: string; lineId: string | null; amountTryMinor: number; provenance: "ACCEPTED_SUGGESTION" | "MANUAL" | "UNALLOCATED" }> = [];
     for (const component of components) {
       const decision = decisions.get(component.id)!;
-      const componentInventoryBasis = header.acquisition_cost_vat_policy === "VAT_INCLUDED_IN_INVENTORY_COST"
+      const includeVat = component.inventory_vat_included == null
+        ? header.acquisition_cost_vat_policy === "VAT_INCLUDED_IN_INVENTORY_COST" : component.inventory_vat_included === 1;
+      const componentInventoryBasis = includeVat
         ? component.base_try_gross_minor
         : component.base_try_net_minor;
       if (decision.mode === "ACCEPT_SUGGESTION") {
@@ -593,7 +598,8 @@ export class ProcurementService {
             allocatedCostComponents: allocated.map((entry) => {
               const component = components.find((candidate) => candidate.id === entry.componentId)!;
               return {
-                id: component.id, category: component.category, inventoryCostAllocationTryMinor: entry.amountTryMinor,
+                id: component.id, category: component.category, inventoryVatIncluded:component.inventory_vat_included == null
+                  ? header.acquisition_cost_vat_policy === "VAT_INCLUDED_IN_INVENTORY_COST" : component.inventory_vat_included === 1, inventoryCostAllocationTryMinor: entry.amountTryMinor,
                 source: { currency: component.source_currency, amountMinor: component.source_amount_minor, netMinor: component.source_net_minor, vatMinor: component.source_vat_minor, grossMinor: component.source_gross_minor },
                 baseTry: { netMinor: component.base_try_net_minor, vatMinor: component.base_try_vat_minor, grossMinor: component.base_try_gross_minor },
                 fx: { observationId: component.fx_observation_id, numerator: component.fx_rate_numerator, denominator: component.fx_rate_denominator, source: component.fx_source, observedAt: component.fx_observed_at },
@@ -617,28 +623,67 @@ export class ProcurementService {
     return this.getPurchase(purchaseId)!;
   }
 
+  recordExpensePayment(costId: string) {
+    return this.db.transaction(() => {
+    const cost=this.db.prepare(`SELECT c.purchase_order_id,c.source_gross_minor,c.source_currency,d.counterparty
+      FROM purchase_cost_components c JOIN purchase_cost_component_details d ON d.component_id=c.id WHERE c.id=?`).get(costId) as any;
+    if (!cost || cost.counterparty !== 'SUPPLIER') return;
+    const paymentId=`expense:${costId}`;
+    const existing=this.db.prepare('SELECT amount_minor,currency,cash_account_id,reference FROM purchase_payments WHERE id=?').get(paymentId) as any;
+    const paid=this.db.prepare(`SELECT t.payment_method,ct.account_id,ct.amount,ct.currency,ct.transaction_date
+      FROM transactions t JOIN cash_transactions ct ON ct.source_type='expense' AND ct.source_id=t.id
+      WHERE t.id=? AND t.expense_type='PROCUREMENT_COST' AND ct.type='OUT' AND ct.is_deleted=0`).get(costId) as any;
+    if (!paid || paid.payment_method !== 'Ödendi') {
+      if(existing) throw new ProcurementValidationError('EXPENSE_PAYMENT_MISMATCH','Gider ödemesinin kasa kaydı doğrulanamadı.',409);
+      return;
+    }
+    if (paid.amount !== cost.source_gross_minor/100 || paid.currency !== cost.source_currency)
+      throw new ProcurementValidationError('EXPENSE_PAYMENT_MISMATCH','Ödenmiş gider ile tedarikçi brüt maliyeti uyuşmuyor; ikinci ödeme engellendi.',409);
+    if(existing) {
+      if(existing.amount_minor!==cost.source_gross_minor || existing.currency!==paid.currency || existing.cash_account_id!==paid.account_id || existing.reference!==costId)
+        throw new ProcurementValidationError('EXPENSE_PAYMENT_MISMATCH','Gider ödeme geçmişi maliyetle uyuşmuyor.',409);
+      return;
+    }
+    return this.postPayment(cost.purchase_order_id,{id:paymentId,cashAccountId:paid.account_id,
+      amountMinor:cost.source_gross_minor,currency:cost.source_currency,paidAt:paid.transaction_date,
+      reference:costId,notes:'Giderler ödeme onayı — mevcut kasa hareketi'},costId);
+    }).immediate();
+  }
+
   recordPayment(purchaseIdValue: string, input: { id?: string; cashAccountId: string; amountMinor: number; currency: string; paidAt: string; reference?: string; notes?: string }) {
-    const purchaseId = requiredText(purchaseIdValue, "purchaseId", 200);
-    const header = this.db.prepare("SELECT * FROM purchase_orders WHERE id=?").get(purchaseId) as any;
-    if (!header) throw new ProcurementValidationError("PURCHASE_NOT_FOUND", "Purchase was not found.", 404);
-    const amountMinor = integerMoney(input.amountMinor, "amountMinor", false);
-    const currency = currencyCode(input.currency);
-    if (currency !== header.supplier_currency) throw new ProcurementValidationError("PAYMENT_CURRENCY_MISMATCH", "Payment currency must match purchase supplier currency.");
-    const cashAccountId = requiredText(input.cashAccountId, "cashAccountId", 200);
-    const account = this.db.prepare("SELECT id,currency FROM cash_accounts WHERE id=? AND is_active=1").get(cashAccountId) as any;
-    if (!account) throw new ProcurementValidationError("CASH_ACCOUNT_NOT_FOUND", "Active cash account was not found.", 404);
-    if (account.currency !== currency) throw new ProcurementValidationError("PAYMENT_ACCOUNT_CURRENCY_MISMATCH", "Cash account currency must match payment currency.");
-    const payable = this.supplierPayable(header);
-    const outstanding = payable.grossMinor - header.paid_minor;
-    if (amountMinor > outstanding) throw new ProcurementValidationError("PAYMENT_EXCEEDS_OUTSTANDING", "Payment exceeds purchase outstanding balance.", 409);
-    const paidAt = requiredText(input.paidAt, "paidAt", 50);
-    if (Number.isNaN(Date.parse(paidAt))) throw new ProcurementValidationError("PROCUREMENT_VALIDATION_FAILED", "paidAt is invalid.");
-    const paymentId = input.id ? requiredText(input.id, "payment.id", 200) : randomUUID();
-    const postingId = randomUUID();
-    const cashTransactionId = `procurement-payment:${paymentId}`;
-    const nextPaid = header.paid_minor + amountMinor;
-    const paymentStatus = nextPaid === payable.grossMinor ? "PAID" : "PARTIAL";
-    this.db.transaction(() => {
+    if(input.id?.startsWith('expense:')) throw new ProcurementValidationError('PAYMENT_ID_RESERVED','Bu ödeme kimliği Giderler onayına ayrılmıştır.',409);
+    return this.postPayment(purchaseIdValue,input);
+  }
+
+  private postPayment(purchaseIdValue: string, input: { id?: string; cashAccountId: string; amountMinor: number; currency: string; paidAt: string; reference?: string; notes?: string }, existingExpenseId?: string) {
+    return this.db.transaction(() => {
+      const purchaseId = requiredText(purchaseIdValue, "purchaseId", 200);
+      const header = this.db.prepare("SELECT * FROM purchase_orders WHERE id=?").get(purchaseId) as any;
+      if (!header) throw new ProcurementValidationError("PURCHASE_NOT_FOUND", "Purchase was not found.", 404);
+      const amountMinor = integerMoney(input.amountMinor, "amountMinor", false);
+      const currency = currencyCode(input.currency);
+      if (currency !== header.supplier_currency) throw new ProcurementValidationError("PAYMENT_CURRENCY_MISMATCH", "Payment currency must match purchase supplier currency.");
+      const cashAccountId = requiredText(input.cashAccountId, "cashAccountId", 200);
+      const account = this.db.prepare("SELECT id,currency,is_active FROM cash_accounts WHERE id=?").get(cashAccountId) as any;
+      if (!account || (!existingExpenseId && account.is_active !== 1)) throw new ProcurementValidationError("CASH_ACCOUNT_NOT_FOUND", "Active cash account was not found.", 404);
+      if (account.currency !== currency) throw new ProcurementValidationError("PAYMENT_ACCOUNT_CURRENCY_MISMATCH", "Cash account currency must match payment currency.");
+      const payable = this.supplierPayable(header);
+      // Unpaid linked supplier expenses are approved in Giderler; reserve them
+      // from generic purchase payments so the same invoice charge cannot be paid twice.
+      const pending = existingExpenseId ? 0 : Number(this.db.prepare(`SELECT COALESCE(SUM(c.source_gross_minor),0)
+        FROM purchase_cost_components c JOIN purchase_cost_component_details d ON d.component_id=c.id
+        JOIN transactions t ON t.id=c.id AND t.expense_type='PROCUREMENT_COST'
+        WHERE c.purchase_order_id=? AND d.counterparty='SUPPLIER'
+          AND NOT EXISTS(SELECT 1 FROM purchase_payments pp WHERE pp.id='expense:'||c.id)`).pluck().get(purchaseId));
+      const outstanding = payable.grossMinor - header.paid_minor - pending;
+      if (amountMinor > outstanding) throw new ProcurementValidationError("PAYMENT_EXCEEDS_OUTSTANDING", "Payment exceeds purchase outstanding balance.", 409);
+      const paidAt = requiredText(input.paidAt, "paidAt", 50);
+      if (Number.isNaN(Date.parse(paidAt))) throw new ProcurementValidationError("PROCUREMENT_VALIDATION_FAILED", "paidAt is invalid.");
+      const paymentId = input.id ? requiredText(input.id, "payment.id", 200) : randomUUID();
+      const postingId = randomUUID();
+      const cashTransactionId = `procurement-payment:${paymentId}`;
+      const nextPaid = header.paid_minor + amountMinor;
+      const paymentStatus = nextPaid === payable.grossMinor ? "PAID" : "PARTIAL";
       this.db.prepare(`INSERT INTO purchase_payments
         (id,purchase_order_id,cash_account_id,amount_minor,currency,paid_at,reference,notes)
         VALUES (?,?,?,?,?,?,?,?)`).run(paymentId, purchaseId, cashAccountId, amountMinor, currency, paidAt, optionalText(input.reference, "reference", 200), optionalText(input.notes, "notes", 1000));
@@ -648,13 +693,13 @@ export class ProcurementService {
       // Existing cash reporting uses cash_transactions in major currency units.
       // This immutable row is a compatibility projection; purchase_payments and
       // procurement_cash_postings remain the exact minor-unit provenance.
-      this.db.prepare(`INSERT INTO cash_transactions
+      if (!existingExpenseId) this.db.prepare(`INSERT INTO cash_transactions
         (id,account_id,type,amount,currency,exchange_rate_at_transaction,source_type,source_id,description,transaction_date,is_deleted)
         VALUES (?,?,'OUT',?,?,NULL,'procurement_purchase_payment',?,?,?,0)`)
         .run(cashTransactionId, cashAccountId, amountMinor / 100, currency, paymentId, `Purchase payment: ${header.invoice_number || purchaseId}`, paidAt);
       this.db.prepare("UPDATE purchase_orders SET paid_minor=?,payment_status=? WHERE id=?").run(nextPaid, paymentStatus, purchaseId);
+      return { ...this.getPurchase(purchaseId)!, recordedPaymentId: paymentId };
     }).immediate();
-    return { ...this.getPurchase(purchaseId)!, recordedPaymentId: paymentId };
   }
 
   getPurchase(purchaseIdValue: string): any | null {
@@ -844,9 +889,9 @@ export class ProcurementService {
         JSON.stringify(normalized.suggestions),normalized.roundingResidualMinor,normalized.notes,createdAt,
       );
       this.db.prepare(`INSERT INTO purchase_cost_component_details
-        (component_id,expense_type,description,occurred_on,target_scope,target_line_ids_json,created_at,counterparty) VALUES (?,?,?,?,?,?,?,?)`)
+        (component_id,expense_type,description,occurred_on,target_scope,target_line_ids_json,created_at,counterparty,inventory_vat_included) VALUES (?,?,?,?,?,?,?,?,?)`)
         .run(normalized.id, expenseType, optionalText(input.description || input.notes, "description", 1000), occurredOn,
-          targetIds.length ? "SELECTED_LINES" : "COMMON", JSON.stringify(targetIds), createdAt, input.counterparty);
+          targetIds.length ? "SELECTED_LINES" : "COMMON", JSON.stringify(targetIds), createdAt, input.counterparty, normalized.inventoryVatIncluded ? 1 : 0);
       new ExpenseService(this.db).syncPendingCost(normalized.id);
       const currentHeader = this.db.prepare('SELECT * FROM purchase_orders WHERE id=?').get(purchaseId);
       this.db.prepare('UPDATE purchase_orders SET payment_status=? WHERE id=?').run(this.paymentStatus(currentHeader), purchaseId);
@@ -1279,12 +1324,16 @@ export class ProcurementService {
     const source = splitVat(sourceAmountMinor, mode, rateBps);
     const fx = this.fx.snapshotFor(currency, createdAt);
     const baseTry = convertMoney(source, fx);
-    const allocationBasis = vatPolicy === "VAT_INCLUDED_IN_INVENTORY_COST" ? baseTry.grossMinor : baseTry.netMinor;
+    // New purchase expenses capitalize their captured gross amount. Existing
+    // components retain NULL and continue to use their historical header policy.
+    const legacyDraft = input.id ? this.db.prepare('SELECT vat_rate_bps FROM procurement_import_draft_costs WHERE id=?').get(input.id) as any : null;
+    const inventoryVatIncluded = legacyDraft && legacyDraft.vat_rate_bps == null ? vatPolicy === 'VAT_INCLUDED_IN_INVENTORY_COST' : true;
+    const allocationBasis = inventoryVatIncluded ? baseTry.grossMinor : baseTry.netMinor;
     const suggestion = deterministicValueAllocation(allocationBasis, lines);
     return {
       id: input.id ? requiredText(input.id, "cost.id", 200) : randomUUID(), category: input.category,
       sourceAmountMinor, currency, vatMode: mode, vatRateBps: rateBps, source, baseTry, fx,
-      suggestions: suggestion.entries, roundingResidualMinor: suggestion.residual, notes: optionalText(input.notes, "cost.notes", 1000),
+      inventoryVatIncluded, suggestions: suggestion.entries, roundingResidualMinor: suggestion.residual, notes: optionalText(input.notes, "cost.notes", 1000),
     };
   }
 }

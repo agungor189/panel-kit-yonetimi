@@ -1,3 +1,4 @@
+import { PROCUREMENT_COST_VAT_SCHEMA_V104 } from "../db/procurementCostVatSchema.js";
 import { PRINT_REVISION_SCHEMA_V100 } from "../db/printRevisionSchema.js";
 import { PROCUREMENT_IMPORT_DRAFT_SCHEMA_V101 } from "../db/procurementImportDraftSchema.js";
 import { PROCUREMENT_DRAFT_COSTS_SCHEMA_V102 } from "../db/procurementDraftCostsSchema.js";
@@ -3130,9 +3131,10 @@ const migrations: Migration[] = [
   { version: 101, name: "add_incomplete_procurement_import_drafts", up(db) { db.exec(PROCUREMENT_IMPORT_DRAFT_SCHEMA_V101); } },
   { version: 102, name: "add_editable_import_draft_costs_and_alias_retractions", up(db) { db.exec(PROCUREMENT_DRAFT_COSTS_SCHEMA_V102); } },
   { version: 103, name: "add_import_draft_lifecycle_events", up(db) { db.exec(PROCUREMENT_DRAFT_LIFECYCLE_SCHEMA_V103); } },
+  { version: 104, name: "snapshot_purchase_cost_vat", up(db) { db.exec(PROCUREMENT_COST_VAT_SCHEMA_V104); } },
 ];
 
-export const CURRENT_SCHEMA_VERSION = 103;
+export const CURRENT_SCHEMA_VERSION = 104;
 export const SUPPORTED_UPGRADE_STARTS = [48, 53] as const;
 const FROZEN_MIGRATION_SEQUENCE = [
   ...Array.from({ length: 40 }, (_, index) => index + 1),

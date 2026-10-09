@@ -1,7 +1,8 @@
 import {randomUUID} from 'node:crypto';
 import type Database from 'better-sqlite3';
 import {ExchangeRateService} from './exchangeRates.js';
-import {multiplyAndRound} from './money.js';
+import {ProcurementService} from '../procurement/procurementService.js';
+import {multiplyAndRound, splitVat} from './money.js';
 
 // Procurement costs already have a durable UUID. Reusing it as the expense ID
 // provides the one-to-one link without another expense/payment table.
@@ -10,6 +11,10 @@ export const OPERATING_EXPENSE_FILTER = "COALESCE(expense_type,'') <> 'PROCUREME
 export class ExpenseValidationError extends Error {
   constructor(public readonly code:string,message:string,public readonly statusCode=409) {super(message);}
 }
+
+export const draftCostAmounts = (cost:any) => cost.vat_rate_bps == null
+  ? {netMinor:null,vatRateBps:null,vatMinor:null,grossMinor:cost.amount_minor}
+  : {...splitVat(cost.amount_minor,'EXCLUDED',cost.vat_rate_bps),vatRateBps:cost.vat_rate_bps};
 
 export class ExpenseService {
   constructor(private readonly db:Database.Database) {}
@@ -22,12 +27,15 @@ export class ExpenseService {
     const draft=this.db.prepare(`SELECT c.*,d.invoice_number,s.name AS supplier_name,NULL AS purchase_id,
       'CSV-'||d.invoice_number AS purchase_number FROM procurement_import_draft_costs c
       JOIN procurement_import_drafts d ON d.id=c.draft_id JOIN procurement_suppliers s ON s.id=d.supplier_id WHERE c.id=?`).get(id);
-    if(draft) return draft;
-    return this.db.prepare(`SELECT c.id,NULL AS draft_id,c.purchase_order_id AS purchase_id,
+    const component=this.db.prepare(`SELECT c.id,NULL AS draft_id,c.purchase_order_id AS purchase_id,
       COALESCE(d.description,d.expense_type) AS title,c.source_gross_minor AS amount_minor,c.source_currency AS currency,
-      c.notes AS description,'ACTIVE' AS status,1 AS version,c.created_at,p.invoice_number,p.supplier_name_snapshot AS supplier_name,w.purchase_number
+      c.source_net_minor,c.source_vat_minor,c.source_gross_minor,c.vat_rate_bps,c.notes AS description,'ACTIVE' AS status,1 AS version,c.created_at,p.invoice_number,p.supplier_name_snapshot AS supplier_name,w.purchase_number
       FROM purchase_cost_components c JOIN purchase_orders p ON p.id=c.purchase_order_id
       JOIN procurement_workflows w ON w.purchase_order_id=p.id JOIN purchase_cost_component_details d ON d.component_id=c.id WHERE c.id=?`).get(id);
+    if(draft?.vat_rate_bps != null) return {...draft,amounts:draftCostAmounts(draft)};
+    if(component) return {...component,...draft,amounts:{netMinor:component.source_net_minor,vatRateBps:component.vat_rate_bps,
+      vatMinor:component.source_vat_minor,grossMinor:component.source_gross_minor}};
+    return draft ? {...draft,amounts:draftCostAmounts(draft)} : null;
   }
 
   assertStandaloneEditable(id:string) {
@@ -61,12 +69,12 @@ export class ExpenseService {
     if(!existing && cost.status==='DELETED') return;
     const fx=new ExchangeRateService(this.db).getCurrentUsdTry();
     const rate=cost.currency==='TRY'?1:fx?fx.numerator/fx.denominator:null;
-    const amountTry=cost.currency==='TRY'?cost.amount_minor/100:fx?multiplyAndRound(cost.amount_minor,fx,'expense estimate')/100:null;
+    const amountTry=cost.currency==='TRY'?cost.amounts.grossMinor/100:fx?multiplyAndRound(cost.amounts.grossMinor,fx,'expense estimate')/100:null;
     const description=[cost.description,`Satın alma: ${cost.purchase_number}`,`Tedarikçi: ${cost.supplier_name}`].filter(Boolean).join('\n');
     if(!existing) this.db.prepare(`INSERT INTO transactions(id,date,type,expense_type,category,platform,payment_method,is_stock_related,distribute_to_product_cost)
       VALUES (?,?,'Expense',?,'Satın Alma Maliyeti','Satın Alma','Onay Bekliyor',1,1)`).run(cost.id,cost.created_at,PROCUREMENT_EXPENSE_TYPE);
     this.db.prepare(`UPDATE transactions SET title=?,note=?,amount=?,currency=?,description=?,reference_number=?,supplier=?,invoice_number=?,
-      amount_try=?,exchange_rate_at_transaction=?,is_deleted=? WHERE id=?`).run(cost.title,cost.title,cost.amount_minor/100,cost.currency,
+      amount_try=?,exchange_rate_at_transaction=?,is_deleted=? WHERE id=?`).run(cost.title,cost.title,cost.amounts.grossMinor/100,cost.currency,
       description,cost.purchase_number,cost.supplier_name,cost.invoice_number??null,amountTry,rate,cost.status==='DELETED'?1:0,cost.id);
   }
 
@@ -81,7 +89,7 @@ export class ExpenseService {
     if(!cost) return null;
     return {draftId:cost.draft_id,purchaseId:row.purchase_order_id??cost.purchase_id??null,costVersion:cost.version,
       paymentStatus:row.payment_method==='Ödendi'?'PAID':'PENDING',cashAccountId:row.cash_account_id??null,
-      cashAccountName:row.account_name??null,paidAt:row.paid_at??null};
+      cashAccountName:row.account_name??null,paidAt:row.paid_at??null,amounts:cost.amounts};
   }
 
   approvePayment(id:string,input:{cashAccountId:string;expectedCostVersion:number}) {
@@ -90,6 +98,7 @@ export class ExpenseService {
       const cost=this.cost(id);
       if(!expense || !cost || cost.status!=='ACTIVE') throw new ExpenseValidationError('EXPENSE_NOT_FOUND','Bekleyen satın alma gideri bulunamadı.',404);
       this.assertCostUnpaid(id);
+      if(cost.amounts.vatRateBps == null) throw new ExpenseValidationError('EXPENSE_VAT_REQUIRED','Ödeme onayından önce maliyetin KDV oranını tanımlayın.',400);
       if(expense.payment_method!=='Onay Bekliyor') throw new ExpenseValidationError('EXPENSE_NOT_PENDING','Gider onay beklemiyor.');
       if(!Number.isSafeInteger(input?.expectedCostVersion) || input.expectedCostVersion!==cost.version)
         throw new ExpenseValidationError('EXPENSE_STALE','Maliyet değişmiş; gideri yenileyin.');
@@ -101,13 +110,14 @@ export class ExpenseService {
       if(!account) throw new ExpenseValidationError('EXPENSE_ACCOUNT_REQUIRED','Aktif kasa/banka hesabı seçin.',400);
       if(account.currency!==cost.currency) throw new ExpenseValidationError('EXPENSE_ACCOUNT_CURRENCY_MISMATCH','Hesap para birimi giderle aynı olmalı.',400);
       const now=new Date().toISOString(),fx=new ExchangeRateService(this.db).snapshotFor(cost.currency,now);
-      const cashTransactionId=this.insertCashTransaction({...expense,amount:cost.amount_minor/100,currency:cost.currency,
+      const cashTransactionId=this.insertCashTransaction({...expense,amount:cost.amounts.grossMinor/100,currency:cost.currency,
         cash_account_id:account.id,payer_person_id:null,date:now,exchange_rate_at_transaction:fx.numerator/fx.denominator});
-      const changed=this.db.prepare(`UPDATE transactions SET payment_method='Ödendi',cash_account_id=?,amount_try=?,exchange_rate_at_transaction=?
-        WHERE id=? AND payment_method='Onay Bekliyor' AND COALESCE(is_deleted,0)=0`).run(account.id,
-          multiplyAndRound(cost.amount_minor,fx,'expense payment')/100,fx.numerator/fx.denominator,id);
+      const changed=this.db.prepare(`UPDATE transactions SET payment_method='Ödendi',cash_account_id=?,amount=?,amount_try=?,exchange_rate_at_transaction=?
+        WHERE id=? AND payment_method='Onay Bekliyor' AND COALESCE(is_deleted,0)=0`).run(account.id,cost.amounts.grossMinor/100,
+          multiplyAndRound(cost.amounts.grossMinor,fx,'expense payment')/100,fx.numerator/fx.denominator,id);
       if(changed.changes!==1) throw new ExpenseValidationError('EXPENSE_STALE','Giderin durumu değişmiş; gideri yenileyin.');
-      return {expenseId:id,cashTransactionId,cashAccountId:account.id,amountMinor:cost.amount_minor,currency:cost.currency,
+      new ProcurementService(this.db).recordExpensePayment(id);
+      return {expenseId:id,cashTransactionId,cashAccountId:account.id,amountMinor:cost.amounts.grossMinor,currency:cost.currency,
         paidAt:now,fx,documentIds:documents.map(document=>document.id),paymentStatus:'PAID'};
     }).immediate();
   }
