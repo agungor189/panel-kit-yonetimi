@@ -28,6 +28,9 @@ test('VAT purchase cost UI defaults to an editable percent input and separates n
 test('draft cost entry has no technical finalization form, calculate button or separate price table',()=>{
   const html=renderToStaticMarkup(createElement(DraftCostsPanel,{onChanged:()=>{},draft:{id:'draft',draftCosts:[]}}));
   assert.match(html,/Maliyet Ekle/);
-  for (const field of ['Kesinleştirme','FINAL Kontrollerini Aç','Fatura vergisi','Vergi oranı','Stok maliyeti vergi politikası','Fiyata dahil içerik','Önceki stok kontrolü kanıtı','FINAL LC Önizlemesini Hesapla','Salt Okunur FINAL LC Önizlemesi','<table'])
+  assert.match(html,/Landed Cost Önizle/);
+  assert.match(html,/aria-label="USD olarak gir"/);
+  assert.match(html,/aria-label="TRY olarak gir"/);
+  for (const field of ['Kime ödenecek','Maliyet muhatabı','Tedarikçi','Üçüncü taraf','Kesinleştirme','FINAL Kontrollerini Aç','Fatura vergisi','Vergi oranı','Stok maliyeti vergi politikası','Fiyata dahil içerik','Önceki stok kontrolü kanıtı','FINAL LC Önizlemesini Hesapla','Salt Okunur FINAL LC Önizlemesi','<table'])
     assert.doesNotMatch(html,new RegExp(field));
 });

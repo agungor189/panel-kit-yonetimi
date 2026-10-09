@@ -39,7 +39,8 @@ const draftCostFields = (input: DraftCostInput, savedCounterparty?: string|null)
   if (!Number.isInteger(vatRateBps) || vatRateBps < 0 || vatRateBps > 10000) throw new ProcurementValidationError('DRAFT_COST_INVALID','KDV oranı %0–100 arasında, en çok iki ondalık basamakla girilmeli.');
   integerMoney(splitVat(input.amountMinor,'INCLUDED',vatRateBps).grossMinor,'gross cost');
   const counterparty = input.counterparty ?? savedCounterparty;
-  if (counterparty !== 'SUPPLIER' && counterparty !== 'THIRD_PARTY') throw new ProcurementValidationError('DRAFT_COST_COUNTERPARTY_REQUIRED','Maliyetin tedarikçiye mi üçüncü tarafa mı ödeneceğini seçin.');
+  if (counterparty != null && counterparty !== 'SUPPLIER' && counterparty !== 'THIRD_PARTY')
+    throw new ProcurementValidationError('DRAFT_COST_COUNTERPARTY_INVALID','Maliyet muhatabı geçersiz.');
   return { title, amountMinor: input.amountMinor, currency: input.currency, description, vatRateBps, counterparty };
 };
 const roundRatio = (amount: number, numerator: number, denominator: number) => {
@@ -311,7 +312,7 @@ export class ProcurementImportService {
         VALUES (?,?,?,?,?,?,?,?,'INCLUDED','ACTIVE',1,?,?,?,?)`).run(id,draftId,cost.title,cost.amountMinor,cost.currency,cost.description,cost.vatRateBps,cost.counterparty,actorId,now,actorId,now);
       const row = this.db.prepare('SELECT * FROM procurement_import_draft_costs WHERE id=?').get(id);
       this.recordCostRevision(row,'CREATE',actorId,operationId,now);
-      new ExpenseService(this.db).syncPendingCost(id);
+      if (cost.counterparty) new ExpenseService(this.db).syncPendingCost(id);
       return this.getDraft(draftId)!;
     }).immediate();
   }
@@ -328,7 +329,7 @@ export class ProcurementImportService {
         .run(cost.title,cost.amountMinor,cost.currency,cost.description,cost.vatRateBps,cost.counterparty,actorId,now,costId,draftId,input.expectedVersion);
       if (changed.changes !== 1) throw new ProcurementValidationError('DRAFT_COST_STALE', 'Maliyet kalemi değişmiş veya silinmiş; listeyi yenileyin.', 409);
       this.recordCostRevision(this.db.prepare('SELECT * FROM procurement_import_draft_costs WHERE id=?').get(costId),'UPDATE',actorId,operationId,now);
-      new ExpenseService(this.db).syncPendingCost(costId);
+      if (cost.counterparty) new ExpenseService(this.db).syncPendingCost(costId);
       return this.getDraft(draftId)!;
     }).immediate();
   }

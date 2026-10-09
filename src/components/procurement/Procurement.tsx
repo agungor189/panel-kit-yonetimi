@@ -59,7 +59,7 @@ export default function Procurement() {
   const [purchases, setPurchases] = useState<PurchaseSummary[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [selected, setSelected] = useState<Purchase | null>(null);
-  const [draftApprovalError,setDraftApprovalError] = useState('');
+  const [showDraftPricing,setShowDraftPricing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [supplierForm, setSupplierForm] = useState({ name: '', defaultCurrency: 'USD', taxIdentifier: '' });
   const [order, setOrder] = useState<{ purchaseNumber: string; orderDate: string; supplierId: string; notes: string; lines: DraftLine[] }>({ purchaseNumber: '', orderDate: new Date().toISOString().slice(0, 10), supplierId: '', notes: '',
@@ -82,7 +82,7 @@ export default function Procurement() {
   };
 
   const loadPurchase = async (id: string) => {
-    setSelectedId(id); setDraftApprovalError('');
+    setSelectedId(id); setShowDraftPricing(false);
     setCostPreview(null);
     if (!id) return setSelected(null);
     const data = await api.get(`/procurement/v1/purchases/${id}`);
@@ -105,16 +105,6 @@ export default function Procurement() {
     } finally { setBusy(false); }
   };
 
-  const approveDraft = async () => {
-    if (!selected?.draftPricing || busy) return;
-    try {
-      setBusy(true); setDraftApprovalError('');
-      const response = await api.post(`/procurement/v1/imports/drafts/${selected.id}/finalize`,
-        { expectedProjectionHash:selected.draftPricing.projectionHash,approvePreview:true },op('draft-finalize'));
-      setSelected(response.data); setSelectedId(response.data.id); await load();
-    } catch (cause:any) { setDraftApprovalError(cause.message || 'Taslak onaylanamadı.'); }
-    finally { setBusy(false); }
-  };
   const cancelDraft = async () => {
     if (!selected?.costDecisionPending || !window.confirm('Bu satın alma taslağı iptal edilsin mi? Ürün kartları ve işlem geçmişi korunur.')) return;
     try {
@@ -238,15 +228,13 @@ export default function Procurement() {
     {tab === 'costs' && <div className="space-y-6"><PurchasePicker purchases={purchases} selectedId={selectedId} onSelect={loadPurchase}/>{selected && <>
       <Card padding="lg" className="space-y-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="font-black">{selected.purchaseNumber}</h3><p className="text-sm text-text-muted">{selected.supplier.name}</p></div><Badge>{stateLabels[selected.workflowState]}</Badge></div>
         <div className="flex flex-wrap gap-2">{selected.costDecisionPending && <Button variant="secondary" disabled={busy} onClick={cancelDraft}>Taslağı Sil</Button>}{!selected.costDecisionPending && selected.workflowState === 'DRAFT' && <Button variant="secondary" onClick={() => transition('ORDERED')}>Sipariş Verildi</Button>}{selected.workflowState === 'ORDERED' && <Button variant="secondary" onClick={() => transition('IN_TRANSIT')}>Yolda</Button>}{!selected.costDecisionPending && ['DRAFT','ORDERED','IN_TRANSIT'].includes(selected.workflowState) && <Button variant="secondary" onClick={() => transition('COST_PENDING')}>Maliyet Bekliyor</Button>}</div>
-        <PurchaseProductTree lines={selected.lines} lots={selected.lots} pricing={selected.draftPricing}/>
+        <PurchaseProductTree lines={selected.lines} lots={selected.lots} isDraft={selected.costDecisionPending} pricing={showDraftPricing ? selected.draftPricing : undefined}/>
       </Card>
       {selected.costDecisionPending && selected.draftCosts && <>
         <DraftCostsPanel key={selected.id} draft={{ id:selected.id,draftCosts:selected.draftCosts }}
-          onChanged={(data) => { setSelected(data); void load(); }}/>
-        <div className="space-y-2 text-sm"><p>Tahmini fiyatlar giderlerin KDV dahil toplamını alış bedeli oranında dağıtır. Tahmini fiyatlar stok, ödeme veya kesin maliyet oluşturmaz. Mal kabul ve ödeme kendi onay akışlarında gerçekleşir.</p>
-          <Button disabled={busy || !selected.draftPricing} onClick={approveDraft}>Landed Cost'u Kesinleştir</Button>
-          {draftApprovalError && <p role="alert" className="text-danger">{draftApprovalError}</p>}
-        </div>
+          onChanged={(data) => { setShowDraftPricing(false); setSelected(data); void load(); }}
+          onPreview={() => setShowDraftPricing(true)}/>
+        <p className="text-sm">Tahmini fiyatlar giderlerin KDV dahil toplamını alış bedeli oranında dağıtır. Bu görünüm yalnız önizlemedir; stok, ödeme veya FINAL maliyet oluşturmaz.</p>
       </>}
 
       {Boolean(selected.sourcePacking?.length) && <Card padding="lg"><details><summary className="cursor-pointer font-bold">Kaynak koliler ve içerikleri</summary>{selected.sourcePacking!.filter(r => r.record_type === 'PACKAGE_GROUP').map(g => <div className="border-b py-2 text-xs" key={g.record_id}><strong>{g.record_id} · {g.package_count} koli {g.meta?.mixed ? '· Karışık kaynak koli' : ''}</strong><p>Grup net {g.net_weight_kg || '—'} kg · brüt {g.gross_weight_kg || '—'} kg</p>{selected.sourcePacking!.filter(r => r.parent_ref === g.record_id).map(i => <p key={i.record_id}>{i.sku || i.product_ref} · {i.quantity} toplam · {i.units_per_package}/koli · alış kaynağı {i.purchase_line_ref}</p>)}</div>)}</details></Card>}

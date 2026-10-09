@@ -530,7 +530,6 @@ test('automatic draft LC retains native prices without FX and never invents mixe
 test('draft projection cannot substitute for explicit FINAL approval or bypass recorded receipt evidence',()=>{
   const {db,importer,request,decision,procurement}=setup();
   const draft=importer.apply(request(),'tester');
-  assert.throws(()=>importer.addDraftCost(draft.id,{title:'No counterparty',amountMinor:120000,currency:'TRY'},'tester','missing'),(e:any)=>e.code==='DRAFT_COST_COUNTERPARTY_REQUIRED');
   const add=importer.addDraftCost(draft.id,{title:'Nakliye',amountMinor:3000,currency:'USD',counterparty:'SUPPLIER'},'tester','supplier');
   assert.equal(add.draftCosts[0].counterparty,'SUPPLIER');
   assert.throws(()=>importer.finalizeDraft(draft.id,{expectedProjectionHash:add.draftPricing.projectionHash,approvePreview:true} as any,'tester'),(e:any)=>e.code==='DRAFT_FINAL_APPROVAL_REQUIRED');
@@ -549,5 +548,18 @@ test('draft projection cannot substitute for explicit FINAL approval or bypass r
   procurement.approveForReceipt(final.id,'tester');
   const receipt=new InventoryService(db).receiveCostedLot({receiptId:'test-receipt',costSnapshotId:final.lots[0].id,receivedAt:'2026-01-03T00:00:00Z',operationId:'receipt-fixture',location:{id:'test-location',kind:'RESERVE'}},{validatedWarehousePlan:true});
   assert.throws(()=>importer.finalizeDraft(draft.id,{...policy,approvePreview:true,expectedPreviewHash:preview.previewHash},'tester'),(e:any)=>e.code==='DRAFT_ALREADY_RECEIVED' && e.message.includes(receipt.lot.id));
+  db.close();
+});
+
+test('counterparty-free draft costs remain preview-only and do not create a finance expense',()=>{
+  const {db,importer,request}=setup();
+  const draft=importer.apply(request(),'tester');
+  const result=importer.addDraftCost(draft.id,{title:'Navlun tahmini',amountMinor:120000,currency:'TRY'},'tester','preview-only');
+  const cost=result.draftCosts[0];
+  assert.equal(cost.counterparty,null);
+  assert.equal(cost.paymentStatus,null);
+  assert.equal(result.draftPricing.totals.additionalMinor,120000);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM transactions WHERE id=?').pluck().get(cost.id),0);
+  assert.equal(db.prepare('SELECT COUNT(*) FROM cash_transactions').pluck().get(),0);
   db.close();
 });

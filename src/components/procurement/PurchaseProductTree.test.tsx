@@ -51,8 +51,19 @@ test('purchase and estimated LC share one source row; summaries show three disti
   assert.match(html,/200,00/);assert.match(html,/9.200,00/);assert.match(html,/Dağıtılan ek gider/);
   assert.match(html,/4 paket/);assert.match(html,/3×30 \+ 1×10/);
   const summary=renderToStaticMarkup(createElement(PurchaseProductTree,{lines:[source],lots:[],pricing}));
-  for(const label of ['Toplam Alış Bedeli','Toplam Ek Gider','Tahmini Toplam Landed Cost']) assert.ok(summary.includes(label));
+  for(const label of ['Toplam Alış Bedeli','Tahmini Toplam Landed Cost']) assert.ok(summary.includes(label));
+  assert.match(summary,/Alış.*200,00.*Landed.*9\.200,00/);
   assert.doesNotMatch(summary,/FINAL LC Önizlemesi|Kesinleştirme/);
+});
+
+test('draft rows show only purchase pricing until the in-place landed cost preview is requested',async()=>{
+  const {createElement}=await import('react');const {renderToStaticMarkup}=await import('react-dom/server');
+  const {PurchaseProductTree}=await import('./PurchaseProductTree.js');
+  const source=line('one','A','Cast Iron','Kare','25x25 mm',20000);
+  const html=renderToStaticMarkup(createElement(PurchaseProductTree,{lines:[source],lots:[],isDraft:true}));
+  assert.match(html,/Alış/);
+  assert.doesNotMatch(html,/LAND(?:ED|ING) COST/);
+  assert.doesNotMatch(html,/FINAL LANDED COST/);
 });
 
 test('a missing FX snapshot preserves purchase USD and displays pending LC instead of a fabricated zero',async()=>{
